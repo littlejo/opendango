@@ -130,7 +130,8 @@ The Vates SDK (`xenorchestra-go-sdk`) was evaluated and not used: opendango need
 
 ## Conventions
 
-- Run `gofmt`/`goimports` and `go vet` before every commit.
+- Run `mise run lint` and `mise run test` before every commit; the CI (`.github/workflows/ci.yml`) runs the same checks plus `-race`. Keep the Go version identical in `mise.toml` and the CI.
+- `mise run test:integration` reads `.env` (git-ignored, template in `.env.example`). The integration test cannot run on GitHub-hosted runners (no access to XO): it skips there.
 - Write table-driven tests. The parser and the planner are tested without any infrastructure (Dangofiles live in `testdata/`).
 - Tests that need a real XO instance use the `integration` build tag and read `XOA_ENDPOINT`, `XOA_TOKEN`, `XOA_INSECURE`, `OPENDANGO_TEST_TEMPLATE`, `OPENDANGO_TEST_USER` (optional: `OPENDANGO_TEST_POOL`, `OPENDANGO_TEST_NETWORK`, `OPENDANGO_TEST_SR`). Run them with `go test -tags integration -timeout 60m ./builders/xo/`.
 - Executor unit tests (`internal/build`) use a recording builder and either a scripted communicator or the local `/bin/sh` in a sandbox where `sudo`, `shutdown` and `reboot` are stubs. Never let a unit test run a real `shutdown`, `reboot` or write outside its temporary directories.

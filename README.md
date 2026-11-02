@@ -85,12 +85,21 @@ the roadmap.
 
 ## Development
 
+With [mise](https://mise.jdx.dev) (installs the pinned Go version):
+
 ```sh
-go test ./...
-# against a real Xen Orchestra:
-OPENDANGO_TEST_TEMPLATE=debian-12-cloud OPENDANGO_TEST_USER=debian \
-  go test -tags integration -timeout 60m ./builders/xo/
+mise run test               # unit tests
+mise run lint               # gofmt + go vet
+mise run validate-examples  # opendango validate on examples/*/Dangofile
+mise run build              # dist/opendango
+cp .env.example .env        # then fill it
+mise run test:integration   # end-to-end build against a real Xen Orchestra
 ```
+
+The CI (`.github/workflows/ci.yml`) runs the formatting check, `go vet`, the
+unit tests (also with `-race`), the examples validation and the build. The
+end-to-end test needs a Xen Orchestra reachable from the runner, so it skips
+on GitHub-hosted runners.
 
 ## License
 
