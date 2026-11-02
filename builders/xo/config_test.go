@@ -78,3 +78,42 @@ func TestIPv4(t *testing.T) {
 		}
 	}
 }
+
+func TestMatch(t *testing.T) {
+	objs := []object{
+		{ID: "t1", UUID: "t1", NameLabel: "Debian 12", Pool: "p1"},
+		{ID: "t1", UUID: "t1", NameLabel: "Debian 12", Pool: "p2"},
+		{ID: "t2", UUID: "t2", NameLabel: "Debian 13", Pool: "p1"},
+		{ID: "p1-t3", UUID: "t3", NameLabel: "Other", Pool: "p1"},
+		{ID: "t4", UUID: "t4", NameLabel: "Dup", Pool: "p1"},
+		{ID: "t5", UUID: "t5", NameLabel: "Dup", Pool: "p1"},
+		{ID: "t6", UUID: "t6", NameLabel: "t2", Pool: "p1"},
+	}
+	tests := []struct {
+		ref, pool, wantID, wantPool, err string
+	}{
+		{"Debian 13", "", "t2", "p1", ""},
+		{"t3", "", "p1-t3", "p1", ""},
+		{"p1-t3", "", "p1-t3", "p1", ""},
+		{"t1", "p2", "t1", "p2", ""},
+		{"Debian 12", "p2", "t1", "p2", ""},
+		{"t2", "", "t2", "p1", ""}, // an id wins over a name
+		{"t1", "", "", "", "exists in 2 pools, set --pool"},
+		{"Debian 12", "", "", "", "exists in 2 pools"},
+		{"Dup", "", "", "", "2 templates match"},
+		{"Debian 13", "p2", "", "", `no template "Debian 13" in pool p2`},
+		{"nope", "", "", "", `no template "nope"`},
+	}
+	for _, tt := range tests {
+		got, err := match(objs, "template", tt.ref, tt.pool)
+		if tt.err != "" {
+			if err == nil || !strings.Contains(err.Error(), tt.err) {
+				t.Errorf("%q in %q: got %v, want %q", tt.ref, tt.pool, err, tt.err)
+			}
+			continue
+		}
+		if err != nil || got.ID != tt.wantID || got.Pool != tt.wantPool {
+			t.Errorf("%q in %q: got %+v, %v", tt.ref, tt.pool, got, err)
+		}
+	}
+}

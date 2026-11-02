@@ -42,20 +42,21 @@ func (b *Builder) ID() string {
 // Start resolves the template, pool, SR and network, then creates and boots
 // the VM with the cloud-config.
 func (b *Builder) Start(ctx context.Context, cloudConfig string) error {
-	tmpl, err := b.find(ctx, "vm-templates", "template", b.cfg.Template, "")
-	if err != nil {
-		return err
-	}
-	poolID := tmpl.Pool
+	poolID := ""
 	if b.cfg.Pool != "" {
 		pool, err := b.find(ctx, "pools", "pool", b.cfg.Pool, "")
 		if err != nil {
 			return err
 		}
-		if pool.ID != tmpl.Pool {
-			return fmt.Errorf("xo: template %q is not in pool %q", b.cfg.Template, b.cfg.Pool)
-		}
+		poolID = pool.ID
 	}
+	// The same template UUID can exist in several pools (XO Hub
+	// templates): restrict to --pool when set.
+	tmpl, err := b.find(ctx, "vm-templates", "template", b.cfg.Template, poolID)
+	if err != nil {
+		return err
+	}
+	poolID = tmpl.Pool
 
 	body := map[string]any{
 		"name_label":       b.name,
@@ -263,30 +264,48 @@ func (b *Builder) Destroy(ctx context.Context) error {
 }
 
 // find returns the object of collection whose UUID, id or name is ref,
-// restricted to poolID when set. A name must be unique.
+// restricted to poolID when set.
 func (b *Builder) find(ctx context.Context, collection, kind, ref, poolID string) (*object, error) {
 	objs, err := b.client.list(ctx, collection)
 	if err != nil {
 		return nil, err
 	}
-	var byName []object
+	return match(objs, kind, ref, poolID)
+}
+
+// match picks the single object matching ref (UUID, id, or name when no
+// UUID or id matches) in poolID (any pool when empty).
+func match(objs []object, kind, ref, poolID string) (*object, error) {
+	var byID, byName []object
 	for _, o := range objs {
-		if poolID != "" && o.Pool != poolID && collection != "pools" {
+		if poolID != "" && o.Pool != poolID {
 			continue
 		}
-		if o.UUID == ref || o.ID == ref {
-			return &o, nil
-		}
-		if o.NameLabel == ref {
+		switch {
+		case o.UUID == ref || o.ID == ref:
+			byID = append(byID, o)
+		case o.NameLabel == ref:
 			byName = append(byName, o)
 		}
 	}
-	switch len(byName) {
-	case 0:
-		return nil, fmt.Errorf("xo: no %s named %q", kind, ref)
-	case 1:
-		return &byName[0], nil
-	default:
-		return nil, fmt.Errorf("xo: %d %ss are named %q, use the UUID", len(byName), kind, ref)
+	found := byID
+	if len(found) == 0 {
+		found = byName
 	}
+	switch {
+	case len(found) == 1:
+		return &found[0], nil
+	case len(found) == 0 && poolID != "":
+		return nil, fmt.Errorf("xo: no %s %q in pool %s", kind, ref, poolID)
+	case len(found) == 0:
+		return nil, fmt.Errorf("xo: no %s %q", kind, ref)
+	}
+	pools := map[string]bool{}
+	for _, o := range found {
+		pools[o.Pool] = true
+	}
+	if len(pools) > 1 {
+		return nil, fmt.Errorf("xo: %s %q exists in %d pools, set --pool", kind, ref, len(pools))
+	}
+	return nil, fmt.Errorf("xo: %d %ss match %q, use the UUID", len(found), kind, ref)
 }
