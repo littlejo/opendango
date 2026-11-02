@@ -1,0 +1,22 @@
+# Builds a Debian template with nginx on Xen Orchestra.
+#
+#   export XOA_ENDPOINT=https://xo.example.org XOA_TOKEN=...
+#   opendango build -f examples/debian-nginx/Dangofile
+#
+# The template must have cloud-init and the guest tools (XO needs them to
+# report the VM IP address).
+ARG TEMPLATE=debian-12-cloud
+
+FROM --cpus=2 --memory=2G --disk=10G xo://${TEMPLATE} AS nginx
+CONNECT ssh --user=debian
+
+USER root
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get -y upgrade
+RUN apt-get install -y nginx && systemctl enable nginx
+COPY --chmod=0644 site/ /var/www/html/
+REBOOT
+RUN systemctl is-active nginx
+RUN cloud-init clean && truncate -s0 /etc/machine-id
+
+OUTPUT --as=template "debian-nginx"

@@ -1,0 +1,3 @@
+FROM xo://t
+CONNECT ssh --user=u
+EXPOSE 80
