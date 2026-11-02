@@ -1,0 +1,63 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          # Same version as mise.toml.
+          go-version: '1.27.3'
+          cache: true
+
+      - name: Check formatting
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "Not gofmt-ed:" >&2
+            echo "$unformatted" >&2
+            exit 1
+          fi
+
+      - name: Vet
+        run: |
+          go vet ./...
+          go vet -tags integration ./...
+
+      - name: Test
+        run: go test ./...
+
+      # ubuntu-latest ships the C toolchain -race requires.
+      - name: Test (race)
+        run: go test -race -count=1 ./...
+
+      # The end-to-end build needs a real Xen Orchestra reachable from the
+      # runner, which GitHub-hosted runners are not: without the XOA_* and
+      # OPENDANGO_TEST_* variables the test skips. This step still checks
+      # that the integration code compiles and skips cleanly.
+      - name: Test (integration, skipped when not configured)
+        run: go test -tags integration -count=1 ./...
+
+      - name: Validate the examples
+        run: |
+          for f in examples/*/Dangofile; do
+            go run ./cmd/opendango validate -f "$f"
+          done
+
+      - name: Build
+        run: go build -o dist/opendango ./cmd/opendango

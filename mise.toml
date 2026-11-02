@@ -1,0 +1,42 @@
+[tools]
+# Same version as the CI (.github/workflows/ci.yml).
+go = "1.27.3"
+
+[tasks.build]
+description = "Build the opendango binary into dist/"
+run = "go build -o dist/opendango ./cmd/opendango"
+
+[tasks.test]
+description = "Run the unit test suite"
+run = "go test ./..."
+
+[tasks.lint]
+description = "Check formatting and run go vet (with and without the integration tag)"
+run = """
+test -z "$(gofmt -l .)" && echo "gofmt: OK" &&
+go vet ./... &&
+go vet -tags integration ./...
+"""
+
+[tasks."test:integration"]
+description = "Run the end-to-end build against a real Xen Orchestra (reads .env, see .env.example)"
+run = """
+set -e
+if [ ! -f .env ]; then
+  echo "missing .env: copy .env.example and fill it" >&2
+  exit 1
+fi
+set -a
+. ./.env
+set +a
+go test -tags integration -count=1 -timeout 60m -v -run EndToEnd ./builders/xo/
+"""
+
+[tasks.validate-examples]
+description = "Validate every Dangofile under examples/"
+run = """
+set -e
+for f in examples/*/Dangofile; do
+  go run ./cmd/opendango validate -f "$f"
+done
+"""
