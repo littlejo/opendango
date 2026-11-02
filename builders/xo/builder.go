@@ -211,9 +211,30 @@ func (b *Builder) Output(ctx context.Context, out *instructions.Output) error {
 				return err
 			}
 		}
-		return b.client.convertToTemplate(ctx, b.vmID)
+		if err := b.client.convertToTemplate(ctx, b.vmID); err != nil {
+			return err
+		}
+		return b.waitTemplate(ctx)
 	default:
 		return fmt.Errorf("xo: unsupported output %q", out.Kind)
+	}
+}
+
+// waitTemplate waits until XO lists the converted VM as a template:
+// vm.convertToTemplate returns before XO's object cache is updated.
+func (b *Builder) waitTemplate(ctx context.Context) error {
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	defer cancel()
+	for {
+		err := b.client.do(ctx, http.MethodGet, "/vm-templates/"+b.vmID, nil, nil)
+		if err == nil {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("xo: VM %s converted but not listed as a template yet: %w", b.vmID, err)
+		case <-time.After(b.pollInterval):
+		}
 	}
 }
 
