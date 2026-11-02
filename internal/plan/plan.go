@@ -13,22 +13,87 @@ import (
 	"github.com/littlejo/opendango/internal/parser"
 )
 
-// Plan is a validated Dangofile. The MVP supports a single stage.
+// Plan is a validated Dangofile.
 type Plan struct {
-	File     string
-	Stage    *Stage
+	File string
+	// Stages are in file order: a stage always comes after its parent.
+	Stages   []*Stage
 	Warnings []string
 }
 
-// Stage is everything between a FROM and the end of the file.
+// Stage is everything between a FROM and the next FROM (or the end of the
+// file).
 type Stage struct {
 	From *instructions.From
-	// Connect is nil when no instruction needs a connection.
+	// Index is the position of the stage in the file, from 0.
+	Index int
+	// Parent is the stage this one starts from (FROM <stage>); nil for
+	// FROM <builder>://<source>.
+	Parent *Stage
+	// Children are the stages that start from this one.
+	Children []*Stage
+	// Connect is the stage's CONNECT, or the one inherited from its parent;
+	// nil when no instruction needs a connection.
 	Connect *instructions.Connect
 	// Steps run in order: *Arg, *Env, *User, *Workdir, *Run, *Copy, *Reboot.
 	Steps []instructions.Instruction
 	// Outputs run after all steps, once the VM is stopped.
 	Outputs []*instructions.Output
+
+	// ownConnect is true when the stage sets CONNECT itself.
+	ownConnect bool
+	// env holds the ENV values at the end of the stage, inherited by the
+	// stages that start from it (ARG values are not, like in Docker).
+	env map[string]string
+}
+
+// Name is the stage name (AS <name>), or stage-<index> when unnamed.
+func (s *Stage) Name() string {
+	if s.From.Name != "" {
+		return s.From.Name
+	}
+	return fmt.Sprintf("stage-%d", s.Index)
+}
+
+// Root returns the first ancestor, the one that starts from a builder.
+func (s *Stage) Root() *Stage {
+	for s.Parent != nil {
+		s = s.Parent
+	}
+	return s
+}
+
+// TemplateOutput returns the stage's OUTPUT --as=template, or nil.
+func (s *Stage) TemplateOutput() *instructions.Output {
+	for _, out := range s.Outputs {
+		if out.Kind == instructions.OutputTemplate {
+			return out
+		}
+	}
+	return nil
+}
+
+// Select returns the stages to build, in order: every stage, or the target
+// and its ancestors.
+func (p *Plan) Select(target string) ([]*Stage, error) {
+	if target == "" {
+		return p.Stages, nil
+	}
+	var names []string
+	for _, s := range p.Stages {
+		if s.From.Name != target {
+			if s.From.Name != "" {
+				names = append(names, s.From.Name)
+			}
+			continue
+		}
+		var chain []*Stage
+		for a := s; a != nil; a = a.Parent {
+			chain = append([]*Stage{a}, chain...)
+		}
+		return chain, nil
+	}
+	return nil, fmt.Errorf("no stage named %q (stages: %v)", target, names)
 }
 
 // Error is a validation error located in the Dangofile.
@@ -61,6 +126,7 @@ func Build(file string, res *parser.Result, buildArgs map[string]string) (*Plan,
 	}
 
 	var stage *Stage
+	byName := map[string]*Stage{}
 	for _, cmd := range res.Commands {
 		line := cmd.StartLine
 		switch {
@@ -92,29 +158,50 @@ func Build(file string, res *parser.Result, buildArgs map[string]string) (*Plan,
 			}
 
 		case "FROM":
-			if stage != nil {
-				return fail(line, fmt.Errorf("multiple stages are not supported yet"))
-			}
+			// FROM lines only see the global ARGs.
+			scope = global
 			from, err := instructions.ParseFrom(cmd, expand)
 			if err != nil {
 				return fail(line, err)
 			}
-			if err := checkBuilder(from); err != nil {
+			if prev, dup := byName[from.Name]; dup && from.Name != "" {
+				return fail(line, fmt.Errorf("stage %q already defined at line %d", from.Name, prev.From.Line()))
+			}
+			stage = &Stage{From: from, Index: len(p.Stages), env: map[string]string{}}
+			if from.Stage != "" {
+				parent, ok := byName[from.Stage]
+				if !ok {
+					return fail(line, fmt.Errorf("FROM %s: no earlier stage named %q", from.Stage, from.Stage))
+				}
+				stage.Parent = parent
+				parent.Children = append(parent.Children, stage)
+				// Inherited from the parent, like in Docker (plus CONNECT).
+				stage.Connect = parent.Connect
+				for k, v := range parent.env {
+					stage.env[k] = v
+				}
+			}
+			if err := checkBuilder(stage); err != nil {
 				return fail(line, err)
 			}
-			stage = &Stage{From: from}
-			p.Stage = stage
+			if from.Name != "" {
+				byName[from.Name] = stage
+			}
+			p.Stages = append(p.Stages, stage)
 			scope = map[string]string{}
+			for k, v := range stage.env {
+				scope[k] = v
+			}
 
 		case "CONNECT":
-			if stage.Connect != nil {
+			if stage.ownConnect {
 				return fail(line, fmt.Errorf("CONNECT already set at line %d", stage.Connect.Line()))
 			}
 			c, err := instructions.ParseConnect(cmd, expand)
 			if err != nil {
 				return fail(line, err)
 			}
-			stage.Connect = c
+			stage.Connect, stage.ownConnect = c, true
 
 		case "ENV":
 			env, err := instructions.ParseEnv(cmd, expand)
@@ -126,6 +213,7 @@ func Build(file string, res *parser.Result, buildArgs map[string]string) (*Plan,
 			}
 			for _, kv := range env.Vars {
 				scope[kv.Key] = kv.Value
+				stage.env[kv.Key] = kv.Value
 			}
 			stage.Steps = append(stage.Steps, env)
 
@@ -182,8 +270,10 @@ func Build(file string, res *parser.Result, buildArgs map[string]string) (*Plan,
 	if stage == nil {
 		return nil, &Error{File: file, Line: 1, Err: fmt.Errorf("no FROM instruction")}
 	}
-	if len(stage.Outputs) == 0 {
-		p.Warnings = append(p.Warnings, "no OUTPUT: the VM will be destroyed at the end of the build")
+	for _, s := range p.Stages {
+		if len(s.Outputs) == 0 && len(s.Children) == 0 {
+			p.Warnings = append(p.Warnings, fmt.Sprintf("stage %s has no OUTPUT and no stage starts from it: its VM will be destroyed at the end of the build", s.Name()))
+		}
 	}
 	var unused []string
 	for name := range buildArgs {
@@ -214,13 +304,21 @@ func resolveArg(a *instructions.Arg, buildArgs, global map[string]string, isGlob
 	}
 }
 
-func checkBuilder(from *instructions.From) error {
-	switch from.Builder {
+// checkBuilder validates the FROM flags with the builder of the stage's
+// root, without contacting the infrastructure.
+func checkBuilder(s *Stage) error {
+	root := s.Root().From
+	switch root.Builder {
 	case "xo":
-		_, err := xo.ParseConfig(from.Source, from.Flags)
+		var err error
+		if s.Parent == nil {
+			_, err = xo.ParseConfig(s.From.Source, s.From.Flags)
+		} else {
+			_, err = xo.ParseStageConfig(s.From.Flags)
+		}
 		return err
 	default:
-		return fmt.Errorf("unknown builder %q (supported: xo)", from.Builder)
+		return fmt.Errorf("unknown builder %q (supported: xo)", root.Builder)
 	}
 }
 

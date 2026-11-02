@@ -120,7 +120,8 @@ func cmdValidate(args []string, stdout, stderr io.Writer) int {
 
 func cmdBuild(args []string, stdout, stderr io.Writer) int {
 	fs, c := newFlagSet("build", stderr)
-	onError := fs.String("on-error", "abort", "on failure: abort (destroy the VM) or keep (leave it for debugging)")
+	onError := fs.String("on-error", "abort", "on failure: abort (destroy the VM and the intermediate templates) or keep (leave them for debugging)")
+	target := fs.String("target", "", "build only this stage and the stages it starts from")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -145,6 +146,7 @@ func cmdBuild(args []string, stdout, stderr io.Writer) int {
 	defer stop()
 	err = build.Run(ctx, p, build.Options{
 		ContextDir:  filepath.Dir(c.file),
+		Target:      *target,
 		KeepOnError: *onError == "keep",
 		Out:         stdout,
 	})

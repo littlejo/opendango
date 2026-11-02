@@ -8,6 +8,7 @@ package xo
 import (
 	"fmt"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 )
@@ -31,14 +32,39 @@ type Config struct {
 // contacting Xen Orchestra.
 func ParseConfig(source string, flags map[string]string) (Config, error) {
 	cfg := Config{Template: source}
+	if t, ok := flags["template"]; ok {
+		if source != "" {
+			return cfg, fmt.Errorf("xo: set the template either in the source or with --template, not both")
+		}
+		cfg.Template = t
+	}
+	if err := cfg.setFlags(flags, "template", "pool"); err != nil {
+		return cfg, err
+	}
+	if cfg.Template == "" {
+		return cfg, fmt.Errorf("xo: missing template, use xo://<template> or --template=<template>")
+	}
+	return cfg, nil
+}
+
+// ParseStageConfig builds the Config of a stage that starts from an earlier
+// stage (FROM <stage>): the template and the pool come from that stage.
+func ParseStageConfig(flags map[string]string) (Config, error) {
+	for _, name := range []string{"template", "pool"} {
+		if _, ok := flags[name]; ok {
+			return Config{}, fmt.Errorf("xo: --%s cannot be set when starting from another stage", name)
+		}
+	}
+	var cfg Config
+	return cfg, cfg.setFlags(flags)
+}
+
+// setFlags sets the hardware and placement flags; the names in handled are
+// already taken care of by the caller.
+func (cfg *Config) setFlags(flags map[string]string, handled ...string) error {
 	for name, value := range flags {
 		var err error
 		switch name {
-		case "template":
-			if source != "" {
-				return cfg, fmt.Errorf("xo: set the template either in the source or with --template, not both")
-			}
-			cfg.Template = value
 		case "pool":
 			cfg.Pool = value
 		case "sr":
@@ -48,24 +74,23 @@ func ParseConfig(source string, flags map[string]string) (Config, error) {
 		case "cpus":
 			cfg.CPUs, err = strconv.Atoi(value)
 			if err != nil || cfg.CPUs < 1 {
-				return cfg, fmt.Errorf("xo: invalid --cpus %q", value)
+				return fmt.Errorf("xo: invalid --cpus %q", value)
 			}
 		case "memory":
 			if cfg.Memory, err = ParseSize(value); err != nil {
-				return cfg, fmt.Errorf("xo: invalid --memory: %w", err)
+				return fmt.Errorf("xo: invalid --memory: %w", err)
 			}
 		case "disk":
 			if cfg.Disk, err = ParseSize(value); err != nil {
-				return cfg, fmt.Errorf("xo: invalid --disk: %w", err)
+				return fmt.Errorf("xo: invalid --disk: %w", err)
 			}
 		default:
-			return cfg, fmt.Errorf("xo: unknown flag --%s (expected template, pool, sr, network, cpus, memory or disk)", name)
+			if !slices.Contains(handled, name) {
+				return fmt.Errorf("xo: unknown flag --%s (expected template, pool, sr, network, cpus, memory or disk)", name)
+			}
 		}
 	}
-	if cfg.Template == "" {
-		return cfg, fmt.Errorf("xo: missing template, use xo://<template> or --template=<template>")
-	}
-	return cfg, nil
+	return nil
 }
 
 var sizeRe = regexp.MustCompile(`^([0-9]+)\s*([KMGT]?)(IB|B)?$`)
