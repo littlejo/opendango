@@ -125,7 +125,8 @@ func (b *Builder) getVM(ctx context.Context) (*vm, error) {
 	return &v, err
 }
 
-// Address waits until the guest tools report an IPv4 address.
+// Address waits until the guest tools report an IPv4 address. Without
+// DHCP on the VM network, XO only reports an IPv6 link-local address.
 func (b *Builder) Address(ctx context.Context) (string, error) {
 	for {
 		v, err := b.getVM(ctx)
@@ -137,7 +138,7 @@ func (b *Builder) Address(ctx context.Context) (string, error) {
 		}
 		select {
 		case <-ctx.Done():
-			return "", fmt.Errorf("xo: no IP address reported for VM %s (are the guest tools installed in the template?)", b.vmID)
+			return "", fmt.Errorf("xo: no IPv4 address reported for VM %s: the template needs the guest tools, and the VM network needs DHCP (set --network)", b.vmID)
 		case <-time.After(b.pollInterval):
 		}
 	}
