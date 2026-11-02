@@ -5,9 +5,19 @@ on:
     branches:
       - main
   pull_request:
+  # Called by release.yml, so a release is only built from a commit that
+  # passed the same gates.
+  workflow_call:
+    inputs:
+      ref:
+        description: Git ref to check out and test (defaults to the triggering commit)
+        required: false
+        type: string
+        default: ''
 
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
+  # inputs.ref keeps a release-triggered run out of the push/PR group.
+  group: ci-${{ github.workflow }}-${{ github.ref }}-${{ inputs.ref }}
   cancel-in-progress: true
 
 permissions:
@@ -18,6 +28,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref || github.sha }}
 
       - uses: actions/setup-go@v7
         with:
@@ -61,3 +73,10 @@ jobs:
 
       - name: Build
         run: go build -o dist/opendango ./cmd/opendango
+
+      # Catches a broken .goreleaser.yaml before a tag is pushed.
+      - name: Check the GoReleaser configuration
+        uses: goreleaser/goreleaser-action@v7
+        with:
+          version: '~> v2'
+          args: check
