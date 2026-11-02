@@ -1,0 +1,274 @@
+package instructions
+
+import (
+	"reflect"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/moby/buildkit/frontend/dockerfile/shell"
+
+	"github.com/littlejo/opendango/internal/parser"
+)
+
+// parse parses a one-instruction Dangofile.
+func parse(t *testing.T, src string) *parser.Command {
+	t.Helper()
+	res, err := parser.Parse(strings.NewReader(src))
+	if err != nil {
+		t.Fatalf("%q: %v", src, err)
+	}
+	if len(res.Commands) != 1 {
+		t.Fatalf("%q: got %d commands", src, len(res.Commands))
+	}
+	return res.Commands[0]
+}
+
+// expander expands with V=val and removes quotes, like the plan does.
+func expander() Expander {
+	lex := shell.NewLex('\\')
+	env := shell.EnvsFromSlice([]string{"V=val"})
+	return func(w string) (string, error) {
+		res, err := lex.ProcessWordWithMatches(w, env)
+		return res.Result, err
+	}
+}
+
+// checkErr fails unless err contains want (want == "" means no error).
+func checkErr(t *testing.T, src string, err error, want string) bool {
+	t.Helper()
+	switch {
+	case want == "" && err != nil:
+		t.Errorf("%q: unexpected error: %v", src, err)
+	case want != "" && err == nil:
+		t.Errorf("%q: expected error %q", src, want)
+	case want != "" && !strings.Contains(err.Error(), want):
+		t.Errorf("%q: error %q does not contain %q", src, err, want)
+	default:
+		return want == ""
+	}
+	return false
+}
+
+func TestParseArg(t *testing.T) {
+	tests := []struct {
+		src  string
+		want []*Arg
+		err  string
+	}{
+		{"ARG A", []*Arg{{Pos: Pos{1}, Name: "A"}}, ""},
+		{"ARG A=1 B=${V}", []*Arg{{Pos: Pos{1}, Name: "A", Default: "1", HasDefault: true}, {Pos: Pos{1}, Name: "B", Default: "val", HasDefault: true}}, ""},
+		{`ARG A="x y"`, []*Arg{{Pos: Pos{1}, Name: "A", Default: "x y", HasDefault: true}}, ""},
+		{"ARG A=", []*Arg{{Pos: Pos{1}, Name: "A", HasDefault: true}}, ""},
+		{"ARG 1A", nil, "invalid variable name"},
+		{"ARG --x A", nil, "unknown flag"},
+	}
+	for _, tt := range tests {
+		got, err := ParseArg(parse(t, tt.src), expander())
+		if checkErr(t, tt.src, err, tt.err) && !reflect.DeepEqual(got, tt.want) {
+			t.Errorf("%q: got %+v, want %+v", tt.src, got, tt.want)
+		}
+	}
+}
+
+func TestParseFrom(t *testing.T) {
+	tests := []struct {
+		src  string
+		want *From
+		err  string
+	}{
+		{"FROM xo://debian-12", &From{Pos: Pos{1}, Builder: "xo", Source: "debian-12", Flags: map[string]string{}}, ""},
+		{"FROM xo://debian-${V} AS golden", &From{Pos: Pos{1}, Builder: "xo", Source: "debian-val", Name: "golden", Flags: map[string]string{}}, ""},
+		{"FROM --cpus=2 --sr=${V} xo://t as g", &From{Pos: Pos{1}, Builder: "xo", Source: "t", Name: "g", Flags: map[string]string{"cpus": "2", "sr": "val"}}, ""},
+		{`FROM --template="Debian 12" xo://`, &From{Pos: Pos{1}, Builder: "xo", Flags: map[string]string{"template": "Debian 12"}}, ""},
+		{"FROM golden", nil, "starting from another stage is not supported yet"},
+		{"FROM ://x", nil, "missing builder name"},
+		{"FROM xo://a b", nil, "exactly one source"},
+		{"FROM xo://a AS 1x", nil, "invalid stage name"},
+		{"FROM --cpus xo://a", nil, "requires a value"},
+		{"FROM --cpus=1 --cpus=2 xo://a", nil, "set twice"},
+	}
+	for _, tt := range tests {
+		got, err := ParseFrom(parse(t, tt.src), expander())
+		if checkErr(t, tt.src, err, tt.err) && !reflect.DeepEqual(got, tt.want) {
+			t.Errorf("%q: got %+v, want %+v", tt.src, got, tt.want)
+		}
+	}
+}
+
+func TestParseConnect(t *testing.T) {
+	tests := []struct {
+		src  string
+		want *Connect
+		err  string
+	}{
+		{"CONNECT ssh --user=debian", &Connect{Pos: Pos{1}, Protocol: "ssh", User: "debian", Port: 22, Timeout: 10 * time.Minute}, ""},
+		{"CONNECT --user=${V} --port=2222 --timeout=30s ssh", &Connect{Pos: Pos{1}, Protocol: "ssh", User: "val", Port: 2222, Timeout: 30 * time.Second}, ""},
+		{"CONNECT ssh", nil, "requires --user"},
+		{"CONNECT --user=a", nil, "exactly one protocol"},
+		{"CONNECT winrm --user=a", nil, "not supported yet"},
+		{"CONNECT telnet --user=a", nil, "unknown protocol"},
+		{"CONNECT ssh --user=a --port=0", nil, "invalid --port"},
+		{"CONNECT ssh --user=a --timeout=soon", nil, "invalid --timeout"},
+		{"CONNECT ssh --user=a --password=x", nil, "unknown flag --password"},
+	}
+	for _, tt := range tests {
+		got, err := ParseConnect(parse(t, tt.src), expander())
+		if checkErr(t, tt.src, err, tt.err) && !reflect.DeepEqual(got, tt.want) {
+			t.Errorf("%q: got %+v, want %+v", tt.src, got, tt.want)
+		}
+	}
+}
+
+func TestParseEnv(t *testing.T) {
+	tests := []struct {
+		src  string
+		want *Env
+		err  string
+	}{
+		{"ENV A=1", &Env{Pos: Pos{1}, Vars: []KeyValue{{"A", "1"}}}, ""},
+		{`ENV A=1 B="x y" C=${V}`, &Env{Pos: Pos{1}, Vars: []KeyValue{{"A", "1"}, {"B", "x y"}, {"C", "val"}}}, ""},
+		{"ENV A some value", &Env{Pos: Pos{1}, Vars: []KeyValue{{"A", "some value"}}}, ""},
+		{"ENV --persist A=1", &Env{Pos: Pos{1}, Vars: []KeyValue{{"A", "1"}}, Persist: true}, ""},
+		{`ENV --persist A="a\"b"`, nil, "cannot contain a double quote"},
+		{"ENV --persist=yes A=1", nil, "takes no value"},
+		{"ENV 1A=1", nil, "invalid variable name"},
+	}
+	for _, tt := range tests {
+		got, err := ParseEnv(parse(t, tt.src), expander())
+		if checkErr(t, tt.src, err, tt.err) && !reflect.DeepEqual(got, tt.want) {
+			t.Errorf("%q: got %+v, want %+v", tt.src, got, tt.want)
+		}
+	}
+}
+
+func TestParseUser(t *testing.T) {
+	tests := []struct {
+		src  string
+		want *User
+		err  string
+	}{
+		{"USER root", &User{Pos: Pos{1}, Name: "root"}, ""},
+		{"USER ${V}", &User{Pos: Pos{1}, Name: "val"}, ""},
+		{"USER a:b", nil, "groups are not supported"},
+		{"USER a b", nil, "invalid user name"},
+		{"USER ${UNSET}", nil, "empty argument"},
+	}
+	for _, tt := range tests {
+		got, err := ParseUser(parse(t, tt.src), expander())
+		if checkErr(t, tt.src, err, tt.err) && !reflect.DeepEqual(got, tt.want) {
+			t.Errorf("%q: got %+v, want %+v", tt.src, got, tt.want)
+		}
+	}
+}
+
+func TestParseWorkdir(t *testing.T) {
+	tests := []struct {
+		src  string
+		want *Workdir
+		err  string
+	}{
+		{"WORKDIR /opt/${V}", &Workdir{Pos: Pos{1}, Path: "/opt/val"}, ""},
+		{"WORKDIR rel", &Workdir{Pos: Pos{1}, Path: "rel"}, ""},
+		{"WORKDIR /a b", &Workdir{Pos: Pos{1}, Path: "/a b"}, ""},
+		{"WORKDIR --x /a", nil, "unknown flag"},
+	}
+	for _, tt := range tests {
+		got, err := ParseWorkdir(parse(t, tt.src), expander())
+		if checkErr(t, tt.src, err, tt.err) && !reflect.DeepEqual(got, tt.want) {
+			t.Errorf("%q: got %+v, want %+v", tt.src, got, tt.want)
+		}
+	}
+}
+
+func TestParseRun(t *testing.T) {
+	tests := []struct {
+		src  string
+		want string
+		err  string
+	}{
+		{"RUN echo $HOME", "echo $HOME", ""},
+		{`RUN ["echo", "it's"]`, `exec 'echo' 'it'\''s'`, ""},
+		{"RUN <<EOF\necho a\necho b\nEOF", "echo a\necho b\n", ""},
+		{"RUN cat > /f <<EOF\nx\nEOF", "cat > /f <<EOF\nx\nEOF\n", ""},
+		{"RUN --mount=type=cache echo", "", "unknown flag"},
+	}
+	for _, tt := range tests {
+		got, err := ParseRun(parse(t, tt.src))
+		if checkErr(t, tt.src, err, tt.err) && got.Script != tt.want {
+			t.Errorf("%q: got script %q, want %q", tt.src, got.Script, tt.want)
+		}
+	}
+}
+
+func TestParseCopy(t *testing.T) {
+	tests := []struct {
+		src  string
+		want *Copy
+		err  string
+	}{
+		{"COPY a /b", &Copy{Pos: Pos{1}, Sources: []string{"a"}, Dest: "/b"}, ""},
+		{"COPY --chmod=0600 --chown=www:www a ${V}/ /etc/", &Copy{Pos: Pos{1}, Sources: []string{"a", "val/"}, Dest: "/etc/", Chmod: "0600", Chown: "www:www"}, ""},
+		{"COPY a", nil, "at least one source"},
+		{"COPY --chmod=rw a b", nil, "invalid --chmod"},
+		{"COPY --chown= a b", nil, "invalid --chown"},
+		{"COPY --from=x a b", nil, "unknown flag --from"},
+		{`COPY ["a", "b"]`, nil, "JSON form"},
+	}
+	for _, tt := range tests {
+		got, err := ParseCopy(parse(t, tt.src), expander())
+		if checkErr(t, tt.src, err, tt.err) && !reflect.DeepEqual(got, tt.want) {
+			t.Errorf("%q: got %+v, want %+v", tt.src, got, tt.want)
+		}
+	}
+}
+
+func TestParseReboot(t *testing.T) {
+	tests := []struct {
+		src string
+		err string
+	}{
+		{"REBOOT", ""},
+		{"REBOOT now", "takes no argument"},
+		{"REBOOT --timeout=1m", "unknown flag"},
+	}
+	for _, tt := range tests {
+		got, err := ParseReboot(parse(t, tt.src))
+		if checkErr(t, tt.src, err, tt.err) && got.Line() != 1 {
+			t.Errorf("%q: line %d", tt.src, got.Line())
+		}
+	}
+}
+
+func TestParseOutput(t *testing.T) {
+	tests := []struct {
+		src  string
+		want *Output
+		err  string
+	}{
+		{"OUTPUT --as=template", &Output{Pos: Pos{1}, Kind: OutputTemplate}, ""},
+		{`OUTPUT --as=template "golden ${V}"`, &Output{Pos: Pos{1}, Kind: OutputTemplate, Name: "golden val"}, ""},
+		{"OUTPUT --format=xva ./dist/${V}.xva", &Output{Pos: Pos{1}, Kind: OutputXVA, Path: "./dist/val.xva"}, ""},
+		{"OUTPUT ./x.xva --format=xva --compress=zstd", &Output{Pos: Pos{1}, Kind: OutputXVA, Path: "./x.xva", Compress: "zstd"}, ""},
+		{"OUTPUT x", nil, "exactly one of"},
+		{"OUTPUT --as=template --format=xva x", nil, "exactly one of"},
+		{"OUTPUT --as=image", nil, "unknown --as"},
+		{"OUTPUT --as=template --compress=zstd", nil, "does not accept --compress"},
+		{"OUTPUT --as=template a b", nil, "at most one name"},
+		{"OUTPUT --format=qcow2 x", nil, "unknown --format"},
+		{"OUTPUT --format=xva", nil, "exactly one destination"},
+		{"OUTPUT --format=xva --compress=xz x", nil, "unknown --compress"},
+	}
+	for _, tt := range tests {
+		got, err := ParseOutput(parse(t, tt.src), expander())
+		if checkErr(t, tt.src, err, tt.err) && !reflect.DeepEqual(got, tt.want) {
+			t.Errorf("%q: got %+v, want %+v", tt.src, got, tt.want)
+		}
+	}
+}
+
+func TestShellQuote(t *testing.T) {
+	if got := ShellQuote("it's"); got != `'it'\''s'` {
+		t.Errorf("got %s", got)
+	}
+}
