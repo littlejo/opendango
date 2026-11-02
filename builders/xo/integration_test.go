@@ -10,7 +10,8 @@ package xo_test
 //   XOA_ENDPOINT, XOA_TOKEN (and XOA_INSECURE=true for a self-signed cert)
 //   OPENDANGO_TEST_TEMPLATE  a cloud-init template with the guest tools
 //   OPENDANGO_TEST_USER      the template's default cloud-init user (with sudo)
-// Optional: OPENDANGO_TEST_NETWORK, OPENDANGO_TEST_SR.
+// Optional: OPENDANGO_TEST_POOL (required when the template exists in
+// several pools), OPENDANGO_TEST_NETWORK, OPENDANGO_TEST_SR.
 //
 //   go test -tags integration -timeout 60m ./builders/xo/
 
@@ -50,6 +51,9 @@ func TestBuildEndToEnd(t *testing.T) {
 		t.Fatal(err)
 	}
 	flags := "--cpus=1 --memory=1G"
+	if pool := os.Getenv("OPENDANGO_TEST_POOL"); pool != "" {
+		flags += fmt.Sprintf(" --pool=%q", pool)
+	}
 	if n := os.Getenv("OPENDANGO_TEST_NETWORK"); n != "" {
 		flags += fmt.Sprintf(" --network=%q", n)
 	}

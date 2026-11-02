@@ -84,7 +84,7 @@ The Vates SDK (`xenorchestra-go-sdk`) was evaluated and not used: opendango need
 
 - It goes through the XO REST API with a thin client (`builders/xo/client.go`). The route reference is served at `/rest/v0/docs` on each instance; the source is `@xen-orchestra/rest-api` in `vatesfr/xen-orchestra`.
 - The REST API cannot convert a VM to a template: that single call goes through JSON-RPC (`session.signIn` then `vm.convertToTemplate` on the `/api/` WebSocket, `builders/xo/jsonrpc.go`). Switch to REST when XO adds the endpoint.
-- Templates live in the `vm-templates` collection. A default template's id is `<pool>-<uuid>`; `create_vm` takes the bare UUID. Names, ids and UUIDs are all accepted; an ambiguous name is an error.
+- Templates live in the `vm-templates` collection. A default template's id is `<pool>-<uuid>`; `create_vm` takes the bare UUID. Names, ids and UUIDs are all accepted. The same template UUID can exist in several pools (XO Hub templates): `--pool` restricts the lookup, and a template found in several pools without `--pool` is an error.
 - Requirements on the template: cloud-init (for the SSH key) and the guest tools (XO only reports the IP address through them).
 - Flow:
   1. `POST /pools/{id}/actions/create_vm?sync=true` with the template, CPU, memory, disk, network, cloud-config, `boot: true` and `destroy_cloud_config_vdi: true` (the cloud-config holds the SSH key);
@@ -132,6 +132,6 @@ The Vates SDK (`xenorchestra-go-sdk`) was evaluated and not used: opendango need
 
 - Run `gofmt`/`goimports` and `go vet` before every commit.
 - Write table-driven tests. The parser and the planner are tested without any infrastructure (Dangofiles live in `testdata/`).
-- Tests that need a real XO instance use the `integration` build tag and read `XOA_ENDPOINT`, `XOA_TOKEN`, `XOA_INSECURE`, `OPENDANGO_TEST_TEMPLATE`, `OPENDANGO_TEST_USER` (optional: `OPENDANGO_TEST_NETWORK`, `OPENDANGO_TEST_SR`). Run them with `go test -tags integration -timeout 60m ./builders/xo/`.
+- Tests that need a real XO instance use the `integration` build tag and read `XOA_ENDPOINT`, `XOA_TOKEN`, `XOA_INSECURE`, `OPENDANGO_TEST_TEMPLATE`, `OPENDANGO_TEST_USER` (optional: `OPENDANGO_TEST_POOL`, `OPENDANGO_TEST_NETWORK`, `OPENDANGO_TEST_SR`). Run them with `go test -tags integration -timeout 60m ./builders/xo/`.
 - Executor unit tests (`internal/build`) use a recording builder and either a scripted communicator or the local `/bin/sh` in a sandbox where `sudo`, `shutdown` and `reboot` are stubs. Never let a unit test run a real `shutdown`, `reboot` or write outside its temporary directories.
 - Validation errors point to the file and line: `Dangofile:12: ...`.
