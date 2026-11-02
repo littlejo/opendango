@@ -1,0 +1,20 @@
+# A golden Debian image, then an nginx image built on top of it.
+#
+#   opendango build -f examples/multi-stage/Dangofile
+#   opendango build -f examples/multi-stage/Dangofile --target golden
+#
+# The template needs cloud-init and the guest tools; the network needs DHCP.
+ARG TEMPLATE="Debian 13 Cloud-init (Hub)"
+
+FROM --memory=2G --template=${TEMPLATE} xo:// AS golden
+CONNECT ssh --user=debian
+USER root
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get -y upgrade
+OUTPUT --as=template golden-debian-13
+
+# Inherits CONNECT, USER root and DEBIAN_FRONTEND from golden.
+FROM --cpus=2 golden AS nginx
+RUN apt-get install -y nginx && systemctl enable nginx
+RUN cloud-init clean && truncate -s0 /etc/machine-id
+OUTPUT --as=template debian-nginx

@@ -23,7 +23,8 @@
 | Instruction | Status | Semantics |
 |---|---|---|
 | `ARG` | MVP | Build variable, overridden with `--build-arg K=V`. Docker scoping: an ARG before the first `FROM` is only visible in `FROM` lines unless the stage declares it again (`ARG NAME`). |
-| `FROM` | MVP | `FROM [--flags] <builder>://<source> [AS name]`. Flags configure the builder (xo: `--template`, `--pool`, `--sr`, `--network`, `--cpus`, `--memory`, `--disk`). One stage only; `FROM <stage>` (multi-stage) is planned. |
+| `FROM` | MVP | `FROM [--flags] <builder>://<source> [AS name]`. Flags configure the builder (xo: `--template`, `--pool`, `--sr`, `--network`, `--cpus`, `--memory`, `--disk`). |
+| `FROM <stage>` | done | Multi-stage: starts from the image of an earlier stage (see *Multi-stage builds*). xo flags: `--cpus`, `--memory`, `--disk`, `--sr`, `--network` (not `--template` nor `--pool`). |
 | `CONNECT` | MVP (ssh) | `CONNECT ssh --user=<user> [--port=22] [--timeout=10m]`. **Required** before any instruction that needs the VM (`RUN`, `COPY`, `WORKDIR`, `REBOOT`, `ENV --persist`). An ephemeral ed25519 key is injected for `<user>` via cloud-init and removed from `authorized_keys` before shutdown. `winrm` is planned. |
 | `RUN` | MVP | Shell, exec (JSON) and heredoc forms, run with `/bin/sh -c`. Not expanded at build time: the remote shell expands it, with the ARG and ENV values exported. `--shell=powershell` is planned. |
 | `COPY` | MVP | `COPY [--chmod=MODE] [--chown=U[:G]] <src>... <dest>`. Sources are relative to the Dangofile directory and must stay inside it (globs allowed). A directory source copies its contents. The destination is a directory when it ends with `/` or when there are several sources. Files are owned by the current `USER` unless `--chown` is set. |
@@ -39,6 +40,15 @@
 | `BREAKPOINT` | planned | Pauses the build and prints the SSH command to connect to the VM. |
 | `SHELL` | planned | Changes the shell used by `RUN`. |
 
+### Multi-stage builds
+
+- `FROM <stage>` refers to an earlier stage by its `AS` name (no forward reference, names are unique).
+- A stage inherits from its parent: `CONNECT` (it may set its own), `USER`, `WORKDIR` and `ENV`. `ARG` is not inherited, and `FROM` lines only see the global ARGs, like in Docker. Each stage gets its own ephemeral key: cloud-init sees a new instance because XO sets `instance-id` to the VM UUID.
+- `opendango build` builds **every** stage, in file order; `--target X` builds X and its ancestors only.
+- A stage that a selected stage starts from always ends as a template: its `OUTPUT --as=template`, or a temporary `opendango-tmp-<stage>-<unix time>` template deleted at the end of the build (children first). A stage nobody starts from and without `OUTPUT` triggers a warning: its VM is destroyed.
+- On failure the build stops: finished `OUTPUT`s (templates, XVA) of the previous stages are kept; the failing VM and the intermediate templates are deleted, unless `--on-error=keep`.
+- Stages run sequentially; parallel builds (`-j`) are planned.
+
 Planned instructions fail with `<X> is not supported yet`. `EXPOSE`, `HEALTHCHECK`, `VOLUME`, `CMD`, `ENTRYPOINT`, `ONBUILD` and `STOPSIGNAL` fail with `<X> has no meaning for a VM image`. Both are reported by `validate`.
 
 ## CLI
@@ -46,12 +56,12 @@ Planned instructions fail with `<X> is not supported yet`. `EXPOSE`, `HEALTHCHEC
 Implemented (standard library `flag` package; move to cobra only if the CLI grows):
 
 ```
-opendango build    [-f Dangofile] [--build-arg K=V]... [--on-error=abort|keep]
+opendango build    [-f Dangofile] [--build-arg K=V]... [--target X] [--on-error=abort|keep]
 opendango validate [-f Dangofile] [--build-arg K=V]...
 opendango version
 ```
 
-Planned: `build --target X`, `--on-error=ask`, `-j N`, `opendango fmt`, `opendango plugins list|install`.
+Planned: `--on-error=ask`, `-j N`, `opendango fmt`, `opendango plugins list|install`.
 
 ## Architecture
 
@@ -93,6 +103,8 @@ The Vates SDK (`xenorchestra-go-sdk`) was evaluated and not used: opendango need
   4. remove the ephemeral key, `shutdown -h now` from the guest, wait for `Halted`, then `clean_shutdown`, then `hard_shutdown`;
   5. export the XVA (`GET /vms/{id}.xva?compress=`) and/or rename (`PATCH`) and convert to a template;
   6. clean up: `DELETE /vms/{id}` unless the VM became the template. Cleanup happens **even on failure or Ctrl+C**, unless `--on-error=keep` is set.
+- `vm.convertToTemplate` returns before XO's object cache lists the template: the builder waits for `GET /vm-templates/{id}` before reporting the output done.
+- `FROM <stage>` creates the VM from the parent's template (its UUID, in the root's pool). Once converted, `Destroy` deletes the template (`DELETE /vm-templates/{id}`), which is how intermediate templates are removed.
 
 ### Packer plugin compatibility
 
@@ -109,7 +121,7 @@ The Vates SDK (`xenorchestra-go-sdk`) was evaluated and not used: opendango need
 ## Roadmap
 
 1. **MVP**: parser, `validate`, `xo://` builder, SSH, `ARG`, `ENV`, `USER`, `WORKDIR`, `RUN`, `COPY`, `REBOOT`, `OUTPUT --as=template` and XVA.
-2. Multi-stage, `--target`, parallel builds, `--on-error=ask`, `BREAKPOINT`, `fmt`.
+2. ~~Multi-stage, `--target`~~ (done), parallel builds, `--on-error=ask`, `BREAKPOINT`, `fmt`.
 3. `packer://` compatibility, tested first with `vatesfr/packer-plugin-xenserver`.
 4. Native `BOOT` and `SERVE`, then more builders (QEMU, Proxmox, AWS, vSphere).
 5. Per-instruction caching based on snapshots.
@@ -131,6 +143,7 @@ The Vates SDK (`xenorchestra-go-sdk`) was evaluated and not used: opendango need
 ## Conventions
 
 - Run `mise run lint` and `mise run test` before every commit; the CI (`.github/workflows/ci.yml`) runs the same checks plus `-race`. Keep the Go version identical in `mise.toml` and the CI.
+- Releases: push a `vX.Y.Z` tag; `.github/workflows/release.yml` runs the CI workflow on the tag, then GoReleaser (`.goreleaser.yaml`), which creates a **draft** GitHub release to review. `mise run release:snapshot` builds the archives locally. The version is injected with `-X main.version`.
 - `mise run test:integration` reads `.env` (git-ignored, template in `.env.example`). The integration test cannot run on GitHub-hosted runners (no access to XO): it skips there.
 - Write table-driven tests. The parser and the planner are tested without any infrastructure (Dangofiles live in `testdata/`).
 - Tests that need a real XO instance use the `integration` build tag and read `XOA_ENDPOINT`, `XOA_TOKEN`, `XOA_INSECURE`, `OPENDANGO_TEST_TEMPLATE`, `OPENDANGO_TEST_USER` (optional: `OPENDANGO_TEST_POOL`, `OPENDANGO_TEST_NETWORK`, `OPENDANGO_TEST_SR`). Run them with `go test -tags integration -timeout 60m ./builders/xo/`.
