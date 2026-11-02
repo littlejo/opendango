@@ -16,7 +16,6 @@ package xo_test
 //   go test -tags integration -timeout 60m ./builders/xo/
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"os"
@@ -50,7 +49,8 @@ func TestBuildEndToEnd(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(ctxDir, "hello.txt"), []byte("hello from opendango\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	flags := "--cpus=1 --memory=1G"
+	// 2G: the minimum static memory of the XO Hub cloud-init templates.
+	flags := "--cpus=1 --memory=2G"
 	if pool := os.Getenv("OPENDANGO_TEST_POOL"); pool != "" {
 		flags += fmt.Sprintf(" --pool=%q", pool)
 	}
@@ -83,11 +83,9 @@ OUTPUT --as=template %s
 	if err != nil {
 		t.Fatal(err)
 	}
-	var log bytes.Buffer
-	defer func() { t.Log("\n" + log.String()) }()
 	ctx, cancel := context.WithTimeout(context.Background(), 55*time.Minute)
 	defer cancel()
-	if err := build.Run(ctx, p, build.Options{ContextDir: ctxDir, Out: &log}); err != nil {
+	if err := build.Run(ctx, p, build.Options{ContextDir: ctxDir, Out: os.Stdout}); err != nil {
 		t.Fatal(err)
 	}
 
