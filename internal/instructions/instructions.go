@@ -49,13 +49,18 @@ type Arg struct {
 	Set   bool
 }
 
-// From selects the builder and the source: FROM <builder>://<source> [AS name].
+// From starts a stage, either from the infrastructure
+// (FROM <builder>://<source> [AS name]) or from the image produced by an
+// earlier stage (FROM <stage> [AS name]).
 type From struct {
 	Pos
+	// Builder and Source are set for FROM <builder>://<source>.
 	Builder string
 	Source  string
-	Name    string
-	Flags   map[string]string
+	// Stage is set for FROM <stage>.
+	Stage string
+	Name  string
+	Flags map[string]string
 }
 
 // Connect describes how to reach the VM.
@@ -139,8 +144,9 @@ var NotYetSupported = map[string]bool{
 }
 
 var (
-	varName  = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
-	userName = regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9_.-]*$`)
+	varName   = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+	userName  = regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9_.-]*$`)
+	stageName = regexp.MustCompile(`^[a-zA-Z][a-zA-Z0-9_.-]*$`)
 )
 
 // ParseArg parses `ARG NAME[=default] ...`, one Arg per declared variable.
@@ -181,17 +187,21 @@ func ParseFrom(cmd *parser.Command, expand Expander) (*From, error) {
 	if err != nil {
 		return nil, fmt.Errorf("FROM: %w", err)
 	}
-	builder, source, ok := strings.Cut(ref, "://")
-	if !ok {
-		return nil, fmt.Errorf("FROM %q: expected <builder>://<source> (starting from another stage is not supported yet)", ref)
+	from := &From{Pos: pos(cmd), Flags: map[string]string{}}
+	if builder, source, ok := strings.Cut(ref, "://"); ok {
+		if builder == "" {
+			return nil, fmt.Errorf("FROM %q: missing builder name before ://", ref)
+		}
+		from.Builder, from.Source = builder, source
+	} else {
+		if !stageName.MatchString(ref) {
+			return nil, fmt.Errorf("FROM %q: expected <builder>://<source> or the name of an earlier stage", ref)
+		}
+		from.Stage = ref
 	}
-	if builder == "" {
-		return nil, fmt.Errorf("FROM %q: missing builder name before ://", ref)
-	}
-	from := &From{Pos: pos(cmd), Builder: builder, Source: source, Flags: map[string]string{}}
 	if len(cmd.Args) == 3 {
 		from.Name = cmd.Args[2]
-		if !regexp.MustCompile(`^[a-zA-Z][a-zA-Z0-9_.-]*$`).MatchString(from.Name) {
+		if !stageName.MatchString(from.Name) {
 			return nil, fmt.Errorf("FROM: invalid stage name %q", from.Name)
 		}
 	}

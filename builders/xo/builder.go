@@ -22,6 +22,8 @@ type Builder struct {
 	name   string
 	log    func(string)
 	vmID   string
+	// converted is true once the VM is a template.
+	converted bool
 	// pollInterval is the pause between two state checks.
 	pollInterval time.Duration
 }
@@ -215,6 +217,7 @@ func (b *Builder) Output(ctx context.Context, out *instructions.Output) error {
 		if err := b.client.convertToTemplate(ctx, b.vmID); err != nil {
 			return err
 		}
+		b.converted = true
 		return b.waitTemplate(ctx)
 	default:
 		return fmt.Errorf("xo: unsupported output %q", out.Kind)
@@ -268,10 +271,14 @@ func (b *Builder) exportXVA(ctx context.Context, dest, compress string) error {
 	return os.Rename(tmp.Name(), dest)
 }
 
-// Destroy forces the VM off if needed and deletes it with its disks.
+// Destroy deletes the template the VM became, or forces the VM off if
+// needed and deletes it, with its disks.
 func (b *Builder) Destroy(ctx context.Context) error {
 	if b.vmID == "" {
 		return nil
+	}
+	if b.converted {
+		return b.client.do(ctx, http.MethodDelete, "/vm-templates/"+b.vmID, nil, nil)
 	}
 	v, err := b.getVM(ctx)
 	if err != nil {

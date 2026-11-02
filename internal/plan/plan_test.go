@@ -28,7 +28,7 @@ func TestValidFile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	s := p.Stage
+	s := p.Stages[0]
 	if s.From.Source != "debian-13-cloud" || s.From.Name != "golden" {
 		t.Errorf("FROM = %+v", s.From)
 	}
@@ -66,13 +66,13 @@ OUTPUT --as=template "${V}-${ONLY_GLOBAL}-${LOCAL}"
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := p.Stage.From.Source; got != "t-global" {
+	if got := p.Stages[0].From.Source; got != "t-global" {
 		t.Errorf("FROM source = %q", got)
 	}
-	if got := p.Stage.Outputs[0].Name; got != "global--l-global" {
+	if got := p.Stages[0].Outputs[0].Name; got != "global--l-global" {
 		t.Errorf("output name = %q", got)
 	}
-	args := p.Stage.Steps
+	args := p.Stages[0].Steps
 	if a := args[0].(*instructions.Arg); a.Value != "global" || !a.Set {
 		t.Errorf("stage ARG V = %+v", a)
 	}
@@ -81,7 +81,7 @@ OUTPUT --as=template "${V}-${ONLY_GLOBAL}-${LOCAL}"
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := p.Stage.Outputs[0].Name; got != "cli--c" {
+	if got := p.Stages[0].Outputs[0].Name; got != "cli--c" {
 		t.Errorf("with --build-arg: output name = %q", got)
 	}
 }
@@ -91,7 +91,7 @@ func TestEnvOverridesArgInExpansion(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := p.Stage.Outputs[0].Name; got != "env" {
+	if got := p.Stages[0].Outputs[0].Name; got != "env" {
 		t.Errorf("got %q", got)
 	}
 }
@@ -101,7 +101,7 @@ func TestUnsetArgIsNotSet(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if a := p.Stage.Steps[0].(*instructions.Arg); a.Set {
+	if a := p.Stages[0].Steps[0].(*instructions.Arg); a.Set {
 		t.Errorf("ARG A = %+v, want unset", a)
 	}
 }
@@ -112,7 +112,7 @@ func TestWarnings(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := []string{
-		"no OUTPUT: the VM will be destroyed at the end of the build",
+		"stage stage-0 has no OUTPUT and no stage starts from it: its VM will be destroyed at the end of the build",
 		"--build-arg NOPE is not declared by any ARG",
 	}
 	if !reflect.DeepEqual(p.Warnings, want) {
@@ -127,7 +127,13 @@ func TestErrors(t *testing.T) {
 	}{
 		{"ARG A", "Dangofile:1: no FROM instruction"},
 		{"RUN x\nFROM xo://t", "Dangofile:1: RUN before FROM"},
-		{"FROM xo://t\nFROM xo://u", "Dangofile:2: multiple stages are not supported yet"},
+		{"FROM xo://t AS a\nFROM xo://u AS a", `Dangofile:2: stage "a" already defined at line 1`},
+		{"FROM xo://t AS a\nFROM b", `Dangofile:2: FROM b: no earlier stage named "b"`},
+		{"FROM a\nFROM xo://t AS a", `Dangofile:1: FROM a: no earlier stage named "a"`},
+		{"FROM xo://t AS a\nFROM --template=x a", "Dangofile:2: xo: --template cannot be set when starting from another stage"},
+		{"FROM xo://t AS a\nFROM --pool=x a", "Dangofile:2: xo: --pool cannot be set when starting from another stage"},
+		{"FROM xo://t AS a\nFROM a\nRUN x", "Dangofile:3: RUN needs a connection"},
+		{"FROM xo://t AS a\nCONNECT ssh --user=u\nFROM a\nCONNECT ssh --user=v\nCONNECT ssh --user=w", "Dangofile:5: CONNECT already set at line 4"},
 		{"FROM qemu://t", `Dangofile:1: unknown builder "qemu"`},
 		{"FROM --ram=1G xo://t", "Dangofile:1: xo: unknown flag --ram"},
 		{"FROM xo://t\nRUN x", "Dangofile:2: RUN needs a connection to the VM"},
@@ -151,5 +157,101 @@ func TestErrors(t *testing.T) {
 		if err == nil || !strings.HasPrefix(err.Error(), tt.err) {
 			t.Errorf("%q: got error %v, want prefix %q", tt.src, err, tt.err)
 		}
+	}
+}
+
+func TestMultiStage(t *testing.T) {
+	src := `ARG BASE=debian
+FROM --cpus=2 xo://${BASE}-13 AS golden
+CONNECT ssh --user=debian
+ARG LOCAL=only-golden
+ENV APP=golden TIER=base
+RUN true
+OUTPUT --as=template golden
+
+FROM --cpus=4 golden AS app
+ENV APP=app
+RUN true
+OUTPUT --as=template "${APP}-${TIER}-${LOCAL}-${BASE}"
+
+FROM golden AS other
+CONNECT ssh --user=admin
+OUTPUT --format=xva other.xva
+`
+	p, err := build(t, src, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(p.Stages) != 3 {
+		t.Fatalf("got %d stages", len(p.Stages))
+	}
+	golden, app, other := p.Stages[0], p.Stages[1], p.Stages[2]
+	if app.Parent != golden || other.Parent != golden || golden.Parent != nil {
+		t.Errorf("parents: app=%v other=%v golden=%v", app.Parent, other.Parent, golden.Parent)
+	}
+	if len(golden.Children) != 2 || app.Root() != golden {
+		t.Errorf("children = %d, root = %v", len(golden.Children), app.Root())
+	}
+	if app.Connect != golden.Connect {
+		t.Errorf("app does not inherit CONNECT: %+v", app.Connect)
+	}
+	if other.Connect.User != "admin" {
+		t.Errorf("other CONNECT = %+v", other.Connect)
+	}
+	// ENV is inherited, ARG is not (Docker semantics); FROM sees global ARGs.
+	if got := app.Outputs[0].Name; got != "app-base--" {
+		t.Errorf("app template name = %q", got)
+	}
+	if app.From.Stage != "golden" || app.From.Flags["cpus"] != "4" {
+		t.Errorf("app FROM = %+v", app.From)
+	}
+	if golden.TemplateOutput() == nil || other.TemplateOutput() != nil {
+		t.Errorf("TemplateOutput: golden=%v other=%v", golden.TemplateOutput(), other.TemplateOutput())
+	}
+	if len(p.Warnings) != 0 {
+		t.Errorf("warnings = %q", p.Warnings)
+	}
+}
+
+func TestStageNames(t *testing.T) {
+	p, err := build(t, "FROM xo://t\nFROM xo://u AS named\n", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.Stages[0].Name() != "stage-0" || p.Stages[1].Name() != "named" {
+		t.Errorf("names = %q, %q", p.Stages[0].Name(), p.Stages[1].Name())
+	}
+}
+
+func TestSelect(t *testing.T) {
+	p, err := build(t, "FROM xo://t AS a\nOUTPUT --as=template\nFROM a AS b\nOUTPUT --as=template\nFROM b AS c\nOUTPUT --as=template\nFROM xo://u AS d\nOUTPUT --as=template\n", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	names := func(stages []*Stage) string {
+		var out []string
+		for _, s := range stages {
+			out = append(out, s.Name())
+		}
+		return strings.Join(out, ",")
+	}
+	for target, want := range map[string]string{"": "a,b,c,d", "c": "a,b,c", "a": "a", "d": "d"} {
+		got, err := p.Select(target)
+		if err != nil || names(got) != want {
+			t.Errorf("Select(%q) = %s, %v; want %s", target, names(got), err, want)
+		}
+	}
+	if _, err := p.Select("nope"); err == nil || !strings.Contains(err.Error(), `no stage named "nope" (stages: [a b c d])`) {
+		t.Errorf("unknown target: %v", err)
+	}
+}
+
+func TestUnusedStageWarning(t *testing.T) {
+	p, err := build(t, "FROM xo://t AS base\nFROM base AS app\nOUTPUT --as=template\n", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(p.Warnings) != 0 {
+		t.Errorf("base is used by app, no warning expected: %q", p.Warnings)
 	}
 }

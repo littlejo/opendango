@@ -44,6 +44,25 @@ func TestParseConfigErrors(t *testing.T) {
 	}
 }
 
+func TestParseStageConfig(t *testing.T) {
+	cfg, err := ParseStageConfig(map[string]string{"cpus": "4", "disk": "30G", "network": "lan"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := (Config{CPUs: 4, Disk: 30 << 30, Network: "lan"}); cfg != want {
+		t.Errorf("got %+v, want %+v", cfg, want)
+	}
+	for _, flag := range []string{"template", "pool"} {
+		_, err := ParseStageConfig(map[string]string{flag: "x"})
+		if err == nil || !strings.Contains(err.Error(), "--"+flag+" cannot be set when starting from another stage") {
+			t.Errorf("--%s: got %v", flag, err)
+		}
+	}
+	if _, err := ParseStageConfig(map[string]string{"ram": "1G"}); err == nil {
+		t.Error("--ram: expected an error")
+	}
+}
+
 func TestParseSize(t *testing.T) {
 	tests := map[string]int64{
 		"1024": 1024, "512M": 512 << 20, "4G": 4 << 30, "4g": 4 << 30, "20GiB": 20 << 30,

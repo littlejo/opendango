@@ -24,7 +24,7 @@ import (
 	"github.com/littlejo/opendango/internal/plan"
 )
 
-// Builder creates and drives the VM on a given infrastructure.
+// Builder creates and drives the VM of one stage on a given infrastructure.
 type Builder interface {
 	// Start creates the VM and boots it with the given cloud-config
 	// (empty when no connection is needed).
@@ -35,11 +35,13 @@ type Builder interface {
 	// down, forcing it if needed.
 	Stop(ctx context.Context, grace time.Duration) error
 	// Output produces an artifact from the stopped VM. For xva, out.Path
-	// is absolute.
+	// is absolute. After a template output, the VM is a template.
 	Output(ctx context.Context, out *instructions.Output) error
-	// Destroy deletes the VM. It is a no-op when no VM was created.
+	// Destroy deletes what the builder created: the VM, or the template it
+	// became. It is a no-op when nothing was created.
 	Destroy(ctx context.Context) error
-	// ID identifies the VM in log messages.
+	// ID identifies the VM; once converted, it identifies the template, and
+	// is what NewBuilder receives as parentTemplate for the child stages.
 	ID() string
 }
 
@@ -55,44 +57,63 @@ type Communicator interface {
 // DialFunc opens one connection to the VM.
 type DialFunc func(ctx context.Context, host string, port int, user string, signer gossh.Signer) (Communicator, error)
 
+// NewBuilderFunc returns the builder of a stage. parentTemplate is the ID of
+// the parent stage's template, empty for FROM <builder>://<source>.
+type NewBuilderFunc func(stage *plan.Stage, parentTemplate string) (Builder, error)
+
 // Options configure a build.
 type Options struct {
 	// ContextDir is the directory COPY sources and OUTPUT paths are
 	// relative to: the Dangofile's directory.
 	ContextDir string
-	// KeepOnError leaves the VM in place when the build fails.
+	// Target builds only this stage and its ancestors; every stage when
+	// empty.
+	Target string
+	// KeepOnError leaves the VM and the intermediate templates in place
+	// when the build fails.
 	KeepOnError bool
 	// Out receives the build log.
 	Out io.Writer
-	// Builder drives the VM; NewBuilder(p.Stage.From) when nil.
-	Builder Builder
+	// NewBuilder creates the builder of each stage; NewBuilder when nil.
+	NewBuilder NewBuilderFunc
 	// Dial opens connections; SSH when nil.
 	Dial DialFunc
 	// RetryDelay is the pause between connection attempts; 5s when zero.
 	RetryDelay time.Duration
 }
 
-// NewBuilder returns the builder selected by FROM.
-func NewBuilder(from *instructions.From, out io.Writer) (Builder, error) {
-	switch from.Builder {
+// NewBuilder returns the builder of the stage's root FROM.
+func NewBuilder(stage *plan.Stage, parentTemplate string, out io.Writer) (Builder, error) {
+	root := stage.Root().From
+	switch root.Builder {
 	case "xo":
-		cfg, err := xo.ParseConfig(from.Source, from.Flags)
+		rootCfg, err := xo.ParseConfig(root.Source, root.Flags)
 		if err != nil {
 			return nil, err
+		}
+		cfg := rootCfg
+		if stage.Parent != nil {
+			if cfg, err = xo.ParseStageConfig(stage.From.Flags); err != nil {
+				return nil, err
+			}
+			// The parent template is in the root's pool.
+			cfg.Template, cfg.Pool = parentTemplate, rootCfg.Pool
 		}
 		client, err := xo.NewClientFromEnv()
 		if err != nil {
 			return nil, err
 		}
-		return xo.NewBuilder(cfg, client, vmName(from), func(msg string) { say(out, stageName(from), "%s", msg) }), nil
+		name := stage.Name()
+		return xo.NewBuilder(cfg, client, vmName(name), func(msg string) { say(out, name, "%s", msg) }), nil
 	default:
-		return nil, fmt.Errorf("unknown builder %q", from.Builder)
+		return nil, fmt.Errorf("unknown builder %q", root.Builder)
 	}
 }
 
-// Run executes the plan.
+// Run executes the plan: the selected stages, in order. A stage that other
+// selected stages start from ends as a template: its OUTPUT --as=template,
+// or a temporary one deleted at the end of the build.
 func Run(ctx context.Context, p *plan.Plan, opts Options) (err error) {
-	stage := p.Stage
 	if opts.Out == nil {
 		opts.Out = io.Discard
 	}
@@ -102,15 +123,74 @@ func Run(ctx context.Context, p *plan.Plan, opts Options) (err error) {
 	if opts.RetryDelay == 0 {
 		opts.RetryDelay = 5 * time.Second
 	}
-	b := opts.Builder
-	if b == nil {
-		if b, err = NewBuilder(stage.From, opts.Out); err != nil {
+	if opts.NewBuilder == nil {
+		opts.NewBuilder = func(s *plan.Stage, parent string) (Builder, error) { return NewBuilder(s, parent, opts.Out) }
+	}
+	stages, err := p.Select(opts.Target)
+	if err != nil {
+		return err
+	}
+	selected := map[*plan.Stage]bool{}
+	for _, s := range stages {
+		selected[s] = true
+	}
+
+	done := map[*plan.Stage]*executor{}
+	var temporary []*executor
+	defer func() {
+		if err != nil && opts.KeepOnError {
+			for _, e := range temporary {
+				e.say("Build failed, keeping intermediate template %s (--on-error=keep)", e.b.ID())
+			}
+			return
+		}
+		// Children first: a template cannot always be deleted while VMs
+		// created from it exist.
+		for i := len(temporary) - 1; i >= 0; i-- {
+			e := temporary[i]
+			cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Minute)
+			e.say("Deleting intermediate template %s", e.b.ID())
+			if derr := e.b.Destroy(cctx); derr != nil {
+				err = errors.Join(err, fmt.Errorf("deleting intermediate template %s: %w", e.b.ID(), derr))
+			}
+			cancel()
+		}
+	}()
+
+	for _, s := range stages {
+		needed := false
+		for _, c := range s.Children {
+			needed = needed || selected[c]
+		}
+		e, err := runStage(ctx, p, s, done[s.Parent], needed, opts)
+		if err != nil {
 			return err
 		}
+		done[s] = e
+		if needed && s.TemplateOutput() == nil {
+			temporary = append(temporary, e)
+		}
+	}
+	fmt.Fprintln(opts.Out, "==> Build finished")
+	return nil
+}
+
+// runStage builds one stage. parent is the executor of the parent stage
+// (nil for a root stage), whose final USER, WORKDIR and ENV are inherited.
+// needed is true when a selected stage starts from this one: the VM then
+// always ends as a template.
+func runStage(ctx context.Context, p *plan.Plan, stage *plan.Stage, parent *executor, needed bool, opts Options) (_ *executor, err error) {
+	parentTemplate := ""
+	if parent != nil {
+		parentTemplate = parent.b.ID()
+	}
+	b, err := opts.NewBuilder(stage, parentTemplate)
+	if err != nil {
+		return nil, err
 	}
 	e := &executor{
 		file:       p.File,
-		name:       stageName(stage.From),
+		name:       stage.Name(),
 		out:        opts.Out,
 		b:          b,
 		connect:    stage.Connect,
@@ -118,14 +198,21 @@ func Run(ctx context.Context, p *plan.Plan, opts Options) (err error) {
 		retryDelay: opts.RetryDelay,
 		contextDir: opts.ContextDir,
 	}
+	if parent != nil {
+		// Like a Docker image: USER, WORKDIR and ENV carry over, ARG does not.
+		e.user, e.workdir = parent.user, parent.workdir
+		e.env = append([]instructions.KeyValue{}, parent.env...)
+	}
 
 	cloudConfig := ""
 	if e.connect != nil {
 		authorizedKey, err := e.generateKey()
 		if err != nil {
-			return err
+			return nil, err
 		}
-		e.user = e.connect.User
+		if e.user == "" {
+			e.user = e.connect.User
+		}
 		cloudConfig = CloudConfig(e.connect.User, authorizedKey)
 	}
 
@@ -148,12 +235,12 @@ func Run(ctx context.Context, p *plan.Plan, opts Options) (err error) {
 
 	e.say("Starting VM")
 	if err := b.Start(ctx, cloudConfig); err != nil {
-		return fmt.Errorf("starting VM: %w", err)
+		return nil, fmt.Errorf("starting VM: %w", err)
 	}
 
 	if e.connect != nil {
 		if err := e.open(ctx); err != nil {
-			return err
+			return nil, err
 		}
 		defer func() {
 			if e.comm != nil {
@@ -164,20 +251,20 @@ func Run(ctx context.Context, p *plan.Plan, opts Options) (err error) {
 
 	for _, step := range stage.Steps {
 		if err := e.step(ctx, step); err != nil {
-			return &plan.Error{File: p.File, Line: step.Line(), Err: err}
+			return nil, &plan.Error{File: p.File, Line: step.Line(), Err: err}
 		}
 	}
 
 	grace := time.Duration(0)
 	if e.comm != nil {
 		if err := e.finish(ctx); err != nil {
-			return err
+			return nil, err
 		}
 		grace = 5 * time.Minute
 	}
 	e.say("Stopping VM")
 	if err := b.Stop(ctx, grace); err != nil {
-		return fmt.Errorf("stopping VM: %w", err)
+		return nil, fmt.Errorf("stopping VM: %w", err)
 	}
 
 	// Exports first: the conversion to a template is the last thing done
@@ -192,21 +279,25 @@ func Run(ctx context.Context, p *plan.Plan, opts Options) (err error) {
 		}
 		e.say("Exporting XVA to %s", o.Path)
 		if err := b.Output(ctx, &o); err != nil {
-			return &plan.Error{File: p.File, Line: out.Line(), Err: err}
+			return nil, &plan.Error{File: p.File, Line: out.Line(), Err: err}
 		}
 	}
-	for _, out := range stage.Outputs {
-		if out.Kind != instructions.OutputTemplate {
-			continue
-		}
+	if out := stage.TemplateOutput(); out != nil {
 		e.say("Converting VM %s to a template", b.ID())
 		if err := b.Output(ctx, out); err != nil {
-			return &plan.Error{File: p.File, Line: out.Line(), Err: err}
+			return nil, &plan.Error{File: p.File, Line: out.Line(), Err: err}
+		}
+		converted = true
+	} else if needed {
+		name := fmt.Sprintf("opendango-tmp-%s-%d", stage.Name(), time.Now().Unix())
+		e.say("Converting VM %s to the intermediate template %s", b.ID(), name)
+		if err := b.Output(ctx, &instructions.Output{Kind: instructions.OutputTemplate, Name: name}); err != nil {
+			return nil, fmt.Errorf("converting to an intermediate template: %w", err)
 		}
 		converted = true
 	}
-	e.say("Build finished")
-	return nil
+	e.say("Stage finished")
+	return e, nil
 }
 
 type executor struct {
@@ -556,15 +647,8 @@ func firstLine(s string) string {
 	return s
 }
 
-func stageName(from *instructions.From) string {
-	if from.Name != "" {
-		return from.Name
-	}
-	return "build"
-}
-
-func vmName(from *instructions.From) string {
-	return fmt.Sprintf("opendango-%s-%d", stageName(from), time.Now().Unix())
+func vmName(stage string) string {
+	return fmt.Sprintf("opendango-%s-%d", stage, time.Now().Unix())
 }
 
 func dialSSH(ctx context.Context, host string, port int, user string, signer gossh.Signer) (Communicator, error) {

@@ -25,6 +25,8 @@ import (
 // infrastructure in unit tests only; builders have their own integration
 // tests against the real infrastructure.
 type fakeBuilder struct {
+	id          string
+	parent      string
 	calls       []string
 	cloudConfig string
 	outputs     []instructions.Output
@@ -57,7 +59,17 @@ func (b *fakeBuilder) Destroy(context.Context) error {
 	return nil
 }
 
-func (b *fakeBuilder) ID() string { return "vm-1" }
+func (b *fakeBuilder) ID() string {
+	if b.id == "" {
+		return "vm-1"
+	}
+	return b.id
+}
+
+// only returns a NewBuilderFunc for single-stage plans.
+func only(b *fakeBuilder) NewBuilderFunc {
+	return func(*plan.Stage, string) (Builder, error) { return b, nil }
+}
 
 // localComm runs the commands with the local /bin/sh, in a sandbox: HOME is
 // a temporary directory and sudo, shutdown and reboot are stubs that only
@@ -213,7 +225,7 @@ OUTPUT --as=template golden
 	comm := newLocalComm(t)
 	b := &fakeBuilder{}
 	var log bytes.Buffer
-	if err := Run(context.Background(), p, Options{ContextDir: ctxDir, Out: &log, Builder: b, Dial: dialTo(comm)}); err != nil {
+	if err := Run(context.Background(), p, Options{ContextDir: ctxDir, Out: &log, NewBuilder: only(b), Dial: dialTo(comm)}); err != nil {
 		t.Fatalf("%v\n%s", err, log.String())
 	}
 
@@ -272,7 +284,7 @@ func TestRemovesEphemeralKey(t *testing.T) {
 		}
 	}
 	p := mustPlan(t, "FROM xo://t\nCONNECT ssh --user=tester\nRUN true\n")
-	err := Run(context.Background(), p, Options{Builder: b, Dial: func(context.Context, string, int, string, gossh.Signer) (Communicator, error) {
+	err := Run(context.Background(), p, Options{NewBuilder: only(b), Dial: func(context.Context, string, int, string, gossh.Signer) (Communicator, error) {
 		start(b.cloudConfig)
 		return comm, nil
 	}})
@@ -287,7 +299,7 @@ func TestRemovesEphemeralKey(t *testing.T) {
 func TestUserRunsThroughSudo(t *testing.T) {
 	comm := &scriptComm{}
 	p := mustPlan(t, "FROM xo://t\nCONNECT ssh --user=debian\nRUN whoami\nUSER root\nRUN whoami\nUSER debian\nRUN whoami\n")
-	if err := Run(context.Background(), p, Options{Builder: &fakeBuilder{}, Dial: dialTo(comm)}); err != nil {
+	if err := Run(context.Background(), p, Options{NewBuilder: only(&fakeBuilder{}), Dial: dialTo(comm)}); err != nil {
 		t.Fatal(err)
 	}
 	want := []string{
@@ -305,7 +317,7 @@ func TestUserRunsThroughSudo(t *testing.T) {
 func TestEnvPersist(t *testing.T) {
 	comm := &scriptComm{}
 	p := mustPlan(t, "FROM xo://t\nCONNECT ssh --user=debian\nENV --persist APP=prod\nRUN true\n")
-	if err := Run(context.Background(), p, Options{Builder: &fakeBuilder{}, Dial: dialTo(comm)}); err != nil {
+	if err := Run(context.Background(), p, Options{NewBuilder: only(&fakeBuilder{}), Dial: dialTo(comm)}); err != nil {
 		t.Fatal(err)
 	}
 	persist := comm.commands[0]
@@ -322,7 +334,7 @@ func TestEnvPersist(t *testing.T) {
 func TestEnvPersistScript(t *testing.T) {
 	comm := &scriptComm{}
 	p := mustPlan(t, "FROM xo://t\nCONNECT ssh --user=root\nENV --persist APP=\"new value\"\n")
-	if err := Run(context.Background(), p, Options{Builder: &fakeBuilder{}, Dial: dialTo(comm)}); err != nil {
+	if err := Run(context.Background(), p, Options{NewBuilder: only(&fakeBuilder{}), Dial: dialTo(comm)}); err != nil {
 		t.Fatal(err)
 	}
 	env := filepath.Join(t.TempDir(), "environment")
@@ -351,7 +363,7 @@ func TestReboot(t *testing.T) {
 	}}
 	b := &fakeBuilder{}
 	p := mustPlan(t, "FROM xo://t\nCONNECT ssh --user=debian\nREBOOT\nRUN true\n")
-	if err := Run(context.Background(), p, Options{Builder: b, Dial: dialTo(comm), RetryDelay: time.Millisecond}); err != nil {
+	if err := Run(context.Background(), p, Options{NewBuilder: only(b), Dial: dialTo(comm), RetryDelay: time.Millisecond}); err != nil {
 		t.Fatal(err)
 	}
 	if len(bootIDs) != 0 {
@@ -377,7 +389,7 @@ func TestConnectRetries(t *testing.T) {
 		return comm, nil
 	}
 	p := mustPlan(t, "FROM xo://t\nCONNECT ssh --user=debian\nRUN true\n")
-	if err := Run(context.Background(), p, Options{Builder: &fakeBuilder{}, Dial: dial, RetryDelay: time.Millisecond}); err != nil {
+	if err := Run(context.Background(), p, Options{NewBuilder: only(&fakeBuilder{}), Dial: dial, RetryDelay: time.Millisecond}); err != nil {
 		t.Fatal(err)
 	}
 	if attempts != 3 {
@@ -391,7 +403,7 @@ func TestConnectTimeout(t *testing.T) {
 	}
 	b := &fakeBuilder{}
 	p := mustPlan(t, "FROM xo://t\nCONNECT ssh --user=debian --timeout=20ms\nRUN true\n")
-	err := Run(context.Background(), p, Options{Builder: b, Dial: dial, RetryDelay: time.Millisecond})
+	err := Run(context.Background(), p, Options{NewBuilder: only(b), Dial: dial, RetryDelay: time.Millisecond})
 	if err == nil || !strings.Contains(err.Error(), "connection refused") {
 		t.Fatalf("got %v", err)
 	}
@@ -410,7 +422,7 @@ func TestFailureDestroysOrKeeps(t *testing.T) {
 		}}
 		b := &fakeBuilder{}
 		p := mustPlan(t, "FROM xo://t\nCONNECT ssh --user=debian\nRUN true\nRUN false\nOUTPUT --as=template\n")
-		err := Run(context.Background(), p, Options{Builder: b, Dial: dialTo(comm), KeepOnError: keep})
+		err := Run(context.Background(), p, Options{NewBuilder: only(b), Dial: dialTo(comm), KeepOnError: keep})
 		if err == nil || err.Error() != "Dangofile:4: RUN: exit code 3" {
 			t.Fatalf("keep=%v: got %v", keep, err)
 		}
@@ -424,7 +436,7 @@ func TestFailureDestroysOrKeeps(t *testing.T) {
 func TestDestroyWithoutTemplate(t *testing.T) {
 	b := &fakeBuilder{}
 	p := mustPlan(t, "FROM xo://t\nOUTPUT --format=xva /tmp/x.xva\n")
-	if err := Run(context.Background(), p, Options{Builder: b}); err != nil {
+	if err := Run(context.Background(), p, Options{NewBuilder: only(b)}); err != nil {
 		t.Fatal(err)
 	}
 	if got := strings.Join(b.calls, " "); got != "start stop(0s) output:xva destroy" {
@@ -439,7 +451,7 @@ func TestCopyRejectsOutsideContext(t *testing.T) {
 	ctxDir := t.TempDir()
 	for _, src := range []string{"../x", "/etc/passwd", "missing"} {
 		p := mustPlan(t, "FROM xo://t\nCONNECT ssh --user=debian\nCOPY "+src+" /x\n")
-		err := Run(context.Background(), p, Options{ContextDir: ctxDir, Builder: &fakeBuilder{}, Dial: dialTo(&scriptComm{})})
+		err := Run(context.Background(), p, Options{ContextDir: ctxDir, NewBuilder: only(&fakeBuilder{}), Dial: dialTo(&scriptComm{})})
 		if err == nil || !strings.HasPrefix(err.Error(), "Dangofile:3: COPY: ") {
 			t.Errorf("%s: got %v", src, err)
 		}
@@ -475,4 +487,155 @@ func contains(list []string, s string) bool {
 		}
 	}
 	return false
+}
+
+// stageBuilders creates one fakeBuilder per stage, with ID vm-<stage>, and
+// records the calls of all of them in one ordered log.
+type stageBuilders struct {
+	byStage map[string]*fakeBuilder
+	log     []string
+}
+
+func newStageBuilders() *stageBuilders { return &stageBuilders{byStage: map[string]*fakeBuilder{}} }
+
+func (sb *stageBuilders) factory() NewBuilderFunc {
+	return func(s *plan.Stage, parent string) (Builder, error) {
+		b := &loggingBuilder{fakeBuilder: fakeBuilder{id: "vm-" + s.Name(), parent: parent}, log: &sb.log}
+		sb.byStage[s.Name()] = &b.fakeBuilder
+		return b, nil
+	}
+}
+
+type loggingBuilder struct {
+	fakeBuilder
+	log *[]string
+}
+
+func (b *loggingBuilder) Output(ctx context.Context, out *instructions.Output) error {
+	what := out.Kind
+	if strings.HasPrefix(out.Name, "opendango-tmp-") {
+		what += "(tmp)"
+	}
+	*b.log = append(*b.log, b.id+":output:"+what)
+	return b.fakeBuilder.Output(ctx, out)
+}
+
+func (b *loggingBuilder) Destroy(ctx context.Context) error {
+	*b.log = append(*b.log, b.id+":destroy")
+	return b.fakeBuilder.Destroy(ctx)
+}
+
+const threeStages = `FROM xo://t AS base
+CONNECT ssh --user=debian
+USER root
+ENV A=1
+WORKDIR /opt
+RUN true
+
+FROM base AS golden
+RUN echo golden
+OUTPUT --format=xva g.xva
+
+FROM golden AS app
+RUN echo app
+OUTPUT --as=template app
+`
+
+func TestMultiStage(t *testing.T) {
+	sb := newStageBuilders()
+	comm := &scriptComm{}
+	p := mustPlan(t, threeStages)
+	if err := Run(context.Background(), p, Options{NewBuilder: sb.factory(), Dial: dialTo(comm)}); err != nil {
+		t.Fatal(err)
+	}
+	// Each stage starts from its parent's template.
+	for stage, want := range map[string]string{"base": "", "golden": "vm-base", "app": "vm-golden"} {
+		if got := sb.byStage[stage].parent; got != want {
+			t.Errorf("%s starts from %q, want %q", stage, got, want)
+		}
+	}
+	want := []string{
+		"vm-base:output:template(tmp)",
+		"vm-golden:output:xva",
+		"vm-golden:output:template(tmp)",
+		"vm-app:output:template",
+		// Intermediate templates are deleted at the end, children first.
+		"vm-golden:destroy",
+		"vm-base:destroy",
+	}
+	if strings.Join(sb.log, " ") != strings.Join(want, " ") {
+		t.Errorf("log =\n%q\nwant\n%q", sb.log, want)
+	}
+	// app inherits USER, WORKDIR and ENV from base through golden.
+	last := ""
+	for _, c := range comm.commands {
+		if strings.Contains(c, "echo app") {
+			last = c
+		}
+	}
+	for _, want := range []string{"sudo -n -H -u 'root' --", "export A=", `cd '\''/opt'\''`} {
+		if !strings.Contains(last, want) {
+			t.Errorf("app RUN %q does not contain %q", last, want)
+		}
+	}
+	// A new key per stage.
+	if sb.byStage["base"].cloudConfig == sb.byStage["app"].cloudConfig {
+		t.Error("stages share the same SSH key")
+	}
+}
+
+func TestTarget(t *testing.T) {
+	sb := newStageBuilders()
+	p := mustPlan(t, threeStages)
+	if err := Run(context.Background(), p, Options{Target: "golden", NewBuilder: sb.factory(), Dial: dialTo(&scriptComm{})}); err != nil {
+		t.Fatal(err)
+	}
+	if _, built := sb.byStage["app"]; built {
+		t.Error("app built with --target golden")
+	}
+	// golden is the last stage built: no template, so its VM is destroyed.
+	want := "vm-base:output:template(tmp) vm-golden:output:xva vm-golden:destroy vm-base:destroy"
+	if got := strings.Join(sb.log, " "); got != want {
+		t.Errorf("log = %q, want %q", got, want)
+	}
+
+	err := Run(context.Background(), p, Options{Target: "nope", NewBuilder: sb.factory()})
+	if err == nil || !strings.Contains(err.Error(), `no stage named "nope"`) {
+		t.Errorf("unknown target: %v", err)
+	}
+}
+
+func TestMultiStageFailure(t *testing.T) {
+	src := `FROM xo://t AS base
+CONNECT ssh --user=debian
+RUN true
+
+FROM base AS golden
+OUTPUT --as=template golden
+
+FROM golden AS app
+RUN false
+OUTPUT --as=template app
+`
+	for _, keep := range []bool{false, true} {
+		sb := newStageBuilders()
+		comm := &scriptComm{reply: func(cmd string) (string, error) {
+			if strings.Contains(cmd, "false") {
+				return "", &sshcomm.ExitError{Code: 1}
+			}
+			return "", nil
+		}}
+		err := Run(context.Background(), mustPlan(t, src), Options{NewBuilder: sb.factory(), Dial: dialTo(comm), KeepOnError: keep})
+		if err == nil || err.Error() != "Dangofile:9: RUN: exit code 1" {
+			t.Fatalf("keep=%v: got %v", keep, err)
+		}
+		// golden's template is a finished OUTPUT: always kept.
+		want := "vm-base:output:template(tmp) vm-golden:output:template vm-app:destroy vm-base:destroy"
+		if keep {
+			want = "vm-base:output:template(tmp) vm-golden:output:template"
+		}
+		if got := strings.Join(sb.log, " "); got != want {
+			t.Errorf("keep=%v: log = %q, want %q", keep, got, want)
+		}
+	}
 }
