@@ -70,6 +70,19 @@ func runPackerStage(ctx context.Context, p *plan.Plan, stage *plan.Stage, con *c
 	} else {
 		settings["communicator"] = "none"
 	}
+	// SERVE: the plugin serves the directory itself; boot_command reaches
+	// it at {{ .HTTPIP }}:{{ .HTTPPort }}.
+	if sv := stage.Serve; sv != nil {
+		dir, err := serveDir(opts.ContextDir, sv)
+		if err != nil {
+			return nil, &plan.Error{File: p.File, Line: sv.Line(), Err: err}
+		}
+		settings["http_directory"] = dir
+		if sv.Port != 0 {
+			settings["http_port_min"] = sv.Port
+			settings["http_port_max"] = sv.Port
+		}
+	}
 	// What the plugin does when a step fails (its own cleanup).
 	onError := "cleanup"
 	switch {

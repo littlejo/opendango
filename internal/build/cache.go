@@ -21,9 +21,10 @@ const cacheVersion = "opendango-cache-v1"
 
 // cacheKey returns the cache key of a stage: a hash of the parent's key and
 // of everything that makes the stage's image, with the variables expanded
-// and the content of the COPY sources. Line numbers are left out. It returns
-// "" when the stage cannot be cached: it, or an ancestor, has a BREAKPOINT
-// (whatever is done by hand during the pause is not reproducible).
+// and the content of the COPY sources and of the SERVE directory. Line
+// numbers are left out. It returns "" when the stage cannot be cached: it,
+// or an ancestor, has a BREAKPOINT (whatever is done by hand during the
+// pause is not reproducible).
 func cacheKey(file string, s *plan.Stage, parentKey, contextDir string) (string, error) {
 	if s.Parent != nil && parentKey == "" {
 		return "", nil
@@ -41,6 +42,18 @@ func cacheKey(file string, s *plan.Stage, parentKey, contextDir string) (string,
 	}
 	if c := s.Connect; c != nil {
 		fmt.Fprintf(h, "CONNECT %q %q %d\n", c.Protocol, c.User, c.Port)
+	}
+	// The served files may end up in the image (kickstart, packages); the
+	// port and address do not.
+	if sv := s.Serve; sv != nil {
+		fmt.Fprintf(h, "SERVE %q\n", sv.Dir)
+		_, err := serveDir(contextDir, sv)
+		if err == nil {
+			err = hashTree(h, contextDir, filepath.Join(contextDir, filepath.FromSlash(sv.Dir)))
+		}
+		if err != nil {
+			return "", &plan.Error{File: file, Line: sv.Line(), Err: err}
+		}
 	}
 	for _, step := range s.Steps {
 		switch st := step.(type) {

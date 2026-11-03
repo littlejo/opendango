@@ -42,9 +42,14 @@ type Stage struct {
 	Steps []instructions.Instruction
 	// Outputs run after all steps, once the VM is stopped.
 	Outputs []*instructions.Output
+	// Serve is the stage's SERVE, or nil. The server runs from before the
+	// VM starts to the end of the stage.
+	Serve *instructions.Serve
 
 	// ownConnect is true when the stage sets CONNECT itself.
 	ownConnect bool
+	// usesVM is true once an instruction of the stage needs the VM.
+	usesVM bool
 	// env holds the ENV values at the end of the stage, inherited by the
 	// stages that start from it (ARG values are not, like in Docker).
 	env map[string]string
@@ -129,6 +134,9 @@ func Build(file string, res *parser.Result, buildArgs map[string]string) (*Plan,
 	scope := global
 	expand := func(word string) (string, error) {
 		res, err := lex.ProcessWordWithMatches(word, envGetter(scope))
+		if _, ok := res.Unmatched[instructions.ServeAddrVar]; ok && err == nil {
+			err = fmt.Errorf("${%s} is only set in RUN, where the remote shell expands it", instructions.ServeAddrVar)
+		}
 		return res.Result, err
 	}
 
@@ -154,6 +162,9 @@ func Build(file string, res *parser.Result, buildArgs map[string]string) (*Plan,
 				return fail(line, err)
 			}
 			for _, a := range args {
+				if a.Name == instructions.ServeAddrVar {
+					return fail(line, reserved(a.Name))
+				}
 				resolveArg(a, buildArgs, global, stage == nil)
 				usedArgs[a.Name] = true
 				if a.Set {
@@ -218,7 +229,11 @@ func Build(file string, res *parser.Result, buildArgs map[string]string) (*Plan,
 			if env.Persist && stage.Connect == nil {
 				return fail(line, needsConnect("ENV --persist"))
 			}
+			stage.usesVM = stage.usesVM || env.Persist
 			for _, kv := range env.Vars {
+				if kv.Key == instructions.ServeAddrVar {
+					return fail(line, reserved(kv.Key))
+				}
 				scope[kv.Key] = kv.Value
 				stage.env[kv.Key] = kv.Value
 			}
@@ -257,7 +272,24 @@ func Build(file string, res *parser.Result, buildArgs map[string]string) (*Plan,
 			if err != nil {
 				return fail(line, err)
 			}
+			stage.usesVM = true
 			stage.Steps = append(stage.Steps, step)
+
+		case "SERVE":
+			if stage.Serve != nil {
+				return fail(line, fmt.Errorf("SERVE already set at line %d", stage.Serve.Line()))
+			}
+			if stage.ownConnect || stage.usesVM {
+				return fail(line, fmt.Errorf("SERVE must come before CONNECT and the instructions that need the VM: the server starts before the VM"))
+			}
+			sv, err := instructions.ParseServe(cmd, expand)
+			if err != nil {
+				return fail(line, err)
+			}
+			if sv.Addr != "" && stage.IsPacker() {
+				return fail(line, fmt.Errorf("SERVE --addr is not supported in a packer:// stage: the plugin serves the directory and chooses its address"))
+			}
+			stage.Serve = sv
 
 		case "OUTPUT":
 			if stage.IsPacker() {
@@ -360,6 +392,10 @@ func literalFlags(cmd *parser.Command, escape rune) *parser.Command {
 		c.Flags[i] = f
 	}
 	return &c
+}
+
+func reserved(name string) error {
+	return fmt.Errorf("%s is reserved: SERVE sets it", name)
 }
 
 func needsConnect(what string) error {

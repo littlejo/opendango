@@ -34,12 +34,16 @@ var (
 	sensitive = regexp.MustCompile(`password|secret|token`)
 )
 
-// reserved are the settings that come from CONNECT, not from FROM flags.
+// reserved are the settings that come from CONNECT and SERVE, not from
+// FROM flags.
 var reserved = map[string]string{
-	"communicator": "CONNECT ssh",
-	"ssh_username": "CONNECT ssh --user=<user>",
-	"ssh_port":     "CONNECT ssh --port=<port>",
-	"ssh_timeout":  "CONNECT ssh --timeout=<duration>",
+	"communicator":   "CONNECT ssh",
+	"ssh_username":   "CONNECT ssh --user=<user>",
+	"ssh_port":       "CONNECT ssh --port=<port>",
+	"ssh_timeout":    "CONNECT ssh --timeout=<duration>",
+	"http_directory": "SERVE <dir>",
+	"http_port_min":  "SERVE --port=<port>",
+	"http_port_max":  "SERVE --port=<port>",
 }
 
 // ParseConfig reads FROM [--flags] packer://<source>. Flag names are the

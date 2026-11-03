@@ -113,13 +113,20 @@ func deleteTemplate(ctx context.Context, t *testing.T, client *xo.Client, name s
 func TestBuildEndToEnd(t *testing.T) {
 	from, user, ctxDir := setup(t)
 	name := fmt.Sprintf("opendango-it-%d", time.Now().Unix())
+	// SERVE: the VM fetches a file from this machine.
+	os.Mkdir(filepath.Join(ctxDir, "http"), 0o755)
+	if err := os.WriteFile(filepath.Join(ctxDir, "http", "served.txt"), []byte("served by opendango\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	src := fmt.Sprintf(`FROM %s AS it
+SERVE http
 CONNECT ssh --user=%s --timeout=15m
 ENV --persist OPENDANGO_IT=1
 USER root
 WORKDIR /opt/opendango
 COPY --chmod=0640 hello.txt ./
 RUN test "$(cat /opt/opendango/hello.txt)" = "hello from opendango"
+RUN url="http://$DANGO_HTTP_ADDR/served.txt"; test "$(curl -fsS "$url" || wget -qO- "$url")" = "served by opendango"
 RUN grep -q '^OPENDANGO_IT="1"$' /etc/environment
 RUN test -f /root/retried || { touch /root/retried; exit 1; }
 REBOOT
@@ -161,6 +168,9 @@ OUTPUT --as=template %s
 	ctx, client := run(t, src, build.Options{ContextDir: ctxDir, Out: io.MultiWriter(os.Stdout, &log), Stdin: stdin, Ask: true})
 	if !breakpoint || !retried {
 		t.Errorf("BREAKPOINT reached: %v, failed RUN retried: %v", breakpoint, retried)
+	}
+	if !strings.Contains(log.String(), "==> it: SERVE: GET /served.txt from ") {
+		t.Error("the VM did not fetch the served file")
 	}
 	info, err := os.Stat(filepath.Join(ctxDir, "out", "it.xva"))
 	if err != nil || info.Size() == 0 {

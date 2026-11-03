@@ -52,6 +52,9 @@ type Builder interface {
 	FindCache(ctx context.Context, key string) (bool, error)
 	// Tag adds a tag to the template the VM became.
 	Tag(ctx context.Context, tag string) error
+	// LocalAddr returns the IP address of this machine that the VM can
+	// reach: where SERVE is advertised when --addr is not set.
+	LocalAddr(ctx context.Context) (string, error)
 }
 
 // Communicator runs commands in the VM and uploads files to it.
@@ -361,6 +364,16 @@ func runStage(ctx context.Context, p *plan.Plan, stage *plan.Stage, parent *exec
 		}
 	}
 
+	if sv := stage.Serve; sv != nil {
+		addr, stop, err := e.serve(ctx, sv)
+		if err != nil {
+			return nil, &plan.Error{File: p.File, Line: sv.Line(), Err: err}
+		}
+		// Stopped last: still up while --on-error=ask waits.
+		defer stop()
+		e.serveAddr = addr
+	}
+
 	cloudConfig := ""
 	if e.connect != nil {
 		authorizedKey, err := e.generateKey()
@@ -578,6 +591,9 @@ type executor struct {
 	// cached is true when the stage's template is in the cache: found
 	// there, or tagged at the end of the stage.
 	cached bool
+	// serveAddr is the address of the SERVE server (ip:port), exported to
+	// RUN as DANGO_HTTP_ADDR; empty without SERVE.
+	serveAddr string
 	// retried is true once --on-error=ask retried an instruction.
 	retried bool
 	// answer is the answer to --on-error=ask that ended the stage, when
@@ -704,6 +720,9 @@ func (e *executor) step(ctx context.Context, step instructions.Instruction) erro
 // current WORKDIR, with the ARG and ENV values exported.
 func (e *executor) wrap(script string) string {
 	var b strings.Builder
+	if e.serveAddr != "" {
+		fmt.Fprintf(&b, "export %s=%s\n", instructions.ServeAddrVar, instructions.ShellQuote(e.serveAddr))
+	}
 	// ENV after ARG: on a name clash, ENV wins, like in Docker.
 	for _, kv := range append(append([]instructions.KeyValue{}, e.args...), e.env...) {
 		fmt.Fprintf(&b, "export %s=%s\n", kv.Key, instructions.ShellQuote(kv.Value))
