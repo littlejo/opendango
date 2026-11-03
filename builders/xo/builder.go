@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -28,6 +29,9 @@ type Builder struct {
 	// cached is true when the builder stands for a template found in the
 	// cache: there is no VM, and Destroy leaves the template alone.
 	cached bool
+	// inherited are the tags XO copied from the template to the VM, the
+	// cache tags excepted (Start removes them).
+	inherited []string
 	// pollInterval is the pause between two state checks.
 	pollInterval time.Duration
 }
@@ -127,6 +131,9 @@ func (b *Builder) Start(ctx context.Context, cloudConfig string) error {
 		return fmt.Errorf("xo: create_vm returned no VM id")
 	}
 	b.vmID = created.ID
+	if err := b.removeCacheTags(ctx, tmpl.Tags); err != nil {
+		return err
+	}
 	if b.cfg.ISO != "" {
 		// XO boots from the CD first, and installers cannot always eject
 		// it (Debian with UEFI cannot): disk first, the empty disk is
@@ -195,9 +202,71 @@ func cached(objs []object, poolID, key string) string {
 	return ""
 }
 
-// Tag adds tag to the template the VM became.
+// removeCacheTags removes from the new VM the cache tags XO copied from
+// the template (the template's tags, read before the creation: XO lists the
+// VM's a moment later). The VM is another image: with them, a cache lookup
+// could return its template, and cache prune could delete an OUTPUT
+// template.
+func (b *Builder) removeCacheTags(ctx context.Context, tags []string) error {
+	for _, t := range tags {
+		if !isCacheTag(t) {
+			b.inherited = append(b.inherited, t)
+			continue
+		}
+		if err := b.client.do(ctx, http.MethodDelete, "/vms/"+url.PathEscape(b.vmID)+"/tags/"+url.PathEscape(t), nil, nil); err != nil {
+			return fmt.Errorf("removing the tag %s copied from the template: %w", t, err)
+		}
+	}
+	return nil
+}
+
+func isCacheTag(t string) bool {
+	return strings.HasPrefix(t, cacheTag) || strings.HasPrefix(t, createdTag)
+}
+
+// Tag adds tag to the template the VM became. A key=value tag (LABEL)
+// replaces the tags of the same key copied from the template. It waits
+// until XO lists the tag: the next stage may look up the cache right away,
+// and XO's object cache is updated a moment after the call.
 func (b *Builder) Tag(ctx context.Context, tag string) error {
-	return b.client.do(ctx, http.MethodPut, "/vm-templates/"+url.PathEscape(b.vmID)+"/tags/"+url.PathEscape(tag), nil, nil)
+	path := "/vm-templates/" + url.PathEscape(b.vmID)
+	for _, t := range replaced(b.inherited, tag) {
+		if err := b.client.do(ctx, http.MethodDelete, path+"/tags/"+url.PathEscape(t), nil, nil); err != nil {
+			return err
+		}
+	}
+	if err := b.client.do(ctx, http.MethodPut, path+"/tags/"+url.PathEscape(tag), nil, nil); err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	defer cancel()
+	for {
+		var o object
+		if err := b.client.do(ctx, http.MethodGet, path, nil, &o); err == nil && slices.Contains(o.Tags, tag) {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("xo: tag %s set but not listed yet: %w", tag, ctx.Err())
+		case <-time.After(b.pollInterval):
+		}
+	}
+}
+
+// replaced returns the tags of inherited that the key=value tag replaces:
+// the other values of the same key.
+func replaced(inherited []string, tag string) []string {
+	key, _, ok := strings.Cut(tag, "=")
+	if !ok {
+		return nil
+	}
+	var out []string
+	for _, t := range inherited {
+		if strings.HasPrefix(t, key+"=") && t != tag {
+			out = append(out, t)
+		}
+	}
+	return out
 }
 
 // LocalAddr returns the IP address of this machine on the route to XO: the
