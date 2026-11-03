@@ -23,8 +23,8 @@
 | Instruction | Status | Semantics |
 |---|---|---|
 | `ARG` | MVP | Build variable, overridden with `--build-arg K=V`. Docker scoping: an ARG before the first `FROM` is only visible in `FROM` lines unless the stage declares it again (`ARG NAME`). |
-| `FROM` | MVP | `FROM [--flags] <builder>://<source> [AS name]`. Flags configure the builder (xo: `--template`, `--pool`, `--sr`, `--network`, `--cpus`, `--memory`, `--disk`). |
-| `FROM <stage>` | done | Multi-stage: starts from the image of an earlier stage (see *Multi-stage builds*). xo flags: `--cpus`, `--memory`, `--disk`, `--sr`, `--network` (not `--template` nor `--pool`). |
+| `FROM` | MVP | `FROM [--flags] <builder>://<source> [AS name]`. Flags configure the builder (xo: `--template`, `--pool`, `--iso`, `--sr`, `--network`, `--cpus`, `--memory`, `--disk`). |
+| `FROM <stage>` | done | Multi-stage: starts from the image of an earlier stage (see *Multi-stage builds*). xo flags: `--cpus`, `--memory`, `--disk`, `--sr`, `--network` (not `--template`, `--pool` nor `--iso`). |
 | `CONNECT` | MVP (ssh) | `CONNECT ssh --user=<user> [--port=22] [--timeout=10m]`. **Required** before any instruction that needs the VM (`RUN`, `COPY`, `WORKDIR`, `REBOOT`, `BREAKPOINT`, `ENV --persist`). An ephemeral ed25519 key is injected for `<user>` via cloud-init and removed from `authorized_keys` before shutdown. `winrm` is planned. |
 | `RUN` | MVP | Shell, exec (JSON) and heredoc forms, run with `/bin/sh -c`. Not expanded at build time: the remote shell expands it, with the ARG and ENV values exported. `--shell=powershell` is planned. |
 | `COPY` | MVP | `COPY [--chmod=MODE] [--chown=U[:G]] <src>... <dest>`. Sources are relative to the Dangofile directory and must stay inside it (globs allowed). A directory source copies its contents. The destination is a directory when it ends with `/` or when there are several sources. Files are owned by the current `USER` unless `--chown` is set. |
@@ -36,7 +36,7 @@
 | `OUTPUT` | MVP | Runs after all other instructions, once the VM is stopped: XVA exports first, then the template conversion. `OUTPUT --as=template [name]` (at most one) or `OUTPUT --format=xva [--compress=zstd\|gzip] <path>` (path relative to the Dangofile directory). Without `--as=template`, the VM is destroyed at the end. Other formats are planned. |
 | `ADD` | planned | `COPY` plus URL sources. |
 | `LABEL` | planned | Metadata or tags attached to the produced image. |
-| `BOOT` | planned | Types keystrokes into the VM console, for ISO installs (equivalent of `boot_command`). |
+| `BOOT` | done | `BOOT <keys>`, any number, before `CONNECT` and the instructions that need the VM (after `SERVE`). Typed in order into the VM console once the VM has started (`Builder.SendKeys`), with the `boot_command` syntax of Packer (`<enter>`, `<wait10>`, `<leftCtrlOn>`…): parsed, checked and typed by `packer-plugin-sdk/bootcommand`. The parser keeps the rest of the line as written (no flags; quotes, spaces and `--` are typed). Expansion keeps the quotes (`SkipProcessQuotes`); the escape character escapes `$` and itself. `${DANGO_HTTP_ADDR}` needs `SERVE`: it is a marker (`instructions.ServeAddrMarker`) until build time. Part of the cache key, with the marker. A failed `BOOT` ends the stage (no retry). |
 | `SERVE` | done | `SERVE [--port=N] [--addr=IP] <dir>`, at most one per stage, before `CONNECT` and the instructions that need the VM. Serves `<dir>` (relative to the Dangofile directory, staying inside it) over HTTP from before the VM starts to the end of the stage; not inherited by child stages, not started on a cache hit. `RUN` gets `DANGO_HTTP_ADDR=<ip>:<port>` exported (the remote shell expands it); expanding `${DANGO_HTTP_ADDR}` anywhere else, or declaring it with `ARG`/`ENV`, is an error. The IP is `--addr`, or the builder's `LocalAddr` (xo: the local address on the route to `XOA_ENDPOINT`); the port is free unless `--port`. Listens on every interface, reads through `os.Root` (no symlink escape), logs every request. The directory content is part of the cache key. |
 | `SHELL` | planned | Changes the shell used by `RUN`. |
 
@@ -96,7 +96,7 @@ builders/packer/            Packer plugins: discovery, protocol, communicator ad
 
 Planned: `internal/communicator/winrm`, `internal/output` (qcow2, raw, vmdk, ova, checksums).
 
-The `Builder` interface lives in `internal/build`: `Start(cloudConfig)`, `Address`, `Stop(grace)`, `Output`, `Destroy`, `ID`, `FindCache(key)`, `Tag(tag)`, `LocalAddr`. It grows with the roadmap (`SendKeys` for `BOOT`), not before. Builders are selected by a plain `switch` on the `FROM` scheme (`build.NewBuilder`, `plan.checkBuilder`).
+The `Builder` interface lives in `internal/build`: `Start(cloudConfig)`, `Address`, `Stop(grace)`, `Output`, `Destroy`, `ID`, `FindCache(key)`, `Tag(tag)`, `LocalAddr`, `SendKeys(keys)`. It grows with the roadmap, not before. Builders are selected by a plain `switch` on the `FROM` scheme (`build.NewBuilder`, `plan.checkBuilder`).
 
 ### Dependencies
 
@@ -105,8 +105,8 @@ The `Builder` interface lives in `internal/build`: `Start(cloudConfig)`, `Addres
 | `github.com/moby/buildkit` (dockerfile `parser` and `shell`) | The Dockerfile grammar and the Docker variable expansion, unchanged. |
 | `golang.org/x/crypto/ssh` | SSH client. |
 | `github.com/pkg/sftp` | `COPY` uploads. |
-| `github.com/coder/websocket` | XO JSON-RPC, only for the conversion to a template. |
-| `github.com/hashicorp/packer-plugin-sdk` v0.6.13 (pinned, MPL-2.0) | The client side of the Packer plugin protocol (`rpc`) for packer://. Requires the `go-cty` replace below. |
+| `github.com/coder/websocket` | XO JSON-RPC (conversion to a template, boot order, CD eject) and the VM console (`BOOT`). |
+| `github.com/hashicorp/packer-plugin-sdk` v0.6.13 (pinned, MPL-2.0) | The client side of the Packer plugin protocol (`rpc`) for packer://, and `bootcommand` (the `BOOT` syntax and its VNC driver). Requires the `go-cty` replace below. `bootcommand` brings `golang.org/x/mobile/event/key` (BSD, key constants of its USB driver). |
 | `github.com/nywilken/go-cty` v1.13.3 (MIT, `replace` of `zclconf/go-cty`) | go-cty with gob encoding, required by the SDK's `rpc` package. |
 | `golang.org/x/term` | Detects a terminal on stdin for `--on-error=ask` and `BREAKPOINT` (`/dev/null` is a character device too, so `os.ModeCharDevice` is not enough). Already required by `x/crypto`. |
 
@@ -115,9 +115,11 @@ The Vates SDK (`xenorchestra-go-sdk`) was evaluated and not used: opendango need
 ### Xen Orchestra builder
 
 - It goes through the XO REST API with a thin client (`builders/xo/client.go`). The route reference is served at `/rest/v0/docs` on each instance; the source is `@xen-orchestra/rest-api` in `vatesfr/xen-orchestra`.
-- The REST API cannot convert a VM to a template: that single call goes through JSON-RPC (`session.signIn` then `vm.convertToTemplate` on the `/api/` WebSocket, `builders/xo/jsonrpc.go`). Switch to REST when XO adds the endpoint.
+- The REST API can neither convert a VM to a template nor set its boot order: those calls go through JSON-RPC (`session.signIn`, then `vm.convertToTemplate`, `vm.setBootOrder` or `vm.ejectCd`, on the `/api/` WebSocket, `builders/xo/jsonrpc.go`). Switch to REST when XO adds the endpoints.
 - Templates live in the `vm-templates` collection. A default template's id is `<pool>-<uuid>`; `create_vm` takes the bare UUID. Names, ids and UUIDs are all accepted. The same template UUID can exist in several pools (XO Hub templates): `--pool` restricts the lookup, and a template found in several pools without `--pool` is an error.
-- Requirements on the template: cloud-init (for the SSH key) and the guest tools (XO only reports the IP address through them).
+- Requirements on the template: cloud-init (for the SSH key) and the guest tools (XO only reports the IP address through them). With `--iso`, the same requirements apply to the installed system.
+- **Console** (`builders/xo/console.go`): the WebSocket `/api/consoles/{vm id}` of the XO web UI (cookie `token=<XOA_TOKEN>`, `operate` permission), which carries raw RFB to the VM's VNC console. The client does the RFB 3.8 handshake with security type None (XO checks the token) and only sends `KeyEvent` messages. One connection per `BOOT` line.
+- **`--iso`**: the VM is created stopped with `install: {method: cdrom, repository: <ISO VDI>}` and `destroy_cloud_config_vdi: false` (XO would delete the drive at most 10 minutes after the start, during the installation). XO sets the boot order to CD first, and installers cannot always eject the ISO (Debian with UEFI cannot): the builder sets it to `cd` (disk first: the empty disk is skipped until the system is installed) with the JSON-RPC `vm.setBootOrder`, then starts the VM. A template without disks (no `$VBDs`, no `template_info.disks`) gets a new disk named after the VM and needs `--disk`; otherwise `--disk` resizes the template's disk 0. After the stop, `removeInstallMedia` ejects the ISO (JSON-RPC `vm.ejectCd`; deleting the CD VBD instead breaks `vm.convertToTemplate`, which ejects from XO's cache) and deletes the `XO CloudConfigDrive` VDI.
 - Flow:
   1. `POST /pools/{id}/actions/create_vm?sync=true` with the template, CPU, memory, disk, network, cloud-config, `boot: true` and `destroy_cloud_config_vdi: true` (the cloud-config holds the SSH key);
   2. poll `GET /vms/{id}` until `mainIpAddress` (or an `addresses` IPv4) is set;
@@ -135,6 +137,7 @@ The Vates SDK (`xenorchestra-go-sdk`) was evaluated and not used: opendango need
 - **Discovery**: `packer-plugin-<name>` binaries in `PACKER_PLUGIN_PATH`, then Packer's plugin directory (`$PACKER_CONFIG_DIR` or `~/.config/packer/plugins`, searched recursively for the `packer-plugin-<name>_v<version>_x5.0_<os>_<arch>` files that `packer plugins install` writes), then `PATH`. The source type is `<plugin>-<builder>` as in Packer (`xenserver-iso`); the longest plugin name wins, then the first directory, then the highest version. `describe` checks the API version (`x5.*`) and the builder.
 - **Protocol**: opendango starts `<plugin> start builder <name>` with the SDK's magic cookie, reads `5|<minor>|<network>|<address>` on stdout, connects, and uses `packer-plugin-sdk/rpc` as a client: `Prepare(settings, packer_* settings)`, then `Run(ctx, ui, hook)`. The plugin runs in the Dangofile directory: relative paths in its configuration are relative to it. Its stderr (its log) is kept, and its last lines are shown when it fails.
 - **Config**: the FROM flags, unchanged (`--vm_name=x`). Values starting with `[` or `{` are JSON (lists, maps); the others are strings, converted by the plugin (`"2"` → int). The quotes left in FROM flag values are kept (BuildKit already removed the syntactic ones). Flags whose name contains password, secret or token are masked in the log and passed as `packer_sensitive_variables`. Pass secrets with `ARG` and `--build-arg`.
+- **BOOT** is translated to `boot_command` (one entry per line, `${DANGO_HTTP_ADDR}` → `{{ .HTTPIP }}:{{ .HTTPPort }}`; setting `boot_command` as a flag is an error).
 - **CONNECT** is translated to `communicator=ssh`, `ssh_username`, `ssh_port`, `ssh_timeout` (setting these as flags is an error); without CONNECT, `communicator=none`.
 - **SERVE** is translated to `http_directory` (absolute path) and, with `--port`, `http_port_min` = `http_port_max` (setting these as flags is an error): the plugin serves the directory, and `boot_command` uses `{{ .HTTPIP }}:{{ .HTTPPort }}`. `--addr` is an error (the plugin picks its address; vatesfr/xenserver has no setting for it), and `DANGO_HTTP_ADDR` is not exported. The credentials (`ssh_password`, `ssh_private_key_file`, …) are FROM flags: there is no ephemeral key.
 - **Flow**: the plugin creates the machine and connects; when it calls the `packer_provision` hook, opendango runs the stage instructions through the plugin's communicator (`packer.Comm`); then the plugin shuts down and produces its artifact, which opendango prints.
@@ -154,7 +157,7 @@ The Vates SDK (`xenorchestra-go-sdk`) was evaluated and not used: opendango need
 1. **MVP**: parser, `validate`, `xo://` builder, SSH, `ARG`, `ENV`, `USER`, `WORKDIR`, `RUN`, `COPY`, `REBOOT`, `OUTPUT --as=template` and XVA.
 2. ~~Multi-stage, `--target`, `BREAKPOINT`, `--on-error=ask`, parallel builds (`-j`), `fmt`~~ (done).
 3. ~~`packer://` compatibility (builders), tested with `vatesfr/packer-plugin-xenserver`~~ (done); `REBOOT` in packer:// stages, `opendango plugins list|install`.
-4. ~~`SERVE`~~ (done); native `BOOT`, then more builders (QEMU, Proxmox, AWS, vSphere).
+4. ~~`SERVE`, `BOOT` and `FROM --iso`~~ (done); then more builders (QEMU, Proxmox, AWS, vSphere).
 5. ~~Per-stage cache~~ (done); per-instruction caching based on snapshots, if the need is confirmed.
 
 ## Development rules
@@ -177,7 +180,7 @@ The Vates SDK (`xenorchestra-go-sdk`) was evaluated and not used: opendango need
 - Releases: push a `vX.Y.Z` tag; `.github/workflows/release.yml` runs the CI workflow on the tag, then GoReleaser (`.goreleaser.yaml`), which creates a **draft** GitHub release to review. `mise run release:snapshot` builds the archives locally. The version is injected with `-X main.version`.
 - `mise run test:integration` reads `.env` (git-ignored, template in `.env.example`). The integration test cannot run on GitHub-hosted runners (no access to XO): it skips there.
 - Write table-driven tests. The parser and the planner are tested without any infrastructure (Dangofiles live in `testdata/`).
-- Tests that need a real XO instance use the `integration` build tag and read `XOA_ENDPOINT`, `XOA_TOKEN`, `XOA_INSECURE`, `OPENDANGO_TEST_TEMPLATE`, `OPENDANGO_TEST_USER` (optional: `OPENDANGO_TEST_POOL`, `OPENDANGO_TEST_NETWORK`, `OPENDANGO_TEST_SR`). Run them with `go test -tags integration -timeout 60m ./builders/xo/`.
+- Tests that need a real XO instance use the `integration` build tag and read `XOA_ENDPOINT`, `XOA_TOKEN`, `XOA_INSECURE`, `OPENDANGO_TEST_TEMPLATE`, `OPENDANGO_TEST_USER` (optional: `OPENDANGO_TEST_POOL`, `OPENDANGO_TEST_NETWORK`, `OPENDANGO_TEST_SR`, and `OPENDANGO_TEST_ISO` for the installation from an ISO). Run them with `go test -tags integration -timeout 60m ./builders/xo/`.
 - The packer:// end-to-end test (`builders/packer/integration_test.go`) uses `vatesfr/packer-plugin-xenserver` and reads `XAPI_ENDPOINT`, `XAPI_USERNAME`, `XAPI_PASSWORD`, `PACKER_PLUGIN_PATH` and the xo:// variables (`OPENDANGO_TEST_POOL` and `OPENDANGO_TEST_NETWORK` required): the xva builder of the plugin cannot change the network of a cloned template, so the test first makes a temporary template on the DHCP network with xo://. It works around two bugs of the xva builder (v0.11.4) with `--firmware=bios` and `--installtimeout=10m`. The other packer:// tests build `builders/packer/testdata/packer-plugin-opendangotest`, a real plugin (same protocol) that runs the commands locally: no infrastructure needed.
 - Executor unit tests (`internal/build`) use a recording builder and either a scripted communicator or the local `/bin/sh` in a sandbox where `sudo`, `shutdown` and `reboot` are stubs. Never let a unit test run a real `shutdown`, `reboot` or write outside its temporary directories.
 - Validation errors point to the file and line: `Dangofile:12: ...`.

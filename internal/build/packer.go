@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/littlejo/opendango/builders/packer"
+	"github.com/littlejo/opendango/internal/instructions"
 	"github.com/littlejo/opendango/internal/plan"
 )
 
@@ -82,6 +83,15 @@ func runPackerStage(ctx context.Context, p *plan.Plan, stage *plan.Stage, con *c
 			settings["http_port_min"] = sv.Port
 			settings["http_port_max"] = sv.Port
 		}
+	}
+	// BOOT: the plugin types boot_command, where ${DANGO_HTTP_ADDR} is the
+	// address of its HTTP server.
+	if len(stage.Boot) > 0 {
+		var keys []string
+		for _, boot := range stage.Boot {
+			keys = append(keys, strings.ReplaceAll(boot.Keys, instructions.ServeAddrMarker, "{{ .HTTPIP }}:{{ .HTTPPort }}"))
+		}
+		settings["boot_command"] = keys
 	}
 	// What the plugin does when a step fails (its own cleanup).
 	onError := "cleanup"

@@ -39,3 +39,30 @@ func TemplatesWithPrefix(ctx context.Context, c *Client, prefix string) ([]strin
 	}
 	return names, nil
 }
+
+// TemplateMedia returns the names of the disks of a template and the
+// number of its CD drives holding a disc.
+func TemplateMedia(ctx context.Context, c *Client, id string) (disks []string, cds int, err error) {
+	var vbds []struct {
+		VDI string `json:"VDI"`
+		CD  bool   `json:"is_cd_drive"`
+	}
+	path := "/vbds?fields=" + url.QueryEscape("VDI,is_cd_drive") + "&filter=" + url.QueryEscape("VM:"+id)
+	if err := c.do(ctx, http.MethodGet, path, nil, &vbds); err != nil {
+		return nil, 0, err
+	}
+	for _, vbd := range vbds {
+		switch {
+		case vbd.VDI == "":
+		case vbd.CD:
+			cds++
+		default:
+			var vdi object
+			if err := c.do(ctx, http.MethodGet, "/vdis/"+url.PathEscape(vbd.VDI), nil, &vdi); err != nil {
+				return nil, 0, err
+			}
+			disks = append(disks, vdi.NameLabel)
+		}
+	}
+	return disks, cds, nil
+}

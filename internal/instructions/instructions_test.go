@@ -324,3 +324,22 @@ func TestShellQuote(t *testing.T) {
 		t.Errorf("got %s", got)
 	}
 }
+
+func TestParseBoot(t *testing.T) {
+	tests := []struct {
+		src  string
+		want string
+		err  string
+	}{
+		{"BOOT <esc><wait>auto url=http://${V}/ks.cfg<enter>", "<esc><wait>auto url=http://val/ks.cfg<enter>", ""},
+		{"BOOT <leftCtrlOn>c<leftCtrlOff> --- quiet", "<leftCtrlOn>c<leftCtrlOff> --- quiet", ""},
+		{"BOOT", "", "requires the keys to type"},
+		{"BOOT <wait0s>", "", "Expecting a positive wait value"},
+	}
+	for _, tt := range tests {
+		got, err := ParseBoot(parse(t, tt.src), expander())
+		if checkErr(t, tt.src, err, tt.err) && (got.Keys != tt.want || got.Line() != 1) {
+			t.Errorf("%q: got %+v, want keys %q", tt.src, got, tt.want)
+		}
+	}
+}

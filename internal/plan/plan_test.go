@@ -160,16 +160,20 @@ func TestErrors(t *testing.T) {
 		{"FROM xo://t\nCMD x", "Dangofile:2: CMD has no meaning"},
 		{"FROM xo://t\nLABEL a=b", "Dangofile:2: LABEL is not supported yet"},
 		{"FROM xo://t\nADD a b", "Dangofile:2: ADD is not supported yet"},
-		{"FROM xo://t\nBOOT <enter>", "Dangofile:2: BOOT is not supported yet"},
 		{"FROM xo://t\nFOO", "Dangofile:2: unknown instruction FOO"},
 		{"FROM xo://t\nUSER a:b", "Dangofile:2: USER: groups are not supported"},
 		{"FROM xo://t\nSERVE http\nSERVE www", "Dangofile:3: SERVE already set at line 2"},
-		{"FROM xo://t\nCONNECT ssh --user=u\nSERVE http", "Dangofile:3: SERVE must come before CONNECT"},
-		{"FROM xo://t AS a\nCONNECT ssh --user=u\nFROM a\nRUN x\nSERVE http", "Dangofile:5: SERVE must come before CONNECT"},
+		{"FROM xo://t\nCONNECT ssh --user=u\nSERVE http", "Dangofile:3: SERVE must come before BOOT, CONNECT"},
+		{"FROM xo://t AS a\nCONNECT ssh --user=u\nFROM a\nRUN x\nSERVE http", "Dangofile:5: SERVE must come before BOOT, CONNECT"},
 		{"FROM xo://t\nCONNECT ssh --user=u\nFROM xo://t\nENV --persist A=1\nSERVE http", "Dangofile:4: ENV --persist needs a connection"},
 		{"FROM xo://t\nSERVE ../http", "Dangofile:2: SERVE: \"../http\" is outside the Dangofile directory"},
 		{"FROM --remote_host=h packer://xenserver-iso\nSERVE --addr=10.0.0.1 http", "Dangofile:2: SERVE --addr is not supported in a packer:// stage"},
-		{"FROM xo://t\nSERVE http\nENV URL=http://${DANGO_HTTP_ADDR}/ks.cfg", "Dangofile:3: ENV URL: ${DANGO_HTTP_ADDR} is only set in RUN"},
+		{"FROM xo://t\nSERVE http\nENV URL=http://${DANGO_HTTP_ADDR}/ks.cfg", "Dangofile:3: ENV URL: ${DANGO_HTTP_ADDR} is only set after SERVE"},
+		{"FROM xo://t\nBOOT <enter>\nSERVE http", "Dangofile:3: SERVE must come before BOOT"},
+		{"FROM xo://t\nCONNECT ssh --user=u\nBOOT <enter>", "Dangofile:3: BOOT must come before CONNECT"},
+		{"FROM xo://t\nBOOT url=http://${DANGO_HTTP_ADDR}/ks.cfg", "Dangofile:2: BOOT: ${DANGO_HTTP_ADDR} is only set after SERVE"},
+		{"FROM xo://t\nBOOT <wait0s>", "Dangofile:2: BOOT: Expecting a positive wait value"},
+		{"FROM xo://t\nBOOT", "Dangofile:2: BOOT requires the keys to type"},
 		{"FROM xo://t\nSERVE http\nENV DANGO_HTTP_ADDR=x", "Dangofile:3: DANGO_HTTP_ADDR is reserved"},
 		{"ARG DANGO_HTTP_ADDR\nFROM xo://t", "Dangofile:1: DANGO_HTTP_ADDR is reserved"},
 	}
@@ -296,6 +300,19 @@ func TestServe(t *testing.T) {
 	// One server per stage: not inherited.
 	if p.Stages[1].Serve != nil {
 		t.Errorf("stage b inherits SERVE")
+	}
+}
+
+func TestBoot(t *testing.T) {
+	src := "ARG HOST=web\nFROM xo://t\nARG HOST\nSERVE http\nBOOT <esc><wait> auto url=http://${DANGO_HTTP_ADDR}/p.cfg hostname=$HOST it's \"quoted\" \\$HOME\nBOOT <wait5>\nCONNECT ssh --user=u\n"
+	p, err := build(t, src, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	boot := p.Stages[0].Boot
+	want := `<esc><wait> auto url=http://` + instructions.ServeAddrMarker + `/p.cfg hostname=web it's "quoted" $HOME`
+	if len(boot) != 2 || boot[0].Keys != want || boot[0].Line() != 5 || boot[1].Keys != "<wait5>" {
+		t.Errorf("boot = %+v, want first %q", boot, want)
 	}
 }
 

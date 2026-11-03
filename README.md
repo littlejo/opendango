@@ -67,6 +67,46 @@ The cache lives in XO, as tagged templates (`opendango-cache:<key>`).
 `BREAKPOINT` is never cached. The base template is identified by the name in
 `FROM`: after replacing it under the same name, use `--no-cache`.
 
+## Installing from an ISO
+
+`FROM --iso=<ISO>` boots the VM from an ISO of an ISO SR, with an empty
+disk. `SERVE` serves the answer file (preseed, kickstart, autoinstall) and
+`BOOT` types the installer command line into the VM console, with the
+`boot_command` syntax of Packer:
+
+```dockerfile
+FROM --iso=debian-12.11.0-amd64-netinst.iso --template="Debian Bookworm 12" --disk=20G xo:// AS debian
+SERVE http
+# The template boots with UEFI: GRUB command line.
+BOOT <wait10>c<wait2>
+BOOT linux /install.amd/vmlinuz auto=true priority=critical url=http://${DANGO_HTTP_ADDR}/preseed.cfg --- quiet<enter>
+BOOT initrd /install.amd/initrd.gz<enter>
+BOOT boot<enter>
+CONNECT ssh --user=debian --timeout=45m
+USER root
+RUN apt-get install -y nginx
+OUTPUT --as=template debian-12-nginx
+```
+
+- The connection works as with a cloud image: the installed system needs
+  **cloud-init** (it creates the `CONNECT` user with the temporary key from
+  XO's cloud-config drive, kept attached during the installation) and the
+  **guest tools** (XO only learns the IP address through them: install
+  [xen-guest-agent](https://gitlab.com/xen-project/xen-guest-agent) from the
+  answer file). Allow for the installation in `CONNECT --timeout`.
+- The VM boots from its disk first: the empty disk is skipped until the
+  system is installed, so the installer need not eject the ISO.
+- Before `OUTPUT`, the ISO is ejected and the cloud-config drive deleted.
+- A template without a disk ("Other install media") needs `--disk`; a
+  default template ("Debian Bookworm 12") gets its disk resized.
+
+`BOOT` lines are typed in order, once the VM has started and before
+`CONNECT`; what to type depends on the boot menu of the ISO (GRUB with UEFI,
+isolinux with BIOS: `<esc><wait>auto url=...<enter>` for Debian); quotes and spaces are typed as written, `<wait10>`, `<enter>`,
+`<leftCtrlOn>`… are keys, and `\` escapes `$` and `\`. See
+[Packer's boot_command reference](https://developer.hashicorp.com/packer/docs/community-tools/boot-command)
+for the key names.
+
 ## Packer plugins
 
 `FROM packer://<plugin>-<builder>` runs the builder of a Packer plugin, such
@@ -97,9 +137,11 @@ opendango build --build-arg XAPI_PASSWORD="$XAPI_PASSWORD"
 - Plugins are found in `PACKER_PLUGIN_PATH`, in Packer's plugin directory
   (`packer plugins install github.com/vatesfr/xenserver`), or in `PATH`.
 - `SERVE <dir>` sets the plugin's `http_directory` (and `--port` its
-  `http_port_min` and `http_port_max`): the plugin serves it, and
-  `boot_command` reaches it at `{{ .HTTPIP }}:{{ .HTTPPort }}`.
-  `${DANGO_HTTP_ADDR}` and `SERVE --addr` are not available.
+  `http_port_min` and `http_port_max`), and the `BOOT` lines its
+  `boot_command`, with `${DANGO_HTTP_ADDR}` turned into
+  `{{ .HTTPIP }}:{{ .HTTPPort }}`: the same Dangofile lines work with
+  `packer://xenserver-iso`. `SERVE --addr` is not available, nor
+  `$DANGO_HTTP_ADDR` in `RUN`.
 - Only builders are supported. A packer:// stage cannot be a parent stage,
   and `OUTPUT` and `REBOOT` are not available in it.
 
@@ -161,7 +203,7 @@ The template needs **cloud-init** and the **guest tools**.
 | Instruction | Example |
 |---|---|
 | `ARG` | `ARG DEBIAN=12` (before `FROM`: only usable in `FROM`, as in Docker) |
-| `FROM` | `FROM --pool=prod --sr="Local storage" --network="Pool-wide network" --cpus=2 --memory=4G --disk=20G xo://debian-12-cloud AS golden` |
+| `FROM` | `FROM --pool=prod --sr="Local storage" --network="Pool-wide network" --cpus=2 --memory=4G --disk=20G xo://debian-12-cloud AS golden`, `FROM --iso=debian.iso --template="Other install media" --disk=20G xo://` |
 | `CONNECT` | `CONNECT ssh --user=debian --port=22 --timeout=10m` |
 | `RUN` | `RUN apt-get update`, `RUN ["systemctl", "enable", "nginx"]`, `RUN <<EOF ... EOF` |
 | `COPY` | `COPY --chmod=0644 --chown=www-data site/ /var/www/html/` |
@@ -171,6 +213,7 @@ The template needs **cloud-init** and the **guest tools**.
 | `REBOOT` | `REBOOT` |
 | `BREAKPOINT` | `BREAKPOINT "check nginx"` |
 | `SERVE` | `SERVE --port=8080 --addr=10.0.0.5 http/` (before `CONNECT`) |
+| `BOOT` | `BOOT <wait10><esc>auto url=http://${DANGO_HTTP_ADDR}/preseed.cfg<enter>` (before `CONNECT`) |
 | `OUTPUT` | `OUTPUT --as=template "name"`, `OUTPUT --format=xva --compress=zstd ./out.xva` |
 
 `ENV` values only exist during the build; add `--persist` to write them to
@@ -190,7 +233,7 @@ another address. The port is a free one unless `--port` is set. The server
 listens on every interface and has no authentication: do not serve secrets
 on an untrusted network.
 
-`ADD`, `LABEL`, `SHELL` and `BOOT` are planned and
+`ADD`, `LABEL` and `SHELL` are planned and
 rejected for now. `CMD`, `ENTRYPOINT`, `EXPOSE`, `HEALTHCHECK`, `VOLUME`,
 `ONBUILD` and `STOPSIGNAL` have no meaning for a VM image and are rejected.
 

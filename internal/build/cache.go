@@ -55,6 +55,10 @@ func cacheKey(file string, s *plan.Stage, parentKey, contextDir string) (string,
 			return "", &plan.Error{File: file, Line: sv.Line(), Err: err}
 		}
 	}
+	// With the SERVE address as a marker: the port does not matter.
+	for _, boot := range s.Boot {
+		fmt.Fprintf(h, "BOOT %q\n", boot.Keys)
+	}
 	for _, step := range s.Steps {
 		switch st := step.(type) {
 		case *instructions.Arg:

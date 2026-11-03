@@ -12,12 +12,17 @@ package xo_test
 //   OPENDANGO_TEST_USER      the template's default cloud-init user (with sudo)
 // Optional: OPENDANGO_TEST_POOL (required when the template exists in
 // several pools), OPENDANGO_TEST_NETWORK, OPENDANGO_TEST_SR.
+// The installation from an ISO (TestISOEndToEnd) also needs
+// OPENDANGO_TEST_ISO, a Debian 12 DVD in an ISO SR of the pool
+// (debian-12.*-amd64-DVD-1.iso), and Internet access from the VM network.
 //
 //   go test -tags integration -timeout 60m ./builders/xo/
 
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"os"
@@ -317,4 +322,106 @@ OUTPUT --as=template %s
 	for _, n := range []string{name, name + "-2"} {
 		deleteTemplate(ctx, t, client, n)
 	}
+}
+
+// guestAgent is the Vates guest agent: XO only learns the IP address of the
+// VM through it. Debian has no package for it.
+const guestAgent = "https://gitlab.com/xen-project/xen-guest-agent/-/jobs/6041686362/artifacts/raw/target/release/xen-guest-agent_0.4.0_amd64.deb"
+
+// preseed installs Debian 12 from the DVD without questions: no user (the
+// cloud-init default user gets the key), a random root password (the
+// installer requires one), cloud-init for the key and the guest agent for
+// the IP address. The disk is the first one: the cloud-config drive is
+// attached too.
+const preseed = `d-i debian-installer/locale string en_US.UTF-8
+d-i keyboard-configuration/xkb-keymap select us
+d-i netcfg/choose_interface select auto
+d-i netcfg/get_hostname string opendango
+d-i netcfg/get_domain string
+d-i passwd/make-user boolean false
+d-i passwd/root-login boolean true
+d-i passwd/root-password password ROOT_PASSWORD
+d-i passwd/root-password-again password ROOT_PASSWORD
+d-i clock-setup/utc boolean true
+d-i time/zone string UTC
+d-i clock-setup/ntp boolean false
+d-i partman/early_command string debconf-set partman-auto/disk "$(list-devices disk | head -n1)"
+d-i partman-auto/method string regular
+d-i partman-efi/non_efi_system boolean true
+d-i partman-auto/choose_recipe select atomic
+d-i partman-partitioning/confirm_write_new_label boolean true
+d-i partman/choose_partition select finish
+d-i partman/confirm boolean true
+d-i partman/confirm_nooverwrite boolean true
+d-i apt-setup/cdrom/set-first boolean false
+d-i apt-setup/cdrom/set-next boolean false
+d-i apt-setup/cdrom/set-failed boolean false
+d-i apt-setup/use_mirror boolean true
+d-i mirror/country string manual
+d-i mirror/http/hostname string deb.debian.org
+d-i mirror/http/directory string /debian
+d-i mirror/http/proxy string
+tasksel tasksel/first multiselect standard, ssh-server
+d-i pkgsel/include string cloud-init curl sudo
+d-i pkgsel/upgrade select none
+popularity-contest popularity-contest/participate boolean false
+d-i grub-installer/only_debian boolean true
+d-i grub-installer/bootdev string default
+d-i preseed/late_command string in-target sh -c 'curl -fsSL -o /tmp/agent.deb ` + guestAgent + ` && dpkg -i /tmp/agent.deb && rm /tmp/agent.deb'
+d-i cdrom-detect/eject boolean true
+d-i finish-install/reboot_in_progress note
+`
+
+// TestISOEndToEnd installs Debian from its DVD: FROM --iso, SERVE for the
+// preseed file, BOOT to type the installer command line at the GRUB prompt
+// (the "Debian Bookworm 12" template boots with UEFI), then the usual
+// connection through cloud-init. The template must keep neither the ISO
+// nor the cloud-config drive.
+func TestISOEndToEnd(t *testing.T) {
+	env(t, "XOA_ENDPOINT")
+	env(t, "XOA_TOKEN")
+	iso := env(t, "OPENDANGO_TEST_ISO")
+	from := fmt.Sprintf("--iso=%q --template=%q --cpus=2 --memory=2G --disk=10G", iso, "Debian Bookworm 12")
+	if pool := os.Getenv("OPENDANGO_TEST_POOL"); pool != "" {
+		from += fmt.Sprintf(" --pool=%q", pool)
+	}
+	if n := os.Getenv("OPENDANGO_TEST_NETWORK"); n != "" {
+		from += fmt.Sprintf(" --network=%q", n)
+	}
+	ctxDir := t.TempDir()
+	os.Mkdir(filepath.Join(ctxDir, "http"), 0o755)
+	password := make([]byte, 16)
+	rand.Read(password)
+	answers := strings.ReplaceAll(preseed, "ROOT_PASSWORD", hex.EncodeToString(password))
+	if err := os.WriteFile(filepath.Join(ctxDir, "http", "preseed.cfg"), []byte(answers), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	name := fmt.Sprintf("opendango-it-iso-%d", time.Now().Unix())
+	src := fmt.Sprintf(`FROM %s xo:// AS iso
+SERVE http
+BOOT <wait10>c<wait2>
+BOOT linux /install.amd/vmlinuz auto=true priority=critical url=http://${DANGO_HTTP_ADDR}/preseed.cfg hostname=opendango domain= interface=auto --- quiet<enter><wait>
+BOOT initrd /install.amd/initrd.gz<enter><wait>
+BOOT boot<enter>
+CONNECT ssh --user=debian --timeout=45m
+USER root
+RUN grep -q '^12\.' /etc/debian_version && echo "installed $(cat /etc/debian_version)"
+OUTPUT --as=template %s
+`, from, name)
+	var log bytes.Buffer
+	ctx, client := run(t, src, build.Options{ContextDir: ctxDir, Out: io.MultiWriter(os.Stdout, &log), NoCache: true})
+	if !strings.Contains(log.String(), "==> iso: SERVE: GET /preseed.cfg from ") {
+		t.Error("the installer did not fetch the preseed file")
+	}
+	id, err := xo.FindTemplate(ctx, client, name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	disks, cds, err := xo.TemplateMedia(ctx, client, id)
+	if err != nil {
+		t.Error(err)
+	} else if len(disks) != 1 || cds != 0 {
+		t.Errorf("template disks %q, CDs with a disc %d: want one disk and no CD", disks, cds)
+	}
+	deleteTemplate(ctx, t, client, name)
 }

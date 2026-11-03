@@ -42,6 +42,8 @@ type Config struct {
 	HTTPDir     string `mapstructure:"http_directory"`
 	HTTPPortMin int    `mapstructure:"http_port_min"`
 	HTTPPortMax int    `mapstructure:"http_port_max"`
+
+	BootCommand []string `mapstructure:"boot_command"`
 }
 
 type Builder struct{ config Config }
@@ -63,6 +65,9 @@ func (b *Builder) Run(ctx context.Context, ui packersdk.Ui, hook packersdk.Hook)
 	ui.Say(fmt.Sprintf("config: build=%s type=%s on_error=%s count=%d items=%s communicator=%s ssh=%s:%d timeout=%s",
 		c.PackerBuildName, c.PackerBuilderType, c.PackerOnError, c.Count, strings.Join(c.Items, ","),
 		c.Communicator, c.SSHUsername, c.SSHPort, c.SSHTimeout))
+	for _, keys := range c.BootCommand {
+		ui.Say("boot_command: " + keys)
+	}
 	if c.HTTPDir != "" {
 		ui.Say(fmt.Sprintf("http: dir=%s ports=%d-%d", c.HTTPDir, c.HTTPPortMin, c.HTTPPortMax))
 	}

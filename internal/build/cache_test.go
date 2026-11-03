@@ -51,6 +51,7 @@ func TestCacheKey(t *testing.T) {
 	const src = `ARG T=debian
 FROM --cpus=2 xo://${T} AS base
 SERVE --port=8000 http
+BOOT <esc>url=http://${DANGO_HTTP_ADDR}/ks.cfg<enter>
 CONNECT ssh --user=debian
 ARG V=1
 ENV A=$V
@@ -87,6 +88,7 @@ OUTPUT --as=template app
 		{name: "COPY new file", src: src, change: func() { write("site/new.css", "x", 0o644) }},
 		{name: "SERVE content", src: src, change: func() { write("http/ks.cfg", "v2", 0o644) }},
 		{name: "SERVE port", src: strings.Replace(src, "--port=8000", "--port=8001", 1), same: []string{"base", "app"}},
+		{name: "BOOT keys", src: strings.Replace(src, "<enter>", "<wait><enter>", 1)},
 	}
 	for _, tt := range tests {
 		write("site/index.html", "v1", 0o644)
