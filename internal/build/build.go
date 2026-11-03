@@ -74,6 +74,9 @@ type Options struct {
 	// KeepOnError leaves the VM and the intermediate templates in place
 	// when the build fails.
 	KeepOnError bool
+	// Ask asks on Stdin what to do when the build fails: retry the failed
+	// instruction, clean up, or keep the VM. It requires Stdin.
+	Ask bool
 	// Out receives the build log.
 	Out io.Writer
 	// NewBuilder creates the builder of each stage; NewBuilder when nil.
@@ -82,8 +85,8 @@ type Options struct {
 	Dial DialFunc
 	// RetryDelay is the pause between connection attempts; 5s when zero.
 	RetryDelay time.Duration
-	// Stdin is where BREAKPOINT waits for Enter. When nil (no terminal),
-	// BREAKPOINT is skipped with a warning.
+	// Stdin is where BREAKPOINT waits for Enter and Ask reads the answer.
+	// When nil (no terminal), BREAKPOINT is skipped with a warning.
 	Stdin io.Reader
 }
 
@@ -131,6 +134,9 @@ func Run(ctx context.Context, p *plan.Plan, opts Options) (err error) {
 	if opts.NewBuilder == nil {
 		opts.NewBuilder = func(s *plan.Stage, parent string) (Builder, error) { return NewBuilder(s, parent, opts.Out) }
 	}
+	if opts.Ask && opts.Stdin == nil {
+		return errors.New("--on-error=ask needs a terminal")
+	}
 	var stdin *bufio.Reader
 	if opts.Stdin != nil {
 		stdin = bufio.NewReader(opts.Stdin)
@@ -147,9 +153,15 @@ func Run(ctx context.Context, p *plan.Plan, opts Options) (err error) {
 	done := map[*plan.Stage]*executor{}
 	var temporary []*executor
 	defer func() {
-		if err != nil && opts.KeepOnError {
+		// A stage failure was already answered in runStage; this asks for
+		// the failures before any VM exists (the builder of a stage).
+		if err != nil && opts.Ask && len(temporary) > 0 && !answered(err) && ctx.Err() == nil {
+			fmt.Fprintf(opts.Out, "==> Build failed: %v\n", err)
+			err = answer(err, ask(ctx, stdin, opts.Out, "build", false))
+		}
+		if err != nil && keep(err, opts) {
 			for _, e := range temporary {
-				e.say("Build failed, keeping intermediate template %s (--on-error=keep)", e.b.ID())
+				e.say("Build failed, keeping intermediate template %s", e.b.ID())
 			}
 			return
 		}
@@ -231,8 +243,14 @@ func runStage(ctx context.Context, p *plan.Plan, stage *plan.Stage, parent *exec
 		if converted {
 			return
 		}
-		if err != nil && opts.KeepOnError {
-			e.say("Build failed, keeping VM %s (--on-error=keep)", b.ID())
+		// Failures outside the instructions (start, connection, stop,
+		// OUTPUT): no retry, but the VM can be kept.
+		if err != nil && opts.Ask && !answered(err) && ctx.Err() == nil {
+			e.say("Build failed: %v", err)
+			err = answer(err, e.ask(ctx, false))
+		}
+		if err != nil && keep(err, opts) {
+			e.say("Build failed, keeping VM %s", b.ID())
 			return
 		}
 		cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Minute)
@@ -260,8 +278,23 @@ func runStage(ctx context.Context, p *plan.Plan, stage *plan.Stage, parent *exec
 	}
 
 	for _, step := range stage.Steps {
-		if err := e.step(ctx, step); err != nil {
-			return nil, &plan.Error{File: p.File, Line: step.Line(), Err: err}
+		for {
+			err := e.step(ctx, step)
+			if err == nil {
+				break
+			}
+			err = &plan.Error{File: p.File, Line: step.Line(), Err: err}
+			if !opts.Ask || ctx.Err() != nil {
+				return nil, err
+			}
+			e.say("Build failed: %v", err)
+			c := e.ask(ctx, true)
+			if c != choiceRetry {
+				return nil, answer(err, c)
+			}
+			if err := e.reconnect(ctx); err != nil {
+				return nil, err
+			}
 		}
 	}
 
@@ -325,7 +358,8 @@ type executor struct {
 	key        ed25519.PrivateKey
 	signer     gossh.Signer
 	keyComment string
-	// host is the address of the current connection.
+	// host is the address of the current connection; empty once the VM
+	// cannot be reached anymore with the ephemeral key.
 	host string
 
 	// State changed by the instructions.
@@ -631,9 +665,7 @@ func (e *executor) reboot(ctx context.Context) error {
 	}
 }
 
-// breakpoint writes the ephemeral key to a temporary file, prints the SSH
-// command to reach the VM and waits for Enter. The key file is removed when
-// the build resumes or is interrupted.
+// breakpoint prints the SSH command to reach the VM and waits for Enter.
 func (e *executor) breakpoint(ctx context.Context, s *instructions.Breakpoint) error {
 	title := "BREAKPOINT"
 	if s.Message != "" {
@@ -644,46 +676,148 @@ func (e *executor) breakpoint(ctx context.Context, s *instructions.Breakpoint) e
 		return nil
 	}
 	e.say("%s", title)
-
-	block, err := gossh.MarshalPrivateKey(e.key, e.keyComment)
-	if err != nil {
-		return err
-	}
-	f, err := os.CreateTemp("", "opendango-key-")
-	if err != nil {
-		return err
-	}
-	defer os.Remove(f.Name())
-	if _, err := f.Write(pem.EncodeToMemory(block)); err != nil {
-		f.Close()
-		return err
-	}
-	if err := f.Close(); err != nil {
-		return err
-	}
-
 	e.say("Build paused. Connect to the VM with:")
-	fmt.Fprintf(e.out, "    ssh -i %s -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -p %d %s@%s\n",
-		f.Name(), e.connect.Port, e.connect.User, e.host)
+	remove, err := e.printSSH()
+	if err != nil {
+		return err
+	}
+	defer remove()
 	e.say("Press Enter to continue (Ctrl+C aborts the build)")
-
-	// The read cannot be interrupted: on cancellation it is left behind,
-	// and the build ends anyway.
-	read := make(chan error, 1)
-	go func() {
-		_, err := e.stdin.ReadString('\n')
-		read <- err
-	}()
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case err := <-read:
-		if err != nil && !errors.Is(err, io.EOF) {
-			return err
-		}
+	if _, err := readLine(ctx, e.stdin); err != nil && !errors.Is(err, io.EOF) {
+		return err
 	}
 	e.say("Resuming the build")
 	return nil
+}
+
+// printSSH writes the ephemeral key to a temporary file and prints the ssh
+// command that uses it. The returned function removes the file.
+func (e *executor) printSSH() (remove func(), err error) {
+	block, err := gossh.MarshalPrivateKey(e.key, e.keyComment)
+	if err != nil {
+		return nil, err
+	}
+	f, err := os.CreateTemp("", "opendango-key-")
+	if err != nil {
+		return nil, err
+	}
+	remove = func() { os.Remove(f.Name()) }
+	if _, err := f.Write(pem.EncodeToMemory(block)); err != nil {
+		f.Close()
+		remove()
+		return nil, err
+	}
+	if err := f.Close(); err != nil {
+		remove()
+		return nil, err
+	}
+	fmt.Fprintf(e.out, "    ssh -i %s -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -p %d %s@%s\n",
+		f.Name(), e.connect.Port, e.connect.User, e.host)
+	return remove, nil
+}
+
+// readLine reads one line from in, or returns when ctx is done. The read
+// cannot be interrupted: on cancellation it is left behind, and the build
+// ends anyway.
+func readLine(ctx context.Context, in *bufio.Reader) (string, error) {
+	type result struct {
+		line string
+		err  error
+	}
+	read := make(chan result, 1)
+	go func() {
+		line, err := in.ReadString('\n')
+		read <- result{line, err}
+	}()
+	select {
+	case <-ctx.Done():
+		return "", ctx.Err()
+	case r := <-read:
+		return r.line, r.err
+	}
+}
+
+// choice is the answer to --on-error=ask.
+type choice int
+
+const (
+	choiceClean choice = iota
+	choiceKeep
+	choiceRetry
+)
+
+// ask prints the SSH command when the VM was reached, then asks what to do
+// with the failure.
+func (e *executor) ask(ctx context.Context, canRetry bool) choice {
+	if e.host != "" {
+		e.say("Inspect the VM with:")
+		if remove, err := e.printSSH(); err == nil {
+			defer remove()
+		}
+	}
+	return ask(ctx, e.stdin, e.out, e.name, canRetry)
+}
+
+// ask reads the answer until it is valid. End of input and Ctrl+C mean
+// clean up.
+func ask(ctx context.Context, in *bufio.Reader, out io.Writer, name string, canRetry bool) choice {
+	prompt := "[c] clean up and exit, [k] keep the VM and exit"
+	if canRetry {
+		prompt = "[r] retry the instruction, " + prompt
+	}
+	for {
+		fmt.Fprintf(out, "==> %s: %s? ", name, prompt)
+		line, err := readLine(ctx, in)
+		switch strings.ToLower(strings.TrimSpace(line)) {
+		case "c":
+			return choiceClean
+		case "k":
+			return choiceKeep
+		case "r":
+			if canRetry {
+				return choiceRetry
+			}
+		}
+		if err != nil {
+			fmt.Fprintln(out)
+			return choiceClean
+		}
+	}
+}
+
+// answeredError is a failure the user answered with clean or keep.
+type answeredError struct {
+	error
+	keep bool
+}
+
+func (a *answeredError) Unwrap() error { return a.error }
+
+func answer(err error, c choice) error { return &answeredError{error: err, keep: c == choiceKeep} }
+
+func answered(err error) bool {
+	var a *answeredError
+	return errors.As(err, &a)
+}
+
+// keep tells whether a failed build leaves the VM and the intermediate
+// templates in place.
+func keep(err error, opts Options) bool {
+	var a *answeredError
+	if errors.As(err, &a) {
+		return a.keep
+	}
+	return opts.KeepOnError
+}
+
+// reconnect opens a new connection before a retry: the failure may have
+// dropped the previous one (REBOOT, sshd restarted by hand).
+func (e *executor) reconnect(ctx context.Context) error {
+	if e.comm != nil {
+		e.comm.Close()
+		e.comm = nil
+	}
+	return e.open(ctx)
 }
 
 // finish removes the ephemeral key from the image and shuts the VM down.
@@ -700,6 +834,8 @@ func (e *executor) finish(ctx context.Context) error {
 	_ = e.comm.Run(sctx, e.asRoot("shutdown -h now"), io.Discard, io.Discard)
 	e.comm.Close()
 	e.comm = nil
+	// The key is gone and the VM is stopping: no more SSH command to offer.
+	e.host = ""
 	return nil
 }
 

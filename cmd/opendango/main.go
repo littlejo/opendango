@@ -13,6 +13,8 @@ import (
 	"strings"
 	"syscall"
 
+	"golang.org/x/term"
+
 	"github.com/littlejo/opendango/internal/build"
 	"github.com/littlejo/opendango/internal/parser"
 	"github.com/littlejo/opendango/internal/plan"
@@ -120,7 +122,7 @@ func cmdValidate(args []string, stdout, stderr io.Writer) int {
 
 func cmdBuild(args []string, stdout, stderr io.Writer) int {
 	fs, c := newFlagSet("build", stderr)
-	onError := fs.String("on-error", "abort", "on failure: abort (destroy the VM and the intermediate templates) or keep (leave them for debugging)")
+	onError := fs.String("on-error", "abort", "on failure: abort (destroy the VM and the intermediate templates), keep (leave them for debugging) or ask (retry, clean up or keep, from a terminal)")
 	target := fs.String("target", "", "build only this stage and the stages it starts from")
 	if err := fs.Parse(args); err != nil {
 		return 2
@@ -129,8 +131,14 @@ func cmdBuild(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "opendango build: unexpected argument %q\n", fs.Arg(0))
 		return 2
 	}
-	if *onError != "abort" && *onError != "keep" {
-		fmt.Fprintf(stderr, "opendango build: --on-error must be abort or keep\n")
+	if *onError != "abort" && *onError != "keep" && *onError != "ask" {
+		fmt.Fprintf(stderr, "opendango build: --on-error must be abort, keep or ask\n")
+		return 2
+	}
+	// Not a mere character device check: /dev/null is one too.
+	interactive := term.IsTerminal(int(os.Stdin.Fd()))
+	if *onError == "ask" && !interactive {
+		fmt.Fprintf(stderr, "opendango build: --on-error=ask needs a terminal\n")
 		return 2
 	}
 	p, err := loadPlan(c)
@@ -146,10 +154,12 @@ func cmdBuild(args []string, stdout, stderr io.Writer) int {
 		ContextDir:  filepath.Dir(c.file),
 		Target:      *target,
 		KeepOnError: *onError == "keep",
+		Ask:         *onError == "ask",
 		Out:         stdout,
 	}
-	// BREAKPOINT waits for Enter only when someone can press it.
-	if info, err := os.Stdin.Stat(); err == nil && info.Mode()&os.ModeCharDevice != 0 {
+	// BREAKPOINT and --on-error=ask wait for input only when someone can
+	// type it.
+	if interactive {
 		opts.Stdin = os.Stdin
 	}
 

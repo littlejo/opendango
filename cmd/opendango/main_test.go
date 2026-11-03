@@ -33,8 +33,13 @@ func TestUsage(t *testing.T) {
 	if code := run(nil, &stdout, &stderr); code != 2 {
 		t.Errorf("no args: exit %d", code)
 	}
-	if code := run([]string{"build", "--on-error=ask"}, &stdout, &stderr); code != 2 {
-		t.Errorf("--on-error=ask: exit %d", code)
+	if code := run([]string{"build", "--on-error=never"}, &stdout, &stderr); code != 2 {
+		t.Errorf("--on-error=never: exit %d", code)
+	}
+	// go test runs without a terminal on stdin.
+	stderr.Reset()
+	if code := run([]string{"build", "--on-error=ask"}, &stdout, &stderr); code != 2 || !strings.Contains(stderr.String(), "--on-error=ask needs a terminal") {
+		t.Errorf("--on-error=ask: exit %d, stderr %q", code, stderr.String())
 	}
 	if code := run([]string{"nope"}, &stdout, &stderr); code != 2 {
 		t.Errorf("unknown command: exit %d", code)

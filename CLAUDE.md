@@ -46,7 +46,7 @@
 - A stage inherits from its parent: `CONNECT` (it may set its own), `USER`, `WORKDIR` and `ENV`. `ARG` is not inherited, and `FROM` lines only see the global ARGs, like in Docker. Each stage gets its own ephemeral key: cloud-init sees a new instance because XO sets `instance-id` to the VM UUID.
 - `opendango build` builds **every** stage, in file order; `--target X` builds X and its ancestors only.
 - A stage that a selected stage starts from always ends as a template: its `OUTPUT --as=template`, or a temporary `opendango-tmp-<stage>-<unix time>` template deleted at the end of the build (children first). A stage nobody starts from and without `OUTPUT` triggers a warning: its VM is destroyed.
-- On failure the build stops: finished `OUTPUT`s (templates, XVA) of the previous stages are kept; the failing VM and the intermediate templates are deleted, unless `--on-error=keep`.
+- On failure the build stops: finished `OUTPUT`s (templates, XVA) of the previous stages are kept; the failing VM and the intermediate templates are deleted, unless `--on-error=keep` (or the answer `k` to `--on-error=ask`).
 - Stages run sequentially; parallel builds (`-j`) are planned.
 
 Planned instructions fail with `<X> is not supported yet`. `EXPOSE`, `HEALTHCHECK`, `VOLUME`, `CMD`, `ENTRYPOINT`, `ONBUILD` and `STOPSIGNAL` fail with `<X> has no meaning for a VM image`. Both are reported by `validate`.
@@ -56,12 +56,14 @@ Planned instructions fail with `<X> is not supported yet`. `EXPOSE`, `HEALTHCHEC
 Implemented (standard library `flag` package; move to cobra only if the CLI grows):
 
 ```
-opendango build    [-f Dangofile] [--build-arg K=V]... [--target X] [--on-error=abort|keep]
+opendango build    [-f Dangofile] [--build-arg K=V]... [--target X] [--on-error=abort|keep|ask]
 opendango validate [-f Dangofile] [--build-arg K=V]...
 opendango version
 ```
 
-Planned: `--on-error=ask`, `-j N`, `opendango fmt`, `opendango plugins list|install`.
+`--on-error=ask` needs a terminal on stdin (checked with `golang.org/x/term`; `opendango build` exits with code 2 otherwise). When an instruction fails, it prints the `ssh` command (if the VM was reached and the key is still installed) and asks `[r]` retry the instruction (after a new connection), `[c]` clean up (like `abort`) or `[k]` keep (like `keep`). Failures outside the instructions (start, connection, stop, `OUTPUT`, a later stage's builder) offer only `c` and `k`. End of input and Ctrl+C mean `c`. The returned error is the instruction's, whatever the answer.
+
+Planned: `-j N`, `opendango fmt`, `opendango plugins list|install`.
 
 ## Architecture
 
@@ -87,6 +89,7 @@ The `Builder` interface lives in `internal/build`: `Start(cloudConfig)`, `Addres
 | `golang.org/x/crypto/ssh` | SSH client. |
 | `github.com/pkg/sftp` | `COPY` uploads. |
 | `github.com/coder/websocket` | XO JSON-RPC, only for the conversion to a template. |
+| `golang.org/x/term` | Detects a terminal on stdin for `--on-error=ask` and `BREAKPOINT` (`/dev/null` is a character device too, so `os.ModeCharDevice` is not enough). Already required by `x/crypto`. |
 
 The Vates SDK (`xenorchestra-go-sdk`) was evaluated and not used: opendango needs about 8 endpoints, and the SDK covers neither the streamed XVA export nor the conversion to a template, while adding many dependencies.
 
@@ -102,7 +105,7 @@ The Vates SDK (`xenorchestra-go-sdk`) was evaluated and not used: opendango need
   3. connect over SSH and run the instructions;
   4. remove the ephemeral key, `shutdown -h now` from the guest, wait for `Halted`, then `clean_shutdown`, then `hard_shutdown`;
   5. export the XVA (`GET /vms/{id}.xva?compress=`) and/or rename (`PATCH`) and convert to a template;
-  6. clean up: `DELETE /vms/{id}` unless the VM became the template. Cleanup happens **even on failure or Ctrl+C**, unless `--on-error=keep` is set.
+  6. clean up: `DELETE /vms/{id}` unless the VM became the template. Cleanup happens **even on failure or Ctrl+C**, unless `--on-error=keep` is set or `k` is answered to `--on-error=ask`.
 - `vm.convertToTemplate` returns before XO's object cache lists the template: the builder waits for `GET /vm-templates/{id}` before reporting the output done.
 - `FROM <stage>` creates the VM from the parent's template (its UUID, in the root's pool). Once converted, `Destroy` deletes the template (`DELETE /vm-templates/{id}`), which is how intermediate templates are removed.
 
@@ -121,7 +124,7 @@ The Vates SDK (`xenorchestra-go-sdk`) was evaluated and not used: opendango need
 ## Roadmap
 
 1. **MVP**: parser, `validate`, `xo://` builder, SSH, `ARG`, `ENV`, `USER`, `WORKDIR`, `RUN`, `COPY`, `REBOOT`, `OUTPUT --as=template` and XVA.
-2. ~~Multi-stage, `--target`, `BREAKPOINT`~~ (done), parallel builds, `--on-error=ask`, `fmt`.
+2. ~~Multi-stage, `--target`, `BREAKPOINT`, `--on-error=ask`~~ (done), parallel builds, `fmt`.
 3. `packer://` compatibility, tested first with `vatesfr/packer-plugin-xenserver`.
 4. Native `BOOT` and `SERVE`, then more builders (QEMU, Proxmox, AWS, vSphere).
 5. Per-instruction caching based on snapshots.
