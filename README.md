@@ -41,12 +41,31 @@ OUTPUT --as=template debian-nginx
   (not `ARG`).
 - All stages are built; `opendango build --target nginx` builds `nginx` and
   the stages it starts from.
-- A parent stage without `OUTPUT --as=template` gets a temporary template,
-  deleted at the end of the build.
-- If a stage fails, the outputs of the stages already finished are kept.
+- A parent stage without `OUTPUT --as=template` gets an intermediate
+  template, kept in the cache (see below).
+- If a stage fails, the outputs and the cached templates of the stages
+  already finished are kept: the next build resumes from them.
 - Stages are built one at a time. `opendango build -j 4` builds up to four
   stages at the same time, each one as soon as its parent is done. After a
   failure, no new stage starts and the running ones finish.
+
+## Cache
+
+Each stage is a layer: when nothing that makes a stage has changed (its
+instructions, their variables, the files it copies, the stage it starts
+from), the next build reuses its template instead of building it again.
+Put the slow, stable steps (`apt-get upgrade`) in a stage of their own.
+
+```sh
+opendango build --no-cache               # build everything again
+opendango cache prune --older-than=168h  # delete the intermediate cache templates older than a week
+opendango cache prune --dry-run          # list them
+```
+
+The cache lives in XO, as tagged templates (`opendango-cache:<key>`).
+`cache prune` never deletes the `OUTPUT` templates. A stage with a
+`BREAKPOINT` is never cached. The base template is identified by the name in
+`FROM`: after replacing it under the same name, use `--no-cache`.
 
 ## Install
 
@@ -68,6 +87,7 @@ opendango validate -f Dangofile
 opendango build -f Dangofile --build-arg TEMPLATE=debian-13-cloud
 opendango build --target nginx  # one stage and the stages it starts from
 opendango build -j 4            # up to 4 stages (VMs) at the same time
+opendango build --no-cache      # ignore the cache of stage templates
 opendango fmt -w                # rewrite the Dangofile in its canonical layout
 opendango fmt --check           # exit 1 if it is not formatted (CI)
 opendango build --on-error=keep # leave the VM in place when the build fails

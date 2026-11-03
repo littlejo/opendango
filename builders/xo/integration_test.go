@@ -195,7 +195,7 @@ OUTPUT --as=template %s
 `, from, user, name, sibling)
 
 	var log bytes.Buffer
-	ctx, client := run(t, src, build.Options{ContextDir: ctxDir, Out: io.MultiWriter(os.Stdout, &log), Jobs: 2})
+	ctx, client := run(t, src, build.Options{ContextDir: ctxDir, Out: io.MultiWriter(os.Stdout, &log), Jobs: 2, NoCache: true})
 	deleteTemplate(ctx, t, client, name)
 	deleteTemplate(ctx, t, client, sibling)
 	// With -j 2, the sibling starts before app is finished.
@@ -215,3 +215,96 @@ OUTPUT --as=template %s
 type readerFunc func(p []byte) (int, error)
 
 func (f readerFunc) Read(p []byte) (int, error) { return f(p) }
+
+// TestCacheEndToEnd builds twice with the cache, then changes the child
+// stage only: the parent comes from the cache, as an intermediate template
+// that ListCache sees and DeleteCache removes.
+func TestCacheEndToEnd(t *testing.T) {
+	from, user, ctxDir := setup(t)
+	start := time.Now().Add(-time.Minute)
+	name := fmt.Sprintf("opendango-it-cache-%d", time.Now().Unix())
+	src := fmt.Sprintf(`FROM %s AS base
+CONNECT ssh --user=%s --timeout=15m
+USER root
+COPY hello.txt /opt/opendango/
+
+FROM base AS app
+RUN test -f /opt/opendango/hello.txt
+OUTPUT --format=xva --compress=zstd out/app.xva
+OUTPUT --as=template %s
+`, from, user, name)
+
+	client, err := xo.NewClientFromEnv()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Whatever happens, remove the templates and the cache entries made
+	// here, and only those.
+	t.Cleanup(func() {
+		ctx := context.Background()
+		for _, n := range []string{name, name + "-2"} {
+			if id, err := xo.FindTemplate(ctx, client, n); err == nil {
+				xo.DeleteTemplate(ctx, client, id)
+			}
+		}
+		entries, _ := xo.ListCache(ctx, client)
+		for _, e := range entries {
+			if strings.HasPrefix(e.Name, "opendango-cache-base-") && e.Created.After(start) {
+				xo.DeleteCache(ctx, client, e.ID)
+			}
+		}
+	})
+	buildOnce := func(src string) string {
+		var log bytes.Buffer
+		run(t, src, build.Options{ContextDir: ctxDir, Out: io.MultiWriter(os.Stdout, &log)})
+		return log.String()
+	}
+	xva := filepath.Join(ctxDir, "out", "app.xva")
+
+	t.Log("first build: fills the cache")
+	buildOnce(src)
+
+	t.Log("second build: everything from the cache, the XVA from the template")
+	os.Remove(xva)
+	log := buildOnce(src)
+	for _, want := range []string{"==> base: Using the cached template", "==> app: Using the cached template", "==> app: Exporting XVA"} {
+		if !strings.Contains(log, want) {
+			t.Errorf("second build: log lacks %q", want)
+		}
+	}
+	if strings.Contains(log, "Starting VM") {
+		t.Error("second build started a VM")
+	}
+	if info, err := os.Stat(xva); err != nil || info.Size() == 0 {
+		t.Errorf("XVA not exported from the cached template: %v", err)
+	}
+
+	t.Log("third build: the child changes, the parent comes from the cache")
+	src2 := strings.Replace(src, "RUN test -f /opt/opendango/hello.txt", "RUN test -f /opt/opendango/hello.txt && test \"$(id -u)\" = 0", 1)
+	src2 = strings.Replace(src2, "--as=template "+name, "--as=template "+name+"-2", 1)
+	log = buildOnce(src2)
+	if !strings.Contains(log, "==> base: Using the cached template") || !strings.Contains(log, "==> app: Starting VM") {
+		t.Errorf("third build: base must come from the cache and app be rebuilt")
+	}
+
+	ctx := context.Background()
+	entries, err := xo.ListCache(ctx, client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var mine []xo.CacheEntry
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name, "opendango-cache-base-") && e.Created.After(start) {
+			mine = append(mine, e)
+		}
+	}
+	if len(mine) != 1 {
+		t.Fatalf("cache entries of base: %+v, want 1", mine)
+	}
+	if err := xo.DeleteCache(ctx, client, mine[0].ID); err != nil {
+		t.Fatal(err)
+	}
+	for _, n := range []string{name, name + "-2"} {
+		deleteTemplate(ctx, t, client, n)
+	}
+}

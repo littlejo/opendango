@@ -13,9 +13,11 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 
 	"golang.org/x/term"
 
+	"github.com/littlejo/opendango/builders/xo"
 	"github.com/littlejo/opendango/internal/build"
 	"github.com/littlejo/opendango/internal/format"
 	"github.com/littlejo/opendango/internal/parser"
@@ -30,6 +32,7 @@ Commands:
   build      Build the image described by a Dangofile
   validate   Check a Dangofile without building it
   fmt        Rewrite a Dangofile in its canonical layout
+  cache      Manage the cache of stage templates (cache prune)
   version    Print the version
 
 Run 'opendango <command> -h' for the flags of a command.
@@ -51,6 +54,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return cmdValidate(args[1:], stdout, stderr)
 	case "fmt":
 		return cmdFmt(args[1:], stdout, stderr)
+	case "cache":
+		return cmdCache(args[1:], stdout, stderr)
 	case "version":
 		fmt.Fprintln(stdout, "opendango", version)
 		return 0
@@ -130,6 +135,7 @@ func cmdBuild(args []string, stdout, stderr io.Writer) int {
 	onError := fs.String("on-error", "abort", "on failure: abort (destroy the VM and the intermediate templates), keep (leave them for debugging) or ask (retry, clean up or keep, from a terminal)")
 	target := fs.String("target", "", "build only this stage and the stages it starts from")
 	jobs := fs.Int("j", 1, "number of stages built at the same time")
+	noCache := fs.Bool("no-cache", false, "build every stage, without using or filling the cache")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -166,6 +172,7 @@ func cmdBuild(args []string, stdout, stderr io.Writer) int {
 		KeepOnError: *onError == "keep",
 		Ask:         *onError == "ask",
 		Jobs:        *jobs,
+		NoCache:     *noCache,
 		Out:         stdout,
 	}
 	// BREAKPOINT and --on-error=ask wait for input only when someone can
@@ -236,6 +243,66 @@ func cmdFmt(args []string, stdout, stderr io.Writer) int {
 		}
 	default:
 		stdout.Write(out)
+	}
+	return 0
+}
+
+func cmdCache(args []string, stdout, stderr io.Writer) int {
+	if len(args) == 0 || args[0] != "prune" {
+		fmt.Fprintln(stderr, "Usage: opendango cache prune [--older-than=DURATION] [--dry-run]")
+		return 2
+	}
+	fs := flag.NewFlagSet("cache prune", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	olderThan := fs.Duration("older-than", 0, "only delete the templates older than this (e.g. 168h)")
+	dryRun := fs.Bool("dry-run", false, "print what would be deleted, delete nothing")
+	if err := fs.Parse(args[1:]); err != nil {
+		return 2
+	}
+	if fs.NArg() > 0 {
+		fmt.Fprintf(stderr, "opendango cache prune: unexpected argument %q\n", fs.Arg(0))
+		return 2
+	}
+	if *olderThan < 0 {
+		fmt.Fprintln(stderr, "opendango cache prune: --older-than must be positive")
+		return 2
+	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	client, err := xo.NewClientFromEnv()
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
+	}
+	entries, err := xo.ListCache(ctx, client)
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
+	}
+	// Only the intermediate templates: the OUTPUT templates are never
+	// deleted.
+	deleted := 0
+	for _, e := range entries {
+		if time.Since(e.Created) < *olderThan {
+			continue
+		}
+		verb := "Deleting"
+		if *dryRun {
+			verb = "Would delete"
+		}
+		fmt.Fprintf(stdout, "%s %s (%s), created %s\n", verb, e.Name, e.ID, e.Created.Format(time.RFC3339))
+		if *dryRun {
+			continue
+		}
+		if err := xo.DeleteCache(ctx, client, e.ID); err != nil {
+			fmt.Fprintln(stderr, err)
+			return 1
+		}
+		deleted++
+	}
+	if !*dryRun {
+		fmt.Fprintf(stdout, "%d cache template(s) deleted\n", deleted)
 	}
 	return 0
 }

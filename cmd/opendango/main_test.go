@@ -46,6 +46,12 @@ func TestUsage(t *testing.T) {
 	if code := run([]string{"build", "-j", "0"}, &stdout, &stderr); code != 2 {
 		t.Errorf("-j 0: exit %d", code)
 	}
+	if code := run([]string{"cache"}, &stdout, &stderr); code != 2 {
+		t.Errorf("cache: exit %d", code)
+	}
+	if code := run([]string{"cache", "prune", "--older-than=soon"}, &stdout, &stderr); code != 2 {
+		t.Errorf("cache prune --older-than=soon: exit %d", code)
+	}
 	if code := run([]string{"nope"}, &stdout, &stderr); code != 2 {
 		t.Errorf("unknown command: exit %d", code)
 	}

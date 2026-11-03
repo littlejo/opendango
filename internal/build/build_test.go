@@ -32,6 +32,25 @@ type fakeBuilder struct {
 	calls       []string
 	cloudConfig string
 	outputs     []instructions.Output
+	// cache maps the cache keys to template ids; lookups and tags record
+	// what the build did with it.
+	cache   map[string]string
+	lookups []string
+	tags    []string
+}
+
+func (b *fakeBuilder) FindCache(_ context.Context, key string) (bool, error) {
+	b.lookups = append(b.lookups, key)
+	if id, ok := b.cache[key]; ok {
+		b.id = id
+		return true, nil
+	}
+	return false, nil
+}
+
+func (b *fakeBuilder) Tag(_ context.Context, tag string) error {
+	b.tags = append(b.tags, tag)
+	return nil
 }
 
 func (b *fakeBuilder) Start(_ context.Context, cloudConfig string) error {
@@ -496,13 +515,15 @@ func contains(list []string, s string) bool {
 type stageBuilders struct {
 	byStage map[string]*fakeBuilder
 	log     []string
+	// cache is shared by the builders of all stages.
+	cache map[string]string
 }
 
 func newStageBuilders() *stageBuilders { return &stageBuilders{byStage: map[string]*fakeBuilder{}} }
 
 func (sb *stageBuilders) factory() NewBuilderFunc {
 	return func(s *plan.Stage, parent string) (Builder, error) {
-		b := &loggingBuilder{fakeBuilder: fakeBuilder{id: "vm-" + s.Name(), parent: parent}, log: &sb.log}
+		b := &loggingBuilder{fakeBuilder: fakeBuilder{id: "vm-" + s.Name(), parent: parent, cache: sb.cache}, log: &sb.log}
 		sb.byStage[s.Name()] = &b.fakeBuilder
 		return b, nil
 	}
@@ -515,8 +536,11 @@ type loggingBuilder struct {
 
 func (b *loggingBuilder) Output(ctx context.Context, out *instructions.Output) error {
 	what := out.Kind
-	if strings.HasPrefix(out.Name, "opendango-tmp-") {
+	switch {
+	case strings.HasPrefix(out.Name, "opendango-tmp-"):
 		what += "(tmp)"
+	case strings.HasPrefix(out.Name, "opendango-cache-"):
+		what += "(cache)"
 	}
 	*b.log = append(*b.log, b.id+":output:"+what)
 	return b.fakeBuilder.Output(ctx, out)
@@ -547,7 +571,7 @@ func TestMultiStage(t *testing.T) {
 	sb := newStageBuilders()
 	comm := &scriptComm{}
 	p := mustPlan(t, threeStages)
-	if err := Run(context.Background(), p, Options{NewBuilder: sb.factory(), Dial: dialTo(comm)}); err != nil {
+	if err := Run(context.Background(), p, Options{NoCache: true, NewBuilder: sb.factory(), Dial: dialTo(comm)}); err != nil {
 		t.Fatal(err)
 	}
 	// Each stage starts from its parent's template.
@@ -589,7 +613,7 @@ func TestMultiStage(t *testing.T) {
 func TestTarget(t *testing.T) {
 	sb := newStageBuilders()
 	p := mustPlan(t, threeStages)
-	if err := Run(context.Background(), p, Options{Target: "golden", NewBuilder: sb.factory(), Dial: dialTo(&scriptComm{})}); err != nil {
+	if err := Run(context.Background(), p, Options{NoCache: true, Target: "golden", NewBuilder: sb.factory(), Dial: dialTo(&scriptComm{})}); err != nil {
 		t.Fatal(err)
 	}
 	if _, built := sb.byStage["app"]; built {
@@ -627,7 +651,7 @@ OUTPUT --as=template app
 			}
 			return "", nil
 		}}
-		err := Run(context.Background(), mustPlan(t, src), Options{NewBuilder: sb.factory(), Dial: dialTo(comm), KeepOnError: keep})
+		err := Run(context.Background(), mustPlan(t, src), Options{NoCache: true, NewBuilder: sb.factory(), Dial: dialTo(comm), KeepOnError: keep})
 		if err == nil || err.Error() != "Dangofile:9: RUN: exit code 1" {
 			t.Fatalf("keep=%v: got %v", keep, err)
 		}
@@ -859,7 +883,7 @@ func TestOnErrorAsk(t *testing.T) {
 	t.Run("multi-stage keep", func(t *testing.T) {
 		sb := newStageBuilders()
 		src := "FROM xo://t AS base\nCONNECT ssh --user=debian\nFROM base AS app\nRUN flaky\n"
-		err := Run(context.Background(), mustPlan(t, src), Options{NewBuilder: sb.factory(), Dial: dialTo(flakyComm(1)), Out: io.Discard, Ask: true, Stdin: strings.NewReader("k\n")})
+		err := Run(context.Background(), mustPlan(t, src), Options{NoCache: true, NewBuilder: sb.factory(), Dial: dialTo(flakyComm(1)), Out: io.Discard, Ask: true, Stdin: strings.NewReader("k\n")})
 		if err == nil {
 			t.Fatal("expected an error")
 		}
@@ -1003,7 +1027,7 @@ OUTPUT --as=template b
 		}
 		pb := &parallelBuilders{gates: map[string]func(){"a": meet, "b": meet}}
 		var log syncBuffer
-		err := Run(context.Background(), mustPlan(t, src), Options{NewBuilder: pb.factory(), Dial: dialNew(nil), Out: &log, Jobs: tt.jobs})
+		err := Run(context.Background(), mustPlan(t, src), Options{NoCache: true, NewBuilder: pb.factory(), Dial: dialNew(nil), Out: &log, Jobs: tt.jobs})
 		if err != nil {
 			t.Fatalf("-j %d: %v", tt.jobs, err)
 		}
