@@ -89,6 +89,7 @@ OUTPUT --as=template app
 		{name: "SERVE content", src: src, change: func() { write("http/ks.cfg", "v2", 0o644) }},
 		{name: "SERVE port", src: strings.Replace(src, "--port=8000", "--port=8001", 1), same: []string{"base", "app"}},
 		{name: "BOOT keys", src: strings.Replace(src, "<enter>", "<wait><enter>", 1)},
+		{name: "SHELL", src: strings.Replace(src, "RUN apt-get update", "SHELL [\"/bin/bash\", \"-c\"]\nRUN apt-get update", 1)},
 	}
 	for _, tt := range tests {
 		write("site/index.html", "v1", 0o644)
@@ -135,6 +136,7 @@ CONNECT ssh --user=debian
 USER root
 WORKDIR /opt
 ENV A=1
+SHELL ["/bin/bash", "-c"]
 RUN base-step
 
 FROM base AS app
@@ -214,14 +216,14 @@ func TestCacheHit(t *testing.T) {
 		if p := sb.byStage["app"].parent; p != "tmpl-base" {
 			t.Errorf("app starts from %q", p)
 		}
-		// The replayed USER, WORKDIR and ENV of base apply to app.
+		// The replayed USER, SHELL, WORKDIR and ENV of base apply to app.
 		var run string
 		for _, c := range comm.commands {
 			if strings.Contains(c, "app-step-2") {
 				run = c
 			}
 		}
-		for _, want := range []string{"sudo -n -H -u 'root'", "cd '\\''/opt'\\''", "export A='\\''1'\\''"} {
+		for _, want := range []string{"sudo -n -H -u 'root'", "cd '\\''/opt'\\''", "export A='\\''1'\\''", "exec '\\''/bin/bash'\\'' '\\''-c'\\'' '\\''app-step-2'\\''"} {
 			if !strings.Contains(run, want) {
 				t.Errorf("RUN %q lacks %q", run, want)
 			}

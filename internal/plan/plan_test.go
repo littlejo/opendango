@@ -303,6 +303,21 @@ func TestServe(t *testing.T) {
 	}
 }
 
+func TestShell(t *testing.T) {
+	// SHELL needs no connection: it only changes the following RUN.
+	src := "FROM xo://t\nSHELL [\"/bin/bash\", \"-c\"]\nCONNECT ssh --user=u\nRUN echo\n"
+	p, err := build(t, src, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sh, ok := p.Stages[0].Steps[0].(*instructions.Shell); !ok || sh.Line() != 2 || len(sh.Args) != 2 {
+		t.Errorf("steps = %+v", p.Stages[0].Steps)
+	}
+	if _, err := build(t, "FROM xo://t\nSHELL bash\n", nil); err == nil || err.Error() != `Dangofile:2: SHELL requires the JSON form: SHELL ["executable", "parameters"]` {
+		t.Errorf("err = %v", err)
+	}
+}
+
 func TestBoot(t *testing.T) {
 	src := "ARG HOST=web\nFROM xo://t\nARG HOST\nSERVE http\nBOOT <esc><wait> auto url=http://${DANGO_HTTP_ADDR}/p.cfg hostname=$HOST it's \"quoted\" \\$HOME\nBOOT <wait5>\nCONNECT ssh --user=u\n"
 	p, err := build(t, src, nil)
