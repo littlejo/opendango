@@ -121,6 +121,7 @@ WORKDIR /opt/opendango
 COPY --chmod=0640 hello.txt ./
 RUN test "$(cat /opt/opendango/hello.txt)" = "hello from opendango"
 RUN grep -q '^OPENDANGO_IT="1"$' /etc/environment
+RUN test -f /root/retried || { touch /root/retried; exit 1; }
 REBOOT
 BREAKPOINT checked by the test
 RUN test -f /opt/opendango/hello.txt
@@ -128,21 +129,28 @@ OUTPUT --format=xva --compress=zstd out/it.xva
 OUTPUT --as=template %s
 `, from, user, name)
 
+	// The first run of the `retried` RUN fails: --on-error=ask answers r.
 	// At the BREAKPOINT, log in with the printed ssh command, as a user would.
 	if _, err := exec.LookPath("ssh"); err != nil {
 		t.Fatal("the BREAKPOINT check needs the ssh client")
 	}
 	var log bytes.Buffer
 	sshCmd := regexp.MustCompile(`(?m)^    (ssh -i .*)$`)
-	breakpoint := false
+	breakpoint, retried := false, false
 	stdin := readerFunc(func(p []byte) (int, error) {
+		if strings.HasSuffix(log.String(), "exit? ") {
+			retried = true
+			return copy(p, "r\n"), nil
+		}
 		// This runs in the build's goroutine: t.Error, not t.Fatal.
 		breakpoint = true
-		m := sshCmd.FindStringSubmatch(log.String())
-		if m == nil {
+		// The last one: the key file of the earlier failure is removed.
+		all := sshCmd.FindAllStringSubmatch(log.String(), -1)
+		if all == nil {
 			t.Error("no ssh command in the log")
 			return copy(p, "\n"), nil
 		}
+		m := all[len(all)-1]
 		out, err := exec.Command("/bin/sh", "-c", m[1]+" -o BatchMode=yes test -f /opt/opendango/hello.txt").CombinedOutput()
 		if err != nil {
 			t.Errorf("%s: %v\n%s", m[1], err, out)
@@ -150,9 +158,9 @@ OUTPUT --as=template %s
 		return copy(p, "\n"), nil
 	})
 
-	ctx, client := run(t, src, build.Options{ContextDir: ctxDir, Out: io.MultiWriter(os.Stdout, &log), Stdin: stdin})
-	if !breakpoint {
-		t.Error("the build did not stop at the BREAKPOINT")
+	ctx, client := run(t, src, build.Options{ContextDir: ctxDir, Out: io.MultiWriter(os.Stdout, &log), Stdin: stdin, Ask: true})
+	if !breakpoint || !retried {
+		t.Errorf("BREAKPOINT reached: %v, failed RUN retried: %v", breakpoint, retried)
 	}
 	info, err := os.Stat(filepath.Join(ctxDir, "out", "it.xva"))
 	if err != nil || info.Size() == 0 {

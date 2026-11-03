@@ -65,6 +65,7 @@ opendango validate -f Dangofile
 opendango build -f Dangofile --build-arg TEMPLATE=debian-13-cloud
 opendango build --target nginx  # one stage and the stages it starts from
 opendango build --on-error=keep # leave the VM in place when the build fails
+opendango build --on-error=ask  # on failure: retry the instruction, clean up or keep
 ```
 
 The variables are the same as [xo-gocli](https://github.com/littlejo/xo-gocli).
@@ -82,7 +83,14 @@ The variables are the same as [xo-gocli](https://github.com/littlejo/xo-gocli).
 5. The `OUTPUT` instructions run: XVA exports, then the conversion to a
    template.
 6. The VM is deleted unless it became the template, also when the build
-   fails or is interrupted (except with `--on-error=keep`).
+   fails or is interrupted (except with `--on-error=keep`, or `k` with
+   `--on-error=ask`).
+
+With `--on-error=ask` (from a terminal only), a failed instruction prints the
+`ssh` command to inspect the VM and asks: `r` retries the instruction (after
+a fix made by hand, for instance), `c` cleans up, `k` keeps the VM and the
+intermediate templates. A failure outside the instructions (VM start,
+connection, `OUTPUT`) only offers `c` and `k`.
 
 The template needs **cloud-init** and the **guest tools**.
 

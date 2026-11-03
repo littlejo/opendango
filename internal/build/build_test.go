@@ -748,3 +748,151 @@ func TestBreakpoint(t *testing.T) {
 		}
 	})
 }
+
+// failingOutput is a builder whose OUTPUT fails.
+type failingOutput struct{ fakeBuilder }
+
+func (b *failingOutput) Output(context.Context, *instructions.Output) error {
+	b.calls = append(b.calls, "output")
+	return errors.New("export failed")
+}
+
+func TestOnErrorAsk(t *testing.T) {
+	const src = "FROM xo://t\nCONNECT ssh --user=debian\nRUN true\nRUN flaky\nOUTPUT --as=template\n"
+	// flakyComm fails the first `fails` runs of the flaky RUN.
+	flakyComm := func(fails int) *scriptComm {
+		return &scriptComm{reply: func(cmd string) (string, error) {
+			if strings.Contains(cmd, "flaky") && fails > 0 {
+				fails--
+				return "", &sshcomm.ExitError{Code: 3}
+			}
+			return "", nil
+		}}
+	}
+	count := func(list []string, s string) (n int) {
+		for _, x := range list {
+			if x == s {
+				n++
+			}
+		}
+		return n
+	}
+
+	t.Run("retry", func(t *testing.T) {
+		b := &fakeBuilder{}
+		comm := flakyComm(2)
+		var log bytes.Buffer
+		err := Run(context.Background(), mustPlan(t, src), Options{NewBuilder: only(b), Dial: dialTo(comm), Out: &log, Ask: true, Stdin: strings.NewReader("r\nr\n")})
+		if err != nil {
+			t.Fatalf("%v\n%s", err, log.String())
+		}
+		if got := count(comm.commands, "/bin/sh -c 'flaky'"); got != 3 {
+			t.Errorf("flaky ran %d times, want 3", got)
+		}
+		// Each retry reconnects.
+		if got := count(b.calls, "address"); got != 3 {
+			t.Errorf("address called %d times, want 3: %v", got, b.calls)
+		}
+		for _, want := range []string{
+			"==> stage-0: Build failed: Dangofile:4: RUN: exit code 3\n",
+			"==> stage-0: Inspect the VM with:\n    ssh -i ",
+			"-p 22 debian@192.0.2.10\n",
+			"[r] retry the instruction, [c] clean up and exit, [k] keep the VM and exit? ",
+		} {
+			if !strings.Contains(log.String(), want) {
+				t.Errorf("log lacks %q:\n%s", want, log.String())
+			}
+		}
+		if !contains(b.calls, "output:template") {
+			t.Errorf("build did not finish: %v", b.calls)
+		}
+	})
+
+	t.Run("keep, clean and end of input", func(t *testing.T) {
+		for _, tt := range []struct {
+			input   string
+			destroy bool
+			prompts int
+		}{
+			{"k\n", false, 1},
+			{"c\n", true, 1},
+			{"what\nK\n", false, 2},
+			{"", true, 1},
+		} {
+			b := &fakeBuilder{}
+			var log bytes.Buffer
+			err := Run(context.Background(), mustPlan(t, src), Options{NewBuilder: only(b), Dial: dialTo(flakyComm(1)), Out: &log, Ask: true, Stdin: strings.NewReader(tt.input)})
+			// The error is the instruction's, whatever the answer.
+			if err == nil || err.Error() != "Dangofile:4: RUN: exit code 3" {
+				t.Fatalf("%q: err = %v", tt.input, err)
+			}
+			if contains(b.calls, "destroy") != tt.destroy {
+				t.Errorf("%q: calls %v, want destroy=%v", tt.input, b.calls, tt.destroy)
+			}
+			if got := strings.Count(log.String(), "exit? "); got != tt.prompts {
+				t.Errorf("%q: %d prompts, want %d:\n%s", tt.input, got, tt.prompts, log.String())
+			}
+		}
+	})
+
+	t.Run("failure outside the instructions", func(t *testing.T) {
+		b := &failingOutput{}
+		var log bytes.Buffer
+		newBuilder := func(*plan.Stage, string) (Builder, error) { return b, nil }
+		err := Run(context.Background(), mustPlan(t, src), Options{NewBuilder: newBuilder, Dial: dialTo(flakyComm(0)), Out: &log, Ask: true, Stdin: strings.NewReader("r\nk\n")})
+		if err == nil || !strings.Contains(err.Error(), "export failed") {
+			t.Fatalf("err = %v", err)
+		}
+		if contains(b.calls, "destroy") {
+			t.Errorf("VM destroyed after keep: %v", b.calls)
+		}
+		// No retry, and no ssh command: the key is gone and the VM stopped.
+		if strings.Contains(log.String(), "[r]") || strings.Contains(log.String(), "ssh -i") {
+			t.Errorf("log:\n%s", log.String())
+		}
+		if got := strings.Count(log.String(), "exit? "); got != 2 {
+			t.Errorf("%d prompts, want 2 (r is not valid here):\n%s", got, log.String())
+		}
+	})
+
+	t.Run("multi-stage keep", func(t *testing.T) {
+		sb := newStageBuilders()
+		src := "FROM xo://t AS base\nCONNECT ssh --user=debian\nFROM base AS app\nRUN flaky\n"
+		err := Run(context.Background(), mustPlan(t, src), Options{NewBuilder: sb.factory(), Dial: dialTo(flakyComm(1)), Out: io.Discard, Ask: true, Stdin: strings.NewReader("k\n")})
+		if err == nil {
+			t.Fatal("expected an error")
+		}
+		// Keep applies to the intermediate template too.
+		if got := strings.Join(sb.log, " "); got != "vm-base:output:template(tmp)" {
+			t.Errorf("log = %q", got)
+		}
+	})
+
+	t.Run("Ctrl+C at the prompt", func(t *testing.T) {
+		b := &fakeBuilder{}
+		var log bytes.Buffer
+		ctx, cancel := context.WithCancel(context.Background())
+		release := make(chan struct{})
+		t.Cleanup(func() { close(release) })
+		stdin := readerFunc(func([]byte) (int, error) {
+			cancel()
+			<-release
+			return 0, io.EOF
+		})
+		err := Run(ctx, mustPlan(t, src), Options{NewBuilder: only(b), Dial: dialTo(flakyComm(1)), Out: &log, Ask: true, Stdin: stdin})
+		if err == nil {
+			t.Fatal("expected an error")
+		}
+		if !contains(b.calls, "destroy") || strings.Count(log.String(), "exit? ") != 1 {
+			t.Errorf("calls %v, log:\n%s", b.calls, log.String())
+		}
+	})
+
+	t.Run("needs stdin", func(t *testing.T) {
+		b := &fakeBuilder{}
+		err := Run(context.Background(), mustPlan(t, src), Options{NewBuilder: only(b), Dial: dialTo(flakyComm(0)), Ask: true})
+		if err == nil || !strings.Contains(err.Error(), "needs a terminal") || len(b.calls) != 0 {
+			t.Errorf("err = %v, calls %v", err, b.calls)
+		}
+	})
+}
