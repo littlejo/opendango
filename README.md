@@ -181,8 +181,8 @@ The variables are the same as [xo-gocli](https://github.com/littlejo/xo-gocli).
    `CONNECT` user.
 2. opendango waits for the IP address reported by the guest tools and
    connects over SSH.
-3. `RUN`, `COPY`, `ENV`, `USER`, `WORKDIR`, `REBOOT` and `BREAKPOINT` run in
-   order.
+3. `RUN`, `COPY`, `ENV`, `USER`, `SHELL`, `WORKDIR`, `REBOOT` and
+   `BREAKPOINT` run in order.
 4. The temporary key is removed and the VM is shut down.
 5. The `OUTPUT` instructions run: XVA exports, then the conversion to a
    template.
@@ -206,6 +206,7 @@ The template needs **cloud-init** and the **guest tools**.
 | `FROM` | `FROM --pool=prod --sr="Local storage" --network="Pool-wide network" --cpus=2 --memory=4G --disk=20G xo://debian-12-cloud AS golden`, `FROM --iso=debian.iso --template="Other install media" --disk=20G xo://` |
 | `CONNECT` | `CONNECT ssh --user=debian --port=22 --timeout=10m` |
 | `RUN` | `RUN apt-get update`, `RUN ["systemctl", "enable", "nginx"]`, `RUN <<EOF ... EOF` |
+| `SHELL` | `SHELL ["/bin/bash", "-o", "pipefail", "-c"]` |
 | `COPY` | `COPY --chmod=0644 --chown=www-data site/ /var/www/html/` |
 | `ENV` | `ENV DEBIAN_FRONTEND=noninteractive`, `ENV --persist APP_ENV=prod` |
 | `USER` | `USER root` (through `sudo`) |
@@ -233,8 +234,11 @@ another address. The port is a free one unless `--port` is set. The server
 listens on every interface and has no authentication: do not serve secrets
 on an untrusted network.
 
-`ADD`, `LABEL` and `SHELL` are planned and
-rejected for now. `CMD`, `ENTRYPOINT`, `EXPOSE`, `HEALTHCHECK`, `VOLUME`,
+`SHELL` changes the shell of the shell form of `RUN` (`/bin/sh -c` by
+default), as in Docker: the script is its last argument. The exec form
+(`RUN ["..."]`) is not affected.
+
+`ADD` and `LABEL` are planned and rejected for now. `CMD`, `ENTRYPOINT`, `EXPOSE`, `HEALTHCHECK`, `VOLUME`,
 `ONBUILD` and `STOPSIGNAL` have no meaning for a VM image and are rejected.
 
 See [`examples/`](examples/) and [`CLAUDE.md`](CLAUDE.md) for the design and

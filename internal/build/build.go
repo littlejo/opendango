@@ -312,7 +312,8 @@ type console struct {
 }
 
 // runStage builds one stage. parent is the executor of the parent stage
-// (nil for a root stage), whose final USER, WORKDIR and ENV are inherited.
+// (nil for a root stage), whose final USER, SHELL, WORKDIR and ENV are
+// inherited.
 // needed is true when a selected stage starts from this one: the VM then
 // always ends as a template. key is the stage's cache key, empty when the
 // stage is not cached.
@@ -340,8 +341,9 @@ func runStage(ctx context.Context, p *plan.Plan, stage *plan.Stage, parent *exec
 		console:    con,
 	}
 	if parent != nil {
-		// Like a Docker image: USER, WORKDIR and ENV carry over, ARG does not.
-		e.user, e.workdir = parent.user, parent.workdir
+		// Like a Docker image: USER, SHELL, WORKDIR and ENV carry over, ARG
+		// does not.
+		e.user, e.shell, e.workdir = parent.user, parent.shell, parent.workdir
 		e.env = append([]instructions.KeyValue{}, parent.env...)
 	}
 
@@ -357,7 +359,7 @@ func runStage(ctx context.Context, p *plan.Plan, stage *plan.Stage, parent *exec
 		if found {
 			e.say("Using the cached template %s (key %s)", b.ID(), key[:12])
 			e.cached = true
-			// The child stages inherit the final USER, WORKDIR and ENV.
+			// The child stages inherit the final USER, SHELL, WORKDIR and ENV.
 			e.replay(stage.Steps)
 			if err := exportXVA(ctx, p, stage, e, opts); err != nil {
 				return nil, err
@@ -551,8 +553,8 @@ func exportXVA(ctx context.Context, p *plan.Plan, stage *plan.Stage, e *executor
 	return nil
 }
 
-// replay applies the state changes of the steps (ARG, ENV, USER, WORKDIR)
-// without running anything: for a stage found in the cache.
+// replay applies the state changes of the steps (ARG, ENV, USER, SHELL,
+// WORKDIR) without running anything: for a stage found in the cache.
 func (e *executor) replay(steps []instructions.Instruction) {
 	for _, step := range steps {
 		switch s := step.(type) {
@@ -566,6 +568,8 @@ func (e *executor) replay(steps []instructions.Instruction) {
 			}
 		case *instructions.User:
 			e.user = s.Name
+		case *instructions.Shell:
+			e.shell = s.Args
 		case *instructions.Workdir:
 			e.workdir = e.workdirPath(s.Path)
 		}
@@ -613,7 +617,9 @@ type executor struct {
 	answered bool
 
 	// State changed by the instructions.
-	user    string
+	user string
+	// shell is the SHELL of the shell form of RUN; nil for /bin/sh -c.
+	shell   []string
 	workdir string
 	args    []instructions.KeyValue
 	env     []instructions.KeyValue
@@ -691,6 +697,9 @@ func (e *executor) step(ctx context.Context, step instructions.Instruction) erro
 	case *instructions.User:
 		e.user = s.Name
 		return nil
+	case *instructions.Shell:
+		e.shell = s.Args
+		return nil
 	case *instructions.Workdir:
 		dir := e.workdirPath(s.Path)
 		e.say("WORKDIR %s", dir)
@@ -701,7 +710,13 @@ func (e *executor) step(ctx context.Context, step instructions.Instruction) erro
 		return nil
 	case *instructions.Run:
 		e.say("RUN %s", firstLine(s.Script))
-		if err := e.run(ctx, e.wrap(s.Script)); err != nil {
+		script := s.Script
+		if e.shell != nil && !s.Exec {
+			// The exports and cd stay in /bin/sh, which then becomes the
+			// SHELL with the script as its last argument.
+			script = "exec " + quoteAll(e.shell) + " " + q(script)
+		}
+		if err := e.run(ctx, e.wrap(script)); err != nil {
 			return fmt.Errorf("RUN: %w", err)
 		}
 		return nil
@@ -1118,6 +1133,15 @@ func setVar(vars []instructions.KeyValue, key, value string) []instructions.KeyV
 }
 
 func q(s string) string { return instructions.ShellQuote(s) }
+
+// quoteAll quotes each word for a POSIX shell.
+func quoteAll(words []string) string {
+	quoted := make([]string, len(words))
+	for i, w := range words {
+		quoted[i] = q(w)
+	}
+	return strings.Join(quoted, " ")
+}
 
 func firstLine(s string) string {
 	s = strings.TrimSpace(s)

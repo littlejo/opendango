@@ -301,6 +301,39 @@ OUTPUT --as=template golden
 
 // TestRemovesEphemeralKey checks that the key injected by cloud-init is
 // removed from authorized_keys, and only that key.
+// TestShell runs the shell form of RUN with SHELL, inherited by a child
+// stage, with the local shell. The exec form keeps /bin/sh.
+func TestShell(t *testing.T) {
+	if _, err := os.Stat("/bin/bash"); err != nil {
+		t.Skip("/bin/bash is not installed")
+	}
+	out := t.TempDir()
+	src := fmt.Sprintf(`FROM xo://t AS base
+CONNECT ssh --user=tester
+WORKDIR %[1]s
+ENV V=env
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+RUN echo "$0 $V $PWD" > shell.txt
+RUN ["/bin/sh", "-c", "echo $0 > exec.txt"]
+OUTPUT --as=template base
+
+FROM base AS child
+RUN echo "$0" > child.txt
+RUN false | true
+`, out)
+	var log bytes.Buffer
+	err := Run(context.Background(), mustPlan(t, src), Options{Out: &log, NewBuilder: newStageBuilders().factory(), Dial: dialTo(newLocalComm(t)), NoCache: true})
+	// pipefail: the last RUN fails.
+	if err == nil || !strings.HasPrefix(err.Error(), "Dangofile:12: RUN: ") {
+		t.Fatalf("err = %v\n%s", err, log.String())
+	}
+	for name, want := range map[string]string{"shell.txt": "/bin/bash env " + out + "\n", "exec.txt": "/bin/sh\n", "child.txt": "/bin/bash\n"} {
+		if got := readFile(t, filepath.Join(out, name)); got != want {
+			t.Errorf("%s = %q, want %q", name, got, want)
+		}
+	}
+}
+
 func TestRemovesEphemeralKey(t *testing.T) {
 	comm := newLocalComm(t)
 	b := &fakeBuilder{}

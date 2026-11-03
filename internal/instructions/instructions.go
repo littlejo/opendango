@@ -101,6 +101,15 @@ type Workdir struct {
 type Run struct {
 	Pos
 	Script string
+	// Exec is true for the exec (JSON) form, which SHELL does not change.
+	Exec bool
+}
+
+// Shell sets the shell that runs the shell form of RUN: the script is its
+// last argument, like in Docker.
+type Shell struct {
+	Pos
+	Args []string
 }
 
 // Copy uploads files from the build context into the VM.
@@ -179,7 +188,7 @@ var Forbidden = map[string]bool{
 
 // NotYetSupported lists the instructions planned but not implemented yet.
 var NotYetSupported = map[string]bool{
-	"ADD": true, "LABEL": true, "SHELL": true,
+	"ADD": true, "LABEL": true,
 }
 
 var (
@@ -370,6 +379,7 @@ func ParseRun(cmd *parser.Command) (*Run, error) {
 			quoted[i] = ShellQuote(a)
 		}
 		run.Script = "exec " + strings.Join(quoted, " ")
+		run.Exec = true
 	case len(cmd.Heredocs) > 0 && onlyHeredocMarkers(cmd.Args[0]):
 		// RUN <<EOF: the heredoc content is the script itself.
 		for _, h := range cmd.Heredocs {
@@ -390,6 +400,21 @@ func ParseRun(cmd *parser.Command) (*Run, error) {
 		run.Script = cmd.Args[0]
 	}
 	return run, nil
+}
+
+// ParseShell parses `SHELL ["executable", "parameters"...]`. Like in
+// Docker, only the JSON form is accepted and the arguments are not expanded.
+func ParseShell(cmd *parser.Command) (*Shell, error) {
+	if err := noFlags(cmd); err != nil {
+		return nil, err
+	}
+	if !cmd.JSON {
+		return nil, fmt.Errorf(`SHELL requires the JSON form: SHELL ["executable", "parameters"]`)
+	}
+	if len(cmd.Args) == 0 || cmd.Args[0] == "" {
+		return nil, fmt.Errorf("SHELL requires at least the executable")
+	}
+	return &Shell{Pos: pos(cmd), Args: cmd.Args}, nil
 }
 
 // ParseCopy parses `COPY [--chmod=MODE] [--chown=USER[:GROUP]] <src>... <dest>`.

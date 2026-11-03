@@ -15,6 +15,7 @@ CONNECT --user=debian ssh
 RUN apt-get update && \
     apt-get -y upgrade
 RUN ["echo", "hi"]
+SHELL ["/bin/bash", "-c"]
 RUN <<EOF
 echo a
 EOF
@@ -34,11 +35,12 @@ OUTPUT --format=xva --compress=zstd ./dist/x.xva
 		{Keyword: "CONNECT", Flags: []string{"--user=debian"}, Args: []string{"ssh"}, StartLine: 5},
 		{Keyword: "RUN", Args: []string{"apt-get update &&     apt-get -y upgrade"}, StartLine: 6},
 		{Keyword: "RUN", Args: []string{"echo", "hi"}, JSON: true, StartLine: 8},
-		{Keyword: "RUN", Args: []string{"<<EOF"}, Heredocs: []Heredoc{{Name: "EOF", Content: "echo a\n"}}, StartLine: 9},
-		{Keyword: "COPY", Flags: []string{"--chmod=0600"}, Args: []string{"a", "b", "/etc/"}, StartLine: 12},
-		{Keyword: "REBOOT", StartLine: 13},
-		{Keyword: "OUTPUT", Flags: []string{"--as=template"}, Args: []string{`"golden debian"`}, StartLine: 14},
-		{Keyword: "OUTPUT", Flags: []string{"--format=xva", "--compress=zstd"}, Args: []string{"./dist/x.xva"}, StartLine: 15},
+		{Keyword: "SHELL", Args: []string{"/bin/bash", "-c"}, JSON: true, StartLine: 9},
+		{Keyword: "RUN", Args: []string{"<<EOF"}, Heredocs: []Heredoc{{Name: "EOF", Content: "echo a\n"}}, StartLine: 10},
+		{Keyword: "COPY", Flags: []string{"--chmod=0600"}, Args: []string{"a", "b", "/etc/"}, StartLine: 13},
+		{Keyword: "REBOOT", StartLine: 14},
+		{Keyword: "OUTPUT", Flags: []string{"--as=template"}, Args: []string{`"golden debian"`}, StartLine: 15},
+		{Keyword: "OUTPUT", Flags: []string{"--format=xva", "--compress=zstd"}, Args: []string{"./dist/x.xva"}, StartLine: 16},
 	}
 	if len(res.Commands) != len(want) {
 		t.Fatalf("got %d commands, want %d", len(res.Commands), len(want))

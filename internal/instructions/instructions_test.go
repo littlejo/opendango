@@ -187,18 +187,41 @@ func TestParseRun(t *testing.T) {
 	tests := []struct {
 		src  string
 		want string
+		exec bool
 		err  string
 	}{
-		{"RUN echo $HOME", "echo $HOME", ""},
-		{`RUN ["echo", "it's"]`, `exec 'echo' 'it'\''s'`, ""},
-		{"RUN <<EOF\necho a\necho b\nEOF", "echo a\necho b\n", ""},
-		{"RUN cat > /f <<EOF\nx\nEOF", "cat > /f <<EOF\nx\nEOF\n", ""},
-		{"RUN --mount=type=cache echo", "", "unknown flag"},
+		{"RUN echo $HOME", "echo $HOME", false, ""},
+		{`RUN ["echo", "it's"]`, `exec 'echo' 'it'\''s'`, true, ""},
+		{"RUN <<EOF\necho a\necho b\nEOF", "echo a\necho b\n", false, ""},
+		{"RUN cat > /f <<EOF\nx\nEOF", "cat > /f <<EOF\nx\nEOF\n", false, ""},
+		{"RUN --mount=type=cache echo", "", false, "unknown flag"},
 	}
 	for _, tt := range tests {
 		got, err := ParseRun(parse(t, tt.src))
-		if checkErr(t, tt.src, err, tt.err) && got.Script != tt.want {
-			t.Errorf("%q: got script %q, want %q", tt.src, got.Script, tt.want)
+		if checkErr(t, tt.src, err, tt.err) && (got.Script != tt.want || got.Exec != tt.exec) {
+			t.Errorf("%q: got script %q (exec %v), want %q (exec %v)", tt.src, got.Script, got.Exec, tt.want, tt.exec)
+		}
+	}
+}
+
+func TestParseShell(t *testing.T) {
+	tests := []struct {
+		src  string
+		want []string
+		err  string
+	}{
+		{`SHELL ["/bin/bash", "-o", "pipefail", "-c"]`, []string{"/bin/bash", "-o", "pipefail", "-c"}, ""},
+		// Not expanded, like in Docker.
+		{`SHELL ["${V}"]`, []string{"${V}"}, ""},
+		{"SHELL /bin/bash -c", nil, "requires the JSON form"},
+		{"SHELL []", nil, "requires at least the executable"},
+		{`SHELL [""]`, nil, "requires at least the executable"},
+		{`SHELL --x=1 ["sh"]`, nil, "unknown flag"},
+	}
+	for _, tt := range tests {
+		got, err := ParseShell(parse(t, tt.src))
+		if checkErr(t, tt.src, err, tt.err) && !reflect.DeepEqual(got, &Shell{Pos: Pos{1}, Args: tt.want}) {
+			t.Errorf("%q: got %+v, want %q", tt.src, got, tt.want)
 		}
 	}
 }

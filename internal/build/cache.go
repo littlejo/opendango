@@ -71,6 +71,8 @@ func cacheKey(file string, s *plan.Stage, parentKey, contextDir string) (string,
 			fmt.Fprintln(h)
 		case *instructions.User:
 			fmt.Fprintf(h, "USER %q\n", st.Name)
+		case *instructions.Shell:
+			fmt.Fprintf(h, "SHELL %q\n", st.Args)
 		case *instructions.Workdir:
 			fmt.Fprintf(h, "WORKDIR %q\n", st.Path)
 		case *instructions.Run:
