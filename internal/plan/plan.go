@@ -5,9 +5,11 @@ package plan
 import (
 	"fmt"
 	"sort"
+	"strings"
 
 	"github.com/moby/buildkit/frontend/dockerfile/shell"
 
+	"github.com/littlejo/opendango/builders/packer"
 	"github.com/littlejo/opendango/builders/xo"
 	"github.com/littlejo/opendango/internal/instructions"
 	"github.com/littlejo/opendango/internal/parser"
@@ -63,6 +65,10 @@ func (s *Stage) Root() *Stage {
 	}
 	return s
 }
+
+// IsPacker tells whether a Packer plugin builds the stage
+// (FROM packer://...).
+func (s *Stage) IsPacker() bool { return s.Root().From.Builder == "packer" }
 
 // TemplateOutput returns the stage's OUTPUT --as=template, or nil.
 func (s *Stage) TemplateOutput() *instructions.Output {
@@ -161,7 +167,7 @@ func Build(file string, res *parser.Result, buildArgs map[string]string) (*Plan,
 		case "FROM":
 			// FROM lines only see the global ARGs.
 			scope = global
-			from, err := instructions.ParseFrom(cmd, expand)
+			from, err := instructions.ParseFrom(literalFlags(cmd, res.EscapeToken), expand)
 			if err != nil {
 				return fail(line, err)
 			}
@@ -229,6 +235,9 @@ func Build(file string, res *parser.Result, buildArgs map[string]string) (*Plan,
 			if stage.Connect == nil {
 				return fail(line, needsConnect(cmd.Keyword))
 			}
+			if cmd.Keyword == "REBOOT" && stage.IsPacker() {
+				return fail(line, fmt.Errorf("REBOOT is not supported in a packer:// stage yet: the plugin owns the connection"))
+			}
 			var (
 				step instructions.Instruction
 				err  error
@@ -251,6 +260,9 @@ func Build(file string, res *parser.Result, buildArgs map[string]string) (*Plan,
 			stage.Steps = append(stage.Steps, step)
 
 		case "OUTPUT":
+			if stage.IsPacker() {
+				return fail(line, fmt.Errorf("OUTPUT has no meaning in a packer:// stage: the plugin configuration (FROM flags) sets its artifact"))
+			}
 			out, err := instructions.ParseOutput(cmd, expand)
 			if err != nil {
 				return fail(line, err)
@@ -274,7 +286,7 @@ func Build(file string, res *parser.Result, buildArgs map[string]string) (*Plan,
 		return nil, &Error{File: file, Line: 1, Err: fmt.Errorf("no FROM instruction")}
 	}
 	for _, s := range p.Stages {
-		if len(s.Outputs) == 0 && len(s.Children) == 0 {
+		if len(s.Outputs) == 0 && len(s.Children) == 0 && !s.IsPacker() {
 			p.Warnings = append(p.Warnings, fmt.Sprintf("stage %s has no OUTPUT and no stage starts from it: its VM will be destroyed at the end of the build", s.Name()))
 		}
 	}
@@ -320,9 +332,34 @@ func checkBuilder(s *Stage) error {
 			_, err = xo.ParseStageConfig(s.From.Flags)
 		}
 		return err
+	case "packer":
+		if s.Parent != nil {
+			return fmt.Errorf("FROM %s: a stage cannot start from a packer:// stage: its artifact is the plugin's", s.From.Stage)
+		}
+		_, err := packer.ParseConfig(s.From.Source, s.From.Flags)
+		return err
 	default:
-		return fmt.Errorf("unknown builder %q (supported: xo)", root.Builder)
+		return fmt.Errorf("unknown builder %q (supported: xo, packer)", root.Builder)
 	}
+}
+
+// literalFlags returns cmd with the quotes left in its flag values escaped.
+// BuildKit has already removed the quotes of the flags of standard
+// instructions (FROM): the ones left, as in --network_names='["LAN"]', are
+// part of the value, and must survive the ${VAR} expansion.
+func literalFlags(cmd *parser.Command, escape rune) *parser.Command {
+	esc := string(escape)
+	r := strings.NewReplacer(esc, esc+esc, `"`, esc+`"`, "'", esc+"'")
+	c := *cmd
+	c.Flags = make([]string, len(cmd.Flags))
+	for i, f := range cmd.Flags {
+		name, value, ok := strings.Cut(f, "=")
+		if ok {
+			f = name + "=" + r.Replace(value)
+		}
+		c.Flags[i] = f
+	}
+	return &c
 }
 
 func needsConnect(what string) error {

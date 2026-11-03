@@ -144,6 +144,13 @@ func TestErrors(t *testing.T) {
 		{"FROM xo://t\nWORKDIR /a", "Dangofile:2: WORKDIR needs a connection"},
 		{"FROM xo://t\nREBOOT", "Dangofile:2: REBOOT needs a connection"},
 		{"FROM xo://t\nBREAKPOINT", "Dangofile:2: BREAKPOINT needs a connection"},
+		{"FROM packer://Bad Name", "Dangofile:1: FROM requires exactly one source"},
+		{"FROM packer://xenserver_ISO", "Dangofile:1: packer: invalid source"},
+		{"FROM --ssh_username=root packer://xenserver-iso", "Dangofile:1: packer: --ssh_username is set by CONNECT ssh --user=<user>"},
+		{"FROM --network_names=[x packer://xenserver-iso", "Dangofile:1: packer: --network_names: invalid JSON"},
+		{"FROM packer://xenserver-iso\nCONNECT ssh --user=u\nREBOOT", "Dangofile:3: REBOOT is not supported in a packer:// stage yet"},
+		{"FROM packer://xenserver-iso\nOUTPUT --as=template", "Dangofile:2: OUTPUT has no meaning in a packer:// stage"},
+		{"FROM packer://xenserver-iso AS p\nFROM p", "Dangofile:2: FROM p: a stage cannot start from a packer:// stage"},
 		{"FROM xo://t\nCONNECT ssh --user=u\nBREAKPOINT --x", "Dangofile:3: BREAKPOINT: unknown flag --x"},
 		{"FROM xo://t\nENV --persist A=1", "Dangofile:2: ENV --persist needs a connection"},
 		{"FROM xo://t\nCONNECT ssh --user=a\nCONNECT ssh --user=b", "Dangofile:3: CONNECT already set at line 2"},
@@ -248,6 +255,40 @@ func TestSelect(t *testing.T) {
 	}
 	if _, err := p.Select("nope"); err == nil || !strings.Contains(err.Error(), `no stage named "nope" (stages: [a b c d])`) {
 		t.Errorf("unknown target: %v", err)
+	}
+}
+
+func TestPackerStage(t *testing.T) {
+	src := "ARG HOST=10.0.0.1\nFROM --remote_host=${HOST} --network_names='[\"LAN\"]' packer://xenserver-iso AS golden\nCONNECT ssh --user=debian\nRUN true\n"
+	p, err := build(t, src, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := p.Stages[0]
+	if !s.IsPacker() || s.From.Source != "xenserver-iso" || s.From.Flags["remote_host"] != "10.0.0.1" || s.From.Flags["network_names"] != `["LAN"]` {
+		t.Errorf("stage = %+v", s.From)
+	}
+	// The plugin produces the artifact: no warning about a missing OUTPUT.
+	if len(p.Warnings) != 0 {
+		t.Errorf("warnings = %v", p.Warnings)
+	}
+}
+
+// TestFromFlagQuotes checks that the quotes left in FROM flag values (JSON)
+// survive the expansion, whatever the escape character.
+func TestFromFlagQuotes(t *testing.T) {
+	const from = `ARG N=LAN
+FROM --network_names='["${N}", "it'"'"'s"]' --vm_name="Debian 13" packer://xenserver-iso
+`
+	for _, src := range []string{from, "# escape=`\n" + from} {
+		p, err := build(t, src, nil)
+		if err != nil {
+			t.Fatalf("%q: %v", src, err)
+		}
+		flags := p.Stages[0].From.Flags
+		if flags["network_names"] != `["LAN", "it's"]` || flags["vm_name"] != "Debian 13" {
+			t.Errorf("%q: flags = %q", src, flags)
+		}
 	}
 }
 

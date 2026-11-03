@@ -67,6 +67,38 @@ The cache lives in XO, as tagged templates (`opendango-cache:<key>`).
 `BREAKPOINT` is never cached. The base template is identified by the name in
 `FROM`: after replacing it under the same name, use `--no-cache`.
 
+## Packer plugins
+
+`FROM packer://<plugin>-<builder>` runs the builder of a Packer plugin, such
+as [vatesfr/packer-plugin-xenserver](https://github.com/vatesfr/packer-plugin-xenserver).
+The plugin creates and boots the machine and connects to it; opendango runs
+the instructions through that connection; then the plugin produces its
+artifact.
+
+```dockerfile
+ARG XAPI_PASSWORD
+FROM --remote_host=10.0.0.1 --remote_username=root --remote_password=${XAPI_PASSWORD} \
+     --clone_template="Debian 13 Cloud-init (Hub)" --vm_name=golden --firmware=bios \
+     --network_names='["LAN"]' --cd_files='["cidata/user-data", "cidata/meta-data"]' \
+     --ssh_private_key_file=key --format=xva packer://xenserver-xva
+CONNECT ssh --user=debian
+RUN apt-get update && apt-get -y upgrade
+```
+
+```sh
+opendango build --build-arg XAPI_PASSWORD="$XAPI_PASSWORD"
+```
+
+- The flags are the plugin's settings, by their Packer names. Lists and maps
+  are JSON (`'["LAN"]'`). Paths are relative to the Dangofile directory.
+- `CONNECT` sets the plugin's `ssh_username`, `ssh_port` and `ssh_timeout`;
+  the credentials (`ssh_password`, `ssh_private_key_file`) are flags. Values of
+  flags named `*password*`, `*secret*` or `*token*` are masked in the log.
+- Plugins are found in `PACKER_PLUGIN_PATH`, in Packer's plugin directory
+  (`packer plugins install github.com/vatesfr/xenserver`), or in `PATH`.
+- Only builders are supported. A packer:// stage cannot be a parent stage,
+  and `OUTPUT` and `REBOOT` are not available in it.
+
 ## Install
 
 Download an archive from the

@@ -8,6 +8,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -39,6 +40,9 @@ Run 'opendango <command> -h' for the flags of a command.
 `
 
 func main() {
+	// packer-plugin-sdk logs its internals with the standard log package;
+	// opendango does not use it.
+	log.SetOutput(io.Discard)
 	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
 }
 
