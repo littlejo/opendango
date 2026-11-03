@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -638,4 +639,112 @@ OUTPUT --as=template app
 			t.Errorf("keep=%v: log = %q, want %q", keep, got, want)
 		}
 	}
+}
+
+// readerFunc lets a test act when the build waits for input.
+type readerFunc func(p []byte) (int, error)
+
+func (f readerFunc) Read(p []byte) (int, error) { return f(p) }
+
+func TestBreakpoint(t *testing.T) {
+	const src = "FROM xo://t\nCONNECT ssh --user=debian\nBREAKPOINT check ${X}\nRUN after\n"
+	keyPath := regexp.MustCompile(`ssh -i (\S+) `)
+
+	t.Run("waits for Enter", func(t *testing.T) {
+		b := &fakeBuilder{}
+		comm := &scriptComm{}
+		var log bytes.Buffer
+		paused := false
+		// checkPause runs in the build's goroutine: t.Error, not t.Fatal.
+		checkPause := func() {
+			paused = true
+			if contains(comm.commands, "/bin/sh -c 'after'") {
+				t.Error("RUN executed before Enter was pressed")
+			}
+			m := keyPath.FindStringSubmatch(log.String())
+			if m == nil {
+				t.Errorf("no ssh command in:\n%s", log.String())
+				return
+			}
+			if !strings.Contains(log.String(), "-p 22 debian@192.0.2.10\n") {
+				t.Errorf("wrong ssh command:\n%s", log.String())
+			}
+			if info, err := os.Stat(m[1]); err != nil || info.Mode().Perm() != 0o600 {
+				t.Errorf("key file: %v, %v", info, err)
+				return
+			}
+			// The file holds the key authorized by the cloud-config.
+			data, _ := os.ReadFile(m[1])
+			signer, err := gossh.ParsePrivateKey(data)
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			pub := strings.TrimSpace(string(gossh.MarshalAuthorizedKey(signer.PublicKey())))
+			if !strings.Contains(b.cloudConfig, pub) {
+				t.Errorf("key %q not in cloud-config %q", pub, b.cloudConfig)
+			}
+		}
+		stdin := readerFunc(func(p []byte) (int, error) {
+			checkPause()
+			return copy(p, "\n"), nil
+		})
+		p := mustPlan(t, "ARG X=nginx\n"+strings.Replace(src, "BREAKPOINT", "ARG X\nBREAKPOINT", 1))
+		if err := Run(context.Background(), p, Options{NewBuilder: only(b), Dial: dialTo(comm), Out: &log, Stdin: stdin}); err != nil {
+			t.Fatal(err)
+		}
+		if !paused {
+			t.Fatal("the build did not wait for Enter")
+		}
+		if !strings.Contains(log.String(), "==> stage-0: BREAKPOINT check nginx\n") || !strings.Contains(log.String(), "Resuming the build") {
+			t.Errorf("log:\n%s", log.String())
+		}
+		m := keyPath.FindStringSubmatch(log.String())
+		if _, err := os.Stat(m[1]); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("key file %s not removed: %v", m[1], err)
+		}
+	})
+
+	t.Run("skipped without a terminal", func(t *testing.T) {
+		comm := &scriptComm{}
+		var log bytes.Buffer
+		p := mustPlan(t, src)
+		if err := Run(context.Background(), p, Options{NewBuilder: only(&fakeBuilder{}), Dial: dialTo(comm), Out: &log}); err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(log.String(), "BREAKPOINT check ignored: stdin is not a terminal") || strings.Contains(log.String(), "ssh -i") {
+			t.Errorf("log:\n%s", log.String())
+		}
+		if !contains(comm.commands, "/bin/sh -c 'after'") {
+			t.Errorf("RUN not executed: %q", comm.commands)
+		}
+	})
+
+	t.Run("Ctrl+C aborts", func(t *testing.T) {
+		b := &fakeBuilder{}
+		var log bytes.Buffer
+		ctx, cancel := context.WithCancel(context.Background())
+		release := make(chan struct{})
+		t.Cleanup(func() { close(release) })
+		stdin := readerFunc(func([]byte) (int, error) {
+			cancel()
+			<-release
+			return 0, io.EOF
+		})
+		p := mustPlan(t, src)
+		err := Run(ctx, p, Options{NewBuilder: only(b), Dial: dialTo(&scriptComm{}), Out: &log, Stdin: stdin})
+		if !errors.Is(err, context.Canceled) || !strings.Contains(err.Error(), "Dangofile:3: BREAKPOINT") {
+			t.Fatalf("err = %v", err)
+		}
+		if !contains(b.calls, "destroy") {
+			t.Errorf("VM not destroyed: %q", b.calls)
+		}
+		m := keyPath.FindStringSubmatch(log.String())
+		if m == nil {
+			t.Fatalf("no ssh command in:\n%s", log.String())
+		}
+		if _, err := os.Stat(m[1]); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("key file %s not removed: %v", m[1], err)
+		}
+	})
 }

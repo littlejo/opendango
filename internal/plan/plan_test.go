@@ -39,9 +39,12 @@ func TestValidFile(t *testing.T) {
 	for _, step := range s.Steps {
 		kinds = append(kinds, strings.TrimPrefix(reflect.TypeOf(step).String(), "*instructions."))
 	}
-	want := []string{"Arg", "Arg", "User", "Env", "Env", "Workdir", "Run", "Run", "Copy", "Reboot"}
+	want := []string{"Arg", "Arg", "User", "Env", "Env", "Workdir", "Run", "Run", "Copy", "Reboot", "Breakpoint"}
 	if !reflect.DeepEqual(kinds, want) {
 		t.Errorf("steps = %v, want %v", kinds, want)
+	}
+	if bp := s.Steps[len(s.Steps)-1].(*instructions.Breakpoint); bp.Message != "check debian 13" {
+		t.Errorf("BREAKPOINT message = %q", bp.Message)
 	}
 	if len(s.Outputs) != 2 || s.Outputs[0].Name != "golden-debian-13" || s.Outputs[1].Path != "./dist/golden-13.xva" {
 		t.Errorf("outputs = %+v %+v", s.Outputs[0], s.Outputs[1])
@@ -140,6 +143,8 @@ func TestErrors(t *testing.T) {
 		{"FROM xo://t\nCOPY a b", "Dangofile:2: COPY needs a connection"},
 		{"FROM xo://t\nWORKDIR /a", "Dangofile:2: WORKDIR needs a connection"},
 		{"FROM xo://t\nREBOOT", "Dangofile:2: REBOOT needs a connection"},
+		{"FROM xo://t\nBREAKPOINT", "Dangofile:2: BREAKPOINT needs a connection"},
+		{"FROM xo://t\nCONNECT ssh --user=u\nBREAKPOINT --x", "Dangofile:3: BREAKPOINT: unknown flag --x"},
 		{"FROM xo://t\nENV --persist A=1", "Dangofile:2: ENV --persist needs a connection"},
 		{"FROM xo://t\nCONNECT ssh --user=a\nCONNECT ssh --user=b", "Dangofile:3: CONNECT already set at line 2"},
 		{"FROM xo://t\nOUTPUT --as=template\nOUTPUT --as=template", "Dangofile:3: only one OUTPUT --as=template"},

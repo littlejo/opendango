@@ -25,19 +25,19 @@
 | `ARG` | MVP | Build variable, overridden with `--build-arg K=V`. Docker scoping: an ARG before the first `FROM` is only visible in `FROM` lines unless the stage declares it again (`ARG NAME`). |
 | `FROM` | MVP | `FROM [--flags] <builder>://<source> [AS name]`. Flags configure the builder (xo: `--template`, `--pool`, `--sr`, `--network`, `--cpus`, `--memory`, `--disk`). |
 | `FROM <stage>` | done | Multi-stage: starts from the image of an earlier stage (see *Multi-stage builds*). xo flags: `--cpus`, `--memory`, `--disk`, `--sr`, `--network` (not `--template` nor `--pool`). |
-| `CONNECT` | MVP (ssh) | `CONNECT ssh --user=<user> [--port=22] [--timeout=10m]`. **Required** before any instruction that needs the VM (`RUN`, `COPY`, `WORKDIR`, `REBOOT`, `ENV --persist`). An ephemeral ed25519 key is injected for `<user>` via cloud-init and removed from `authorized_keys` before shutdown. `winrm` is planned. |
+| `CONNECT` | MVP (ssh) | `CONNECT ssh --user=<user> [--port=22] [--timeout=10m]`. **Required** before any instruction that needs the VM (`RUN`, `COPY`, `WORKDIR`, `REBOOT`, `BREAKPOINT`, `ENV --persist`). An ephemeral ed25519 key is injected for `<user>` via cloud-init and removed from `authorized_keys` before shutdown. `winrm` is planned. |
 | `RUN` | MVP | Shell, exec (JSON) and heredoc forms, run with `/bin/sh -c`. Not expanded at build time: the remote shell expands it, with the ARG and ENV values exported. `--shell=powershell` is planned. |
 | `COPY` | MVP | `COPY [--chmod=MODE] [--chown=U[:G]] <src>... <dest>`. Sources are relative to the Dangofile directory and must stay inside it (globs allowed). A directory source copies its contents. The destination is a directory when it ends with `/` or when there are several sources. Files are owned by the current `USER` unless `--chown` is set. |
 | `ENV` | MVP | Visible to the following instructions **during the build only**; overrides an ARG of the same name. `ENV --persist` also writes `KEY="value"` to `/etc/environment` (as root). |
 | `USER` | MVP | Defaults to the `CONNECT` user. Any other user runs through `sudo -n -H -u <user>`, so the connection user needs passwordless sudo. Groups are not supported. |
 | `WORKDIR` | MVP | Created (`mkdir -p`) as the current `USER`, like BuildKit. A relative path is joined to the previous `WORKDIR`; without one, relative paths start from the connection user's home. |
 | `REBOOT` | MVP | Runs `reboot` as root, then reconnects until `/proc/sys/kernel/random/boot_id` changes, within the `CONNECT` timeout. |
+| `BREAKPOINT` | done | `BREAKPOINT [message]`. Needs `CONNECT`. Writes the ephemeral private key to a temporary file (mode 0600, removed when the build resumes or aborts), prints the `ssh` command for the `CONNECT` user and waits for Enter; Ctrl+C aborts the build (normal cleanup). Skipped with a message when stdin is not a terminal, so a forgotten `BREAKPOINT` does not block a CI build. |
 | `OUTPUT` | MVP | Runs after all other instructions, once the VM is stopped: XVA exports first, then the template conversion. `OUTPUT --as=template [name]` (at most one) or `OUTPUT --format=xva [--compress=zstd\|gzip] <path>` (path relative to the Dangofile directory). Without `--as=template`, the VM is destroyed at the end. Other formats are planned. |
 | `ADD` | planned | `COPY` plus URL sources. |
 | `LABEL` | planned | Metadata or tags attached to the produced image. |
 | `BOOT` | planned | Types keystrokes into the VM console, for ISO installs (equivalent of `boot_command`). |
 | `SERVE` | planned | Serves a directory over HTTP during the build and exposes `${DANGO_HTTP_ADDR}`. |
-| `BREAKPOINT` | planned | Pauses the build and prints the SSH command to connect to the VM. |
 | `SHELL` | planned | Changes the shell used by `RUN`. |
 
 ### Multi-stage builds
@@ -121,7 +121,7 @@ The Vates SDK (`xenorchestra-go-sdk`) was evaluated and not used: opendango need
 ## Roadmap
 
 1. **MVP**: parser, `validate`, `xo://` builder, SSH, `ARG`, `ENV`, `USER`, `WORKDIR`, `RUN`, `COPY`, `REBOOT`, `OUTPUT --as=template` and XVA.
-2. ~~Multi-stage, `--target`~~ (done), parallel builds, `--on-error=ask`, `BREAKPOINT`, `fmt`.
+2. ~~Multi-stage, `--target`, `BREAKPOINT`~~ (done), parallel builds, `--on-error=ask`, `fmt`.
 3. `packer://` compatibility, tested first with `vatesfr/packer-plugin-xenserver`.
 4. Native `BOOT` and `SERVE`, then more builders (QEMU, Proxmox, AWS, vSphere).
 5. Per-instruction caching based on snapshots.

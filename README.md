@@ -76,7 +76,8 @@ The variables are the same as [xo-gocli](https://github.com/littlejo/xo-gocli).
    `CONNECT` user.
 2. opendango waits for the IP address reported by the guest tools and
    connects over SSH.
-3. `RUN`, `COPY`, `ENV`, `USER`, `WORKDIR` and `REBOOT` run in order.
+3. `RUN`, `COPY`, `ENV`, `USER`, `WORKDIR`, `REBOOT` and `BREAKPOINT` run in
+   order.
 4. The temporary key is removed and the VM is shut down.
 5. The `OUTPUT` instructions run: XVA exports, then the conversion to a
    template.
@@ -98,13 +99,18 @@ The template needs **cloud-init** and the **guest tools**.
 | `USER` | `USER root` (through `sudo`) |
 | `WORKDIR` | `WORKDIR /opt/app` |
 | `REBOOT` | `REBOOT` |
+| `BREAKPOINT` | `BREAKPOINT "check nginx"` |
 | `OUTPUT` | `OUTPUT --as=template "name"`, `OUTPUT --format=xva --compress=zstd ./out.xva` |
 
 `ENV` values only exist during the build; add `--persist` to write them to
 `/etc/environment`. `COPY` sources and `OUTPUT` paths are relative to the
 Dangofile directory.
 
-`ADD`, `LABEL`, `SHELL`, `BOOT`, `SERVE` and `BREAKPOINT` are planned and
+`BREAKPOINT` pauses the build and prints the `ssh` command to log into the
+VM with the temporary key; press Enter to resume, Ctrl+C to abort. When
+stdin is not a terminal (CI), it is skipped with a message.
+
+`ADD`, `LABEL`, `SHELL`, `BOOT` and `SERVE` are planned and
 rejected for now. `CMD`, `ENTRYPOINT`, `EXPOSE`, `HEALTHCHECK`, `VOLUME`,
 `ONBUILD` and `STOPSIGNAL` have no meaning for a VM image and are rejected.
 

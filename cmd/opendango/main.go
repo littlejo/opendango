@@ -142,14 +142,20 @@ func cmdBuild(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "warning: %s\n", w)
 	}
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
-	err = build.Run(ctx, p, build.Options{
+	opts := build.Options{
 		ContextDir:  filepath.Dir(c.file),
 		Target:      *target,
 		KeepOnError: *onError == "keep",
 		Out:         stdout,
-	})
+	}
+	// BREAKPOINT waits for Enter only when someone can press it.
+	if info, err := os.Stdin.Stat(); err == nil && info.Mode()&os.ModeCharDevice != 0 {
+		opts.Stdin = os.Stdin
+	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	err = build.Run(ctx, p, opts)
 	if err != nil {
 		if errors.Is(err, context.Canceled) {
 			fmt.Fprintln(stderr, "build interrupted")

@@ -242,6 +242,25 @@ func TestParseReboot(t *testing.T) {
 	}
 }
 
+func TestParseBreakpoint(t *testing.T) {
+	tests := []struct {
+		src  string
+		want string
+		err  string
+	}{
+		{"BREAKPOINT", "", ""},
+		{`BREAKPOINT "check nginx"`, "check nginx", ""},
+		{"BREAKPOINT check   ${V}", "check val", ""},
+		{"BREAKPOINT --now", "", "unknown flag"},
+	}
+	for _, tt := range tests {
+		got, err := ParseBreakpoint(parse(t, tt.src), expander())
+		if checkErr(t, tt.src, err, tt.err) && (got.Message != tt.want || got.Line() != 1) {
+			t.Errorf("%q: got %+v, want message %q", tt.src, got, tt.want)
+		}
+	}
+}
+
 func TestParseOutput(t *testing.T) {
 	tests := []struct {
 		src  string
