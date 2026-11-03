@@ -66,3 +66,10 @@ func TemplateMedia(ctx context.Context, c *Client, id string) (disks []string, c
 	}
 	return disks, cds, nil
 }
+
+// TemplateTags returns the tags of a template.
+func TemplateTags(ctx context.Context, c *Client, id string) ([]string, error) {
+	var o object
+	err := c.do(ctx, http.MethodGet, "/vm-templates/"+url.PathEscape(id)+"?fields=tags", nil, &o)
+	return o.Tags, err
+}

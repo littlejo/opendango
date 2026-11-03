@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -333,6 +334,46 @@ RUN false | true
 		}
 	}
 }
+
+// TestLabel checks that the labels tag the OUTPUT template, inherited ones
+// included, before the cache tag.
+func TestLabel(t *testing.T) {
+	src := `FROM xo://t AS base
+LABEL vendor=acme team=infra
+OUTPUT --as=template base
+
+FROM base AS app
+LABEL team=web
+OUTPUT --as=template app
+`
+	sb := newStageBuilders()
+	var log bytes.Buffer
+	if err := Run(context.Background(), mustPlan(t, src), Options{Out: &log, NewBuilder: sb.factory()}); err != nil {
+		t.Fatalf("%v\n%s", err, log.String())
+	}
+	app := sb.byStage["app"]
+	want := []string{"vendor=acme", "team=web", CacheTagPrefix + app.lookups[0]}
+	if !slices.Equal(app.tags, want) {
+		t.Errorf("app tags = %q, want %q", app.tags, want)
+	}
+	if got := sb.byStage["base"].tags; len(got) != 3 || got[0] != "vendor=acme" || got[1] != "team=infra" {
+		t.Errorf("base tags = %q", got)
+	}
+	if !strings.Contains(log.String(), "==> app: LABEL team=web\n") {
+		t.Errorf("log:\n%s", log.String())
+	}
+
+	// A label that cannot be set fails the build: the template stays.
+	b := &failingTag{}
+	err := Run(context.Background(), mustPlan(t, "FROM xo://t\nLABEL a=b\nOUTPUT --as=template x\n"), Options{NewBuilder: func(*plan.Stage, string) (Builder, error) { return b, nil }, NoCache: true})
+	if err == nil || err.Error() != "Dangofile:3: LABEL a: tagging the template: forbidden" || contains(b.calls, "destroy") {
+		t.Errorf("err = %v, calls = %q", err, b.calls)
+	}
+}
+
+type failingTag struct{ fakeBuilder }
+
+func (b *failingTag) Tag(context.Context, string) error { return errors.New("forbidden") }
 
 func TestRemovesEphemeralKey(t *testing.T) {
 	comm := newLocalComm(t)

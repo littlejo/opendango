@@ -98,10 +98,13 @@ func cacheKey(file string, s *plan.Stage, parentKey, contextDir string) (string,
 			return "", fmt.Errorf("cache key: unexpected instruction %T", step)
 		}
 	}
-	// The cached template carries the OUTPUT name: a new name is a new
-	// template.
+	// The cached template carries the OUTPUT name and the labels (tags): a
+	// new name or label is a new template.
 	if out := s.TemplateOutput(); out != nil {
 		fmt.Fprintf(h, "OUTPUT template %q\n", out.Name)
+		for _, l := range s.Labels {
+			fmt.Fprintf(h, "LABEL %q=%q\n", l.Key, l.Value)
+		}
 	}
 	return hex.EncodeToString(h.Sum(nil)), nil
 }

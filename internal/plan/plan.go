@@ -48,9 +48,14 @@ type Stage struct {
 	// Boot are the stage's BOOT, typed in order once the VM has started,
 	// before the connection.
 	Boot []*instructions.Boot
+	// Labels are the LABEL values of the stage and of its ancestors, in the
+	// order they were first set: tags key=value on the OUTPUT template.
+	Labels []instructions.KeyValue
 
 	// ownConnect is true when the stage sets CONNECT itself.
 	ownConnect bool
+	// labelLine is the line of the stage's first LABEL, 0 without one.
+	labelLine int
 	// usesVM is true once an instruction of the stage needs the VM.
 	usesVM bool
 	// env holds the ENV values at the end of the stage, inherited by the
@@ -216,6 +221,7 @@ func Build(file string, res *parser.Result, buildArgs map[string]string) (*Plan,
 				parent.Children = append(parent.Children, stage)
 				// Inherited from the parent, like in Docker (plus CONNECT).
 				stage.Connect = parent.Connect
+				stage.Labels = append([]instructions.KeyValue{}, parent.Labels...)
 				for k, v := range parent.env {
 					stage.env[k] = v
 				}
@@ -329,6 +335,21 @@ func Build(file string, res *parser.Result, buildArgs map[string]string) (*Plan,
 			}
 			stage.Boot = append(stage.Boot, b)
 
+		case "LABEL":
+			if stage.IsPacker() {
+				return fail(line, fmt.Errorf("LABEL is not supported in a packer:// stage: the plugin configuration (FROM flags) sets its artifact"))
+			}
+			l, err := instructions.ParseLabel(cmd, expand)
+			if err != nil {
+				return fail(line, err)
+			}
+			if stage.labelLine == 0 {
+				stage.labelLine = line
+			}
+			for _, kv := range l.Labels {
+				stage.Labels = setLabel(stage.Labels, kv)
+			}
+
 		case "OUTPUT":
 			if stage.IsPacker() {
 				return fail(line, fmt.Errorf("OUTPUT has no meaning in a packer:// stage: the plugin configuration (FROM flags) sets its artifact"))
@@ -356,6 +377,11 @@ func Build(file string, res *parser.Result, buildArgs map[string]string) (*Plan,
 		return nil, &Error{File: file, Line: 1, Err: fmt.Errorf("no FROM instruction")}
 	}
 	for _, s := range p.Stages {
+		if s.labelLine != 0 && s.TemplateOutput() == nil {
+			return fail(s.labelLine, fmt.Errorf("LABEL needs OUTPUT --as=template: the labels become tags of the template"))
+		}
+	}
+	for _, s := range p.Stages {
 		if len(s.Outputs) == 0 && len(s.Children) == 0 && !s.IsPacker() {
 			p.Warnings = append(p.Warnings, fmt.Sprintf("stage %s has no OUTPUT and no stage starts from it: its VM will be destroyed at the end of the build", s.Name()))
 		}
@@ -371,6 +397,17 @@ func Build(file string, res *parser.Result, buildArgs map[string]string) (*Plan,
 		p.Warnings = append(p.Warnings, fmt.Sprintf("--build-arg %s is not declared by any ARG", name))
 	}
 	return p, nil
+}
+
+// setLabel sets a label, in place when the key is already set.
+func setLabel(labels []instructions.KeyValue, kv instructions.KeyValue) []instructions.KeyValue {
+	for i := range labels {
+		if labels[i].Key == kv.Key {
+			labels[i].Value = kv.Value
+			return labels
+		}
+	}
+	return append(labels, kv)
 }
 
 // resolveArg sets a.Value: --build-arg first, then the default, then (in a

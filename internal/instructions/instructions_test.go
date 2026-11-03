@@ -204,6 +204,26 @@ func TestParseRun(t *testing.T) {
 	}
 }
 
+func TestParseLabel(t *testing.T) {
+	tests := []struct {
+		src  string
+		want []KeyValue
+		err  string
+	}{
+		{`LABEL a=b "c d"="e f" org.x=${V}`, []KeyValue{{"a", "b"}, {"c d", "e f"}, {"org.x", "val"}}, ""},
+		{"LABEL k v w", []KeyValue{{"k", "v w"}}, ""},
+		{`LABEL ""=x`, nil, "empty key"},
+		{"LABEL opendango-cache-created:1=x", nil, "reserved for the cache"},
+		{"LABEL --x=1 a=b", nil, "unknown flag"},
+	}
+	for _, tt := range tests {
+		got, err := ParseLabel(parse(t, tt.src), expander())
+		if checkErr(t, tt.src, err, tt.err) && !reflect.DeepEqual(got, &Label{Pos: Pos{1}, Labels: tt.want}) {
+			t.Errorf("%q: got %+v, want %+v", tt.src, got, tt.want)
+		}
+	}
+}
+
 func TestParseShell(t *testing.T) {
 	tests := []struct {
 		src  string

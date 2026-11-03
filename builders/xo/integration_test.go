@@ -103,6 +103,32 @@ func run(t *testing.T, src string, opts build.Options) (context.Context, *xo.Cli
 	return ctx, client
 }
 
+// checkTags fails unless the template named name has exactly the tags
+// want, in any order; a tag ending with ":" stands for any tag with that
+// prefix.
+func checkTags(ctx context.Context, t *testing.T, client *xo.Client, name string, want ...string) {
+	t.Helper()
+	id, err := xo.FindTemplate(ctx, client, name)
+	if err != nil {
+		t.Fatalf("template %s not found: %v", name, err)
+	}
+	tags, err := xo.TemplateTags(ctx, client, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ok := len(tags) == len(want)
+	for _, w := range want {
+		found := false
+		for _, tag := range tags {
+			found = found || tag == w || (strings.HasSuffix(w, ":") && strings.HasPrefix(tag, w))
+		}
+		ok = ok && found
+	}
+	if !ok {
+		t.Errorf("template %s tags = %q, want %q", name, tags, want)
+	}
+}
+
 // deleteTemplate deletes the template named name, failing if it is missing.
 func deleteTemplate(ctx context.Context, t *testing.T, client *xo.Client, name string) {
 	t.Helper()
@@ -202,6 +228,7 @@ FROM --cpus=2 base AS app
 RUN test -f /opt/opendango/hello.txt
 RUN test "$STAGE_ENV" = from-base && test "$(pwd)" = /opt/opendango && test "$(id -u)" = 0
 RUN test "$(nproc)" = 2
+LABEL org.opendango.stage=app "team"="web ops"
 OUTPUT --as=template %s
 
 FROM base AS sibling
@@ -211,6 +238,8 @@ OUTPUT --as=template %s
 
 	var log bytes.Buffer
 	ctx, client := run(t, src, build.Options{ContextDir: ctxDir, Out: io.MultiWriter(os.Stdout, &log), Jobs: 2, NoCache: true})
+	checkTags(ctx, t, client, name, "org.opendango.stage=app", "team=web ops")
+	checkTags(ctx, t, client, sibling)
 	deleteTemplate(ctx, t, client, name)
 	deleteTemplate(ctx, t, client, sibling)
 	// With -j 2, the sibling starts before app is finished.
@@ -245,6 +274,7 @@ COPY hello.txt /opt/opendango/
 
 FROM base AS app
 RUN test -f /opt/opendango/hello.txt
+LABEL team=web
 OUTPUT --format=xva --compress=zstd out/app.xva
 OUTPUT --as=template %s
 `, from, user, name)
@@ -303,6 +333,10 @@ OUTPUT --as=template %s
 	}
 
 	ctx := context.Background()
+	// The labels and the cache key, nothing from the cached parent.
+	for _, n := range []string{name, name + "-2"} {
+		checkTags(ctx, t, client, n, "team=web", "opendango-cache:")
+	}
 	entries, err := xo.ListCache(ctx, client)
 	if err != nil {
 		t.Fatal(err)
