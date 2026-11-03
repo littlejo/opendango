@@ -66,8 +66,28 @@ func (b *Builder) Start(ctx context.Context, cloudConfig string) error {
 	if b.cfg.Memory > 0 {
 		body["memory"] = b.cfg.Memory
 	}
+	newDisk := false
+	if b.cfg.ISO != "" {
+		iso, err := b.find(ctx, "vdis", "ISO", b.cfg.ISO, poolID)
+		if err != nil {
+			return err
+		}
+		body["install"] = map[string]any{"method": "cdrom", "repository": iso.ID}
+		// Started below, once the boot order is set.
+		body["boot"] = false
+		// A template such as "Other install media" has no disk to resize.
+		if newDisk, err = b.diskless(ctx, tmpl.ID); err != nil {
+			return err
+		}
+		if newDisk && b.cfg.Disk == 0 {
+			return fmt.Errorf("xo: template %s has no disk: set --disk", tmpl.NameLabel)
+		}
+	}
 	if b.cfg.Disk > 0 || b.cfg.SR != "" {
 		vdi := map[string]any{"userdevice": "0"}
+		if newDisk {
+			vdi = map[string]any{"name_label": b.name}
+		}
 		if b.cfg.Disk > 0 {
 			vdi["size"] = b.cfg.Disk
 		}
@@ -90,8 +110,10 @@ func (b *Builder) Start(ctx context.Context, cloudConfig string) error {
 	if cloudConfig != "" {
 		body["cloud_config"] = cloudConfig
 		// The cloud-config holds the temporary SSH key: do not leave it
-		// attached to the image.
-		body["destroy_cloud_config_vdi"] = true
+		// attached to the image. XO removes it once the VM has booted (or
+		// after 10 minutes), which is during the installation with --iso:
+		// then Stop removes it.
+		body["destroy_cloud_config_vdi"] = b.cfg.ISO == ""
 	}
 
 	b.log(fmt.Sprintf("Creating VM %s from template %s", b.name, tmpl.NameLabel))
@@ -105,6 +127,15 @@ func (b *Builder) Start(ctx context.Context, cloudConfig string) error {
 		return fmt.Errorf("xo: create_vm returned no VM id")
 	}
 	b.vmID = created.ID
+	if b.cfg.ISO != "" {
+		// XO boots from the CD first, and installers cannot always eject
+		// it (Debian with UEFI cannot): disk first, the empty disk is
+		// skipped until the system is installed.
+		if err := b.client.setBootOrder(ctx, b.vmID, "cd"); err != nil {
+			return err
+		}
+		return b.client.action(ctx, "/vms/"+b.vmID, "start", nil, nil)
+	}
 	return nil
 }
 
@@ -244,8 +275,18 @@ func ipv4(v *vm) string {
 }
 
 // Stop waits up to grace for the VM to halt, then asks for a clean shutdown,
-// then forces it.
+// then forces it. With --iso, it then removes the installation media.
 func (b *Builder) Stop(ctx context.Context, grace time.Duration) error {
+	if err := b.stop(ctx, grace); err != nil {
+		return err
+	}
+	if b.cfg.ISO != "" {
+		return b.removeInstallMedia(ctx)
+	}
+	return nil
+}
+
+func (b *Builder) stop(ctx context.Context, grace time.Duration) error {
 	if halted, err := b.waitHalted(ctx, grace); err != nil || halted {
 		return err
 	}
@@ -419,4 +460,57 @@ func match(objs []object, kind, ref, poolID string) (*object, error) {
 		return nil, fmt.Errorf("xo: %s %q exists in %d pools, set --pool", kind, ref, len(pools))
 	}
 	return nil, fmt.Errorf("xo: %d %ss match %q, use the UUID", len(found), kind, ref)
+}
+
+// diskless tells whether a template has neither a disk nor a disk to
+// provision (template_info.disks).
+func (b *Builder) diskless(ctx context.Context, templateID string) (bool, error) {
+	var t struct {
+		VBDs []string `json:"$VBDs"`
+		Info struct {
+			Disks []any `json:"disks"`
+		} `json:"template_info"`
+	}
+	err := b.client.do(ctx, http.MethodGet, "/vm-templates/"+url.PathEscape(templateID)+"?fields="+url.QueryEscape("$VBDs,template_info"), nil, &t)
+	return len(t.VBDs) == 0 && len(t.Info.Disks) == 0, err
+}
+
+// cloudConfigDrive is the name XO gives the cloud-config disk.
+const cloudConfigDrive = "XO CloudConfigDrive"
+
+// removeInstallMedia ejects the ISO from the stopped VM and deletes the
+// cloud-config disk, which holds the temporary key. The CD drive stays:
+// vm.convertToTemplate ejects it too, from XO's cache.
+func (b *Builder) removeInstallMedia(ctx context.Context) error {
+	var vbds []struct {
+		VDI string `json:"VDI"`
+		CD  bool   `json:"is_cd_drive"`
+	}
+	path := "/vbds?fields=" + url.QueryEscape("VDI,is_cd_drive") + "&filter=" + url.QueryEscape("VM:"+b.vmID)
+	if err := b.client.do(ctx, http.MethodGet, path, nil, &vbds); err != nil {
+		return err
+	}
+	for _, vbd := range vbds {
+		switch {
+		case vbd.VDI == "":
+		case vbd.CD:
+			b.log("Ejecting the installation ISO")
+			if err := b.client.ejectCD(ctx, b.vmID); err != nil {
+				return fmt.Errorf("ejecting the ISO: %w", err)
+			}
+		default:
+			var vdi object
+			if err := b.client.do(ctx, http.MethodGet, "/vdis/"+url.PathEscape(vbd.VDI), nil, &vdi); err != nil {
+				return err
+			}
+			if vdi.NameLabel != cloudConfigDrive {
+				continue
+			}
+			b.log("Deleting the cloud-config disk")
+			if err := b.client.do(ctx, http.MethodDelete, "/vdis/"+url.PathEscape(vbd.VDI), nil, nil); err != nil {
+				return fmt.Errorf("deleting the cloud-config disk: %w", err)
+			}
+		}
+	}
+	return nil
 }

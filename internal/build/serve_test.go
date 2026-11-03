@@ -3,16 +3,19 @@ package build
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"strings"
 	"testing"
 
 	"github.com/littlejo/opendango/internal/instructions"
+	"github.com/littlejo/opendango/internal/plan"
 )
 
 // TestServe serves a directory to RUN instructions run with the local shell,
@@ -117,3 +120,41 @@ func TestServeDir(t *testing.T) {
 		t.Errorf("serveDir = %q, %v; want %q", got, err, wd)
 	}
 }
+
+// TestBoot checks that BOOT types its keys once the VM has started, before
+// the connection, with the SERVE address.
+func TestBoot(t *testing.T) {
+	ctxDir := t.TempDir()
+	os.Mkdir(filepath.Join(ctxDir, "http"), 0o755)
+	src := "FROM xo://t\nSERVE --addr=192.0.2.1 http\nBOOT <esc>url=http://${DANGO_HTTP_ADDR}/ks.cfg<enter>\nBOOT <wait5>\nCONNECT ssh --user=u\nRUN true\n"
+	b := &fakeBuilder{}
+	var log bytes.Buffer
+	if err := Run(context.Background(), mustPlan(t, src), Options{ContextDir: ctxDir, Out: &log, NewBuilder: only(b), Dial: dialTo(&scriptComm{}), NoCache: true}); err != nil {
+		t.Fatalf("%v\n%s", err, log.String())
+	}
+	addr := regexp.MustCompile(`Serving http at http://(192\.0\.2\.1:\d+)/`).FindStringSubmatch(log.String())
+	if addr == nil {
+		t.Fatalf("log:\n%s", log.String())
+	}
+	want := []string{"start", "keys:<esc>url=http://" + addr[1] + "/ks.cfg<enter>", "keys:<wait5>", "address"}
+	if len(b.calls) < 4 || !reflect.DeepEqual(b.calls[:4], want) {
+		t.Errorf("calls = %q, want %q first", b.calls, want)
+	}
+	if !strings.Contains(log.String(), "==> stage-0: BOOT <esc>url=http://"+addr[1]+"/ks.cfg<enter>\n") {
+		t.Errorf("log:\n%s", log.String())
+	}
+}
+
+// TestBootFailure checks that a failed BOOT stops the build and destroys
+// the VM.
+func TestBootFailure(t *testing.T) {
+	b := &failingKeys{}
+	err := Run(context.Background(), mustPlan(t, "FROM xo://t\nBOOT <enter>\n"), Options{NewBuilder: func(*plan.Stage, string) (Builder, error) { return b, nil }, NoCache: true})
+	if err == nil || err.Error() != "Dangofile:2: BOOT: console closed" || !contains(b.calls, "destroy") {
+		t.Errorf("err = %v, calls = %q", err, b.calls)
+	}
+}
+
+type failingKeys struct{ fakeBuilder }
+
+func (b *failingKeys) SendKeys(context.Context, string) error { return errors.New("console closed") }

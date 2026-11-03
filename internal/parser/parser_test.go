@@ -85,3 +85,19 @@ func TestSplitWords(t *testing.T) {
 		}
 	}
 }
+
+// TestParseBoot checks that BOOT keeps the rest of the line as written:
+// spaces, quotes and -- are typed.
+func TestParseBoot(t *testing.T) {
+	src := "BOOT <esc><wait>  auto \\\n  url=http://${A}/p.cfg it's \"q\" --- quiet<enter>\nBOOT   <wait5>  \nBOOT\n"
+	res, err := Parse(strings.NewReader(src))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := [][]string{{`<esc><wait>  auto   url=http://${A}/p.cfg it's "q" --- quiet<enter>`}, {"<wait5>"}, nil}
+	for i, c := range res.Commands {
+		if !reflect.DeepEqual(c.Args, want[i]) || c.Flags != nil {
+			t.Errorf("command %d: args %q, flags %q; want %q", i, c.Args, c.Flags, want[i])
+		}
+	}
+}

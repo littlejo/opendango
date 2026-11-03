@@ -9,10 +9,25 @@ import (
 	"github.com/coder/websocket"
 )
 
-// convertToTemplate calls vm.convertToTemplate on the JSON-RPC API
-// (WebSocket on /api/). The REST API has no equivalent yet; switch to it
-// once it does.
+// convertToTemplate calls vm.convertToTemplate on the JSON-RPC API. The
+// REST API has no equivalent yet; switch to it once it does.
 func (c *Client) convertToTemplate(ctx context.Context, vmID string) error {
+	return c.rpc(ctx, "vm.convertToTemplate", map[string]string{"id": vmID})
+}
+
+// setBootOrder calls vm.setBootOrder on the JSON-RPC API (HVM boot order:
+// c disk, d CD, n network). The REST API cannot change it.
+func (c *Client) setBootOrder(ctx context.Context, vmID, order string) error {
+	return c.rpc(ctx, "vm.setBootOrder", map[string]string{"vm": vmID, "order": order})
+}
+
+// ejectCD calls vm.ejectCd on the JSON-RPC API: the REST API cannot eject.
+func (c *Client) ejectCD(ctx context.Context, vmID string) error {
+	return c.rpc(ctx, "vm.ejectCd", map[string]string{"id": vmID})
+}
+
+// rpc signs in on the JSON-RPC API (WebSocket on /api/) and calls method.
+func (c *Client) rpc(ctx context.Context, method string, params any) error {
 	wsURL := "ws" + strings.TrimPrefix(c.BaseURL, "http") + "/api/"
 	conn, _, err := websocket.Dial(ctx, wsURL, &websocket.DialOptions{HTTPClient: c.HTTP})
 	if err != nil {
@@ -25,7 +40,7 @@ func (c *Client) convertToTemplate(ctx context.Context, vmID string) error {
 	if err := rpc.call(ctx, "session.signIn", map[string]string{"token": c.Token}); err != nil {
 		return err
 	}
-	return rpc.call(ctx, "vm.convertToTemplate", map[string]string{"id": vmID})
+	return rpc.call(ctx, method, params)
 }
 
 type jsonRPC struct {

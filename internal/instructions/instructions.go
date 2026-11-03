@@ -6,6 +6,7 @@
 package instructions
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"path/filepath"
@@ -13,6 +14,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/hashicorp/packer-plugin-sdk/bootcommand"
 
 	"github.com/littlejo/opendango/internal/parser"
 )
@@ -136,6 +139,19 @@ type Serve struct {
 // ServeAddrVar is the variable that holds the server address (ip:port).
 const ServeAddrVar = "DANGO_HTTP_ADDR"
 
+// ServeAddrMarker stands for ${DANGO_HTTP_ADDR} in a BOOT text: the address
+// is only known at build time.
+const ServeAddrMarker = "\x00DANGO_HTTP_ADDR\x00"
+
+// Boot types keystrokes into the VM console, before the connection, with
+// the Packer boot_command syntax (<enter>, <wait5>, <leftCtrlOn>...).
+type Boot struct {
+	Pos
+	// Keys is the expanded text; ServeAddrMarker stands for the SERVE
+	// address.
+	Keys string
+}
+
 // Output kinds.
 const (
 	OutputTemplate = "template"
@@ -163,7 +179,7 @@ var Forbidden = map[string]bool{
 
 // NotYetSupported lists the instructions planned but not implemented yet.
 var NotYetSupported = map[string]bool{
-	"ADD": true, "BOOT": true, "LABEL": true, "SHELL": true,
+	"ADD": true, "LABEL": true, "SHELL": true,
 }
 
 var (
@@ -457,6 +473,30 @@ func ParseServe(cmd *parser.Command, expand Expander) (*Serve, error) {
 		return nil, fmt.Errorf("SERVE: invalid --addr %q (expected an IP address)", s.Addr)
 	}
 	return s, nil
+}
+
+// ParseBoot parses `BOOT <keys>`. The parser keeps the rest of the line as
+// one argument (no flags); expand must leave the quotes in place. The keys
+// are checked with the boot_command parser of packer-plugin-sdk.
+func ParseBoot(cmd *parser.Command, expand Expander) (*Boot, error) {
+	if err := noFlags(cmd); err != nil {
+		return nil, err
+	}
+	if len(cmd.Args) != 1 {
+		return nil, fmt.Errorf("BOOT requires the keys to type")
+	}
+	keys, err := expand(cmd.Args[0])
+	if err != nil {
+		return nil, fmt.Errorf("BOOT: %w", err)
+	}
+	seq, err := bootcommand.GenerateExpressionSequence(strings.ReplaceAll(keys, ServeAddrMarker, "192.0.2.1:8000"))
+	if err != nil {
+		return nil, fmt.Errorf("BOOT: %w", err)
+	}
+	if errs := seq.Validate(); len(errs) > 0 {
+		return nil, fmt.Errorf("BOOT: %w", errors.Join(errs...))
+	}
+	return &Boot{Pos: pos(cmd), Keys: keys}, nil
 }
 
 // ParseOutput parses `OUTPUT --as=template [name]` and

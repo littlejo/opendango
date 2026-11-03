@@ -47,7 +47,8 @@ func TestParseConfig(t *testing.T) {
 		{"xenserver-iso", map[string]string{"packer_force": "true"}, "reserved"},
 		{"xenserver-iso", map[string]string{"http_directory": "http"}, "--http_directory is set by SERVE <dir>"},
 		{"xenserver-iso", map[string]string{"http_port_min": "8000"}, "--http_port_min is set by SERVE --port=<port>"},
-		{"xenserver-iso", map[string]string{"boot_command": `["a"`}, "--boot_command: invalid JSON"},
+		{"xenserver-iso", map[string]string{"network_names": `["a"`}, "--network_names: invalid JSON"},
+		{"xenserver-iso", map[string]string{"boot_command": `["a"]`}, "--boot_command is set by BOOT <keys>"},
 	} {
 		if _, err := ParseConfig(tt.source, tt.flags); err == nil || !strings.Contains(err.Error(), tt.err) {
 			t.Errorf("%s %v: err = %v, want %q", tt.source, tt.flags, err, tt.err)

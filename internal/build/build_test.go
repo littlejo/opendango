@@ -53,6 +53,11 @@ func (b *fakeBuilder) Tag(_ context.Context, tag string) error {
 	return nil
 }
 
+func (b *fakeBuilder) SendKeys(_ context.Context, keys string) error {
+	b.calls = append(b.calls, "keys:"+keys)
+	return nil
+}
+
 func (b *fakeBuilder) LocalAddr(context.Context) (string, error) {
 	return "127.0.0.1", nil
 }

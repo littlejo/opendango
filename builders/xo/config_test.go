@@ -21,6 +21,11 @@ func TestParseConfig(t *testing.T) {
 	if err != nil || cfg.Template != "Debian 12" {
 		t.Errorf("--template: %+v, %v", cfg, err)
 	}
+
+	cfg, err = ParseConfig("Other install media", map[string]string{"iso": "debian-13.iso", "disk": "20G"})
+	if err != nil || cfg.ISO != "debian-13.iso" || cfg.Disk != 20<<30 {
+		t.Errorf("--iso: %+v, %v", cfg, err)
+	}
 }
 
 func TestParseConfigErrors(t *testing.T) {
@@ -52,7 +57,7 @@ func TestParseStageConfig(t *testing.T) {
 	if want := (Config{CPUs: 4, Disk: 30 << 30, Network: "lan"}); cfg != want {
 		t.Errorf("got %+v, want %+v", cfg, want)
 	}
-	for _, flag := range []string{"template", "pool"} {
+	for _, flag := range []string{"template", "pool", "iso"} {
 		_, err := ParseStageConfig(map[string]string{flag: "x"})
 		if err == nil || !strings.Contains(err.Error(), "--"+flag+" cannot be set when starting from another stage") {
 			t.Errorf("--%s: got %v", flag, err)

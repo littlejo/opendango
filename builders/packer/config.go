@@ -34,8 +34,8 @@ var (
 	sensitive = regexp.MustCompile(`password|secret|token`)
 )
 
-// reserved are the settings that come from CONNECT and SERVE, not from
-// FROM flags.
+// reserved are the settings that come from CONNECT, SERVE and BOOT, not
+// from FROM flags.
 var reserved = map[string]string{
 	"communicator":   "CONNECT ssh",
 	"ssh_username":   "CONNECT ssh --user=<user>",
@@ -44,6 +44,7 @@ var reserved = map[string]string{
 	"http_directory": "SERVE <dir>",
 	"http_port_min":  "SERVE --port=<port>",
 	"http_port_max":  "SERVE --port=<port>",
+	"boot_command":   "BOOT <keys>",
 }
 
 // ParseConfig reads FROM [--flags] packer://<source>. Flag names are the

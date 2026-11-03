@@ -26,6 +26,9 @@ type Config struct {
 	CPUs   int
 	Memory int64 // bytes
 	Disk   int64 // bytes, size of the first disk
+	// ISO is the name or UUID of an ISO (a VDI of an ISO SR) to install
+	// from: the VM boots from it, with an empty disk.
+	ISO string
 }
 
 // ParseConfig builds a Config from the FROM source and flags, without
@@ -38,7 +41,8 @@ func ParseConfig(source string, flags map[string]string) (Config, error) {
 		}
 		cfg.Template = t
 	}
-	if err := cfg.setFlags(flags, "template", "pool"); err != nil {
+	cfg.ISO = flags["iso"]
+	if err := cfg.setFlags(flags, "template", "pool", "iso"); err != nil {
 		return cfg, err
 	}
 	if cfg.Template == "" {
@@ -50,7 +54,7 @@ func ParseConfig(source string, flags map[string]string) (Config, error) {
 // ParseStageConfig builds the Config of a stage that starts from an earlier
 // stage (FROM <stage>): the template and the pool come from that stage.
 func ParseStageConfig(flags map[string]string) (Config, error) {
-	for _, name := range []string{"template", "pool"} {
+	for _, name := range []string{"template", "pool", "iso"} {
 		if _, ok := flags[name]; ok {
 			return Config{}, fmt.Errorf("xo: --%s cannot be set when starting from another stage", name)
 		}
@@ -86,7 +90,7 @@ func (cfg *Config) setFlags(flags map[string]string, handled ...string) error {
 			}
 		default:
 			if !slices.Contains(handled, name) {
-				return fmt.Errorf("xo: unknown flag --%s (expected template, pool, sr, network, cpus, memory or disk)", name)
+				return fmt.Errorf("xo: unknown flag --%s (expected template, pool, iso, sr, network, cpus, memory or disk)", name)
 			}
 		}
 	}

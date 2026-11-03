@@ -75,11 +75,18 @@ func Parse(r io.Reader) (*Result, error) {
 		for _, h := range n.Heredocs {
 			cmd.Heredocs = append(cmd.Heredocs, Heredoc{Name: h.Name, Content: h.Content})
 		}
-		if standard[cmd.Keyword] {
+		switch {
+		case standard[cmd.Keyword]:
 			for next := n.Next; next != nil; next = next.Next {
 				cmd.Args = append(cmd.Args, next.Value)
 			}
-		} else {
+		case raw[cmd.Keyword]:
+			// The rest of the line, as written: no flags.
+			cmd.Flags = nil
+			if text := rawArg(n.Original); text != "" {
+				cmd.Args = []string{text}
+			}
+		default:
 			args, err := customArgs(n.Original)
 			if err != nil {
 				return nil, fmt.Errorf("line %d: %w", n.StartLine, err)
@@ -93,6 +100,20 @@ func Parse(r io.Reader) (*Result, error) {
 		out.Commands = append(out.Commands, cmd)
 	}
 	return out, nil
+}
+
+// raw lists the custom instructions whose argument is the rest of the line,
+// spaces and quotes included: BOOT types it into the VM console.
+var raw = map[string]bool{"BOOT": true}
+
+// rawArg returns the original line without its keyword and the spaces
+// around the argument.
+func rawArg(original string) string {
+	original = strings.TrimSpace(original)
+	if i := strings.IndexAny(original, " \t"); i >= 0 {
+		return strings.TrimSpace(original[i:])
+	}
+	return ""
 }
 
 // customArgs splits the original line of a custom instruction into words,

@@ -84,12 +84,12 @@ COPY a.txt copied/
 }
 
 // TestPackerStageServe checks that SERVE becomes the plugin's
-// http_directory and port range.
+// http_directory and port range, and BOOT its boot_command.
 func TestPackerStageServe(t *testing.T) {
 	ctxDir := t.TempDir()
 	os.Mkdir(filepath.Join(ctxDir, "http"), 0o755)
 	tests := []struct{ serve, want string }{
-		{"SERVE --port=8123 http", "==> stage-0: http: dir=" + filepath.Join(ctxDir, "http") + " ports=8123-8123"},
+		{"SERVE --port=8123 http\nBOOT <esc>url=http://${DANGO_HTTP_ADDR}/ks.cfg<enter>\nBOOT <wait5>", "==> stage-0: boot_command: <esc>url=http://{{ .HTTPIP }}:{{ .HTTPPort }}/ks.cfg<enter>\n==> stage-0: boot_command: <wait5>\n==> stage-0: http: dir=" + filepath.Join(ctxDir, "http") + " ports=8123-8123"},
 		{"SERVE http", "==> stage-0: http: dir=" + filepath.Join(ctxDir, "http") + " ports=0-0"},
 	}
 	for _, tt := range tests {

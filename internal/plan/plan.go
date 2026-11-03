@@ -45,6 +45,9 @@ type Stage struct {
 	// Serve is the stage's SERVE, or nil. The server runs from before the
 	// VM starts to the end of the stage.
 	Serve *instructions.Serve
+	// Boot are the stage's BOOT, typed in order once the VM has started,
+	// before the connection.
+	Boot []*instructions.Boot
 
 	// ownConnect is true when the stage sets CONNECT itself.
 	ownConnect bool
@@ -132,15 +135,33 @@ func Build(file string, res *parser.Result, buildArgs map[string]string) (*Plan,
 	// stage: the stage ARGs, then ENV (Docker semantics).
 	global := map[string]string{}
 	scope := global
+	var stage *Stage
 	expand := func(word string) (string, error) {
 		res, err := lex.ProcessWordWithMatches(word, envGetter(scope))
 		if _, ok := res.Unmatched[instructions.ServeAddrVar]; ok && err == nil {
-			err = fmt.Errorf("${%s} is only set in RUN, where the remote shell expands it", instructions.ServeAddrVar)
+			err = unsetServeAddr()
+		}
+		return res.Result, err
+	}
+	// BOOT keeps its quotes: they are typed. ${DANGO_HTTP_ADDR} becomes a
+	// marker, replaced at build time.
+	bootLex := shell.NewLex(res.EscapeToken)
+	bootLex.SkipProcessQuotes = true
+	expandBoot := func(word string) (string, error) {
+		env := envGetter{}
+		for k, v := range scope {
+			env[k] = v
+		}
+		if stage.Serve != nil {
+			env[instructions.ServeAddrVar] = instructions.ServeAddrMarker
+		}
+		res, err := bootLex.ProcessWordWithMatches(word, env)
+		if _, ok := res.Unmatched[instructions.ServeAddrVar]; ok && err == nil {
+			err = unsetServeAddr()
 		}
 		return res.Result, err
 	}
 
-	var stage *Stage
 	byName := map[string]*Stage{}
 	for _, cmd := range res.Commands {
 		line := cmd.StartLine
@@ -279,8 +300,8 @@ func Build(file string, res *parser.Result, buildArgs map[string]string) (*Plan,
 			if stage.Serve != nil {
 				return fail(line, fmt.Errorf("SERVE already set at line %d", stage.Serve.Line()))
 			}
-			if stage.ownConnect || stage.usesVM {
-				return fail(line, fmt.Errorf("SERVE must come before CONNECT and the instructions that need the VM: the server starts before the VM"))
+			if stage.ownConnect || stage.usesVM || len(stage.Boot) > 0 {
+				return fail(line, fmt.Errorf("SERVE must come before BOOT, CONNECT and the instructions that need the VM: the server starts before the VM"))
 			}
 			sv, err := instructions.ParseServe(cmd, expand)
 			if err != nil {
@@ -290,6 +311,16 @@ func Build(file string, res *parser.Result, buildArgs map[string]string) (*Plan,
 				return fail(line, fmt.Errorf("SERVE --addr is not supported in a packer:// stage: the plugin serves the directory and chooses its address"))
 			}
 			stage.Serve = sv
+
+		case "BOOT":
+			if stage.ownConnect || stage.usesVM {
+				return fail(line, fmt.Errorf("BOOT must come before CONNECT and the instructions that need the VM: it types into the console before the connection"))
+			}
+			b, err := instructions.ParseBoot(cmd, expandBoot)
+			if err != nil {
+				return fail(line, err)
+			}
+			stage.Boot = append(stage.Boot, b)
 
 		case "OUTPUT":
 			if stage.IsPacker() {
@@ -392,6 +423,10 @@ func literalFlags(cmd *parser.Command, escape rune) *parser.Command {
 		c.Flags[i] = f
 	}
 	return &c
+}
+
+func unsetServeAddr() error {
+	return fmt.Errorf("${%s} is only set after SERVE, in RUN (the remote shell expands it) and BOOT", instructions.ServeAddrVar)
 }
 
 func reserved(name string) error {

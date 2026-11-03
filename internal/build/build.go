@@ -55,6 +55,9 @@ type Builder interface {
 	// LocalAddr returns the IP address of this machine that the VM can
 	// reach: where SERVE is advertised when --addr is not set.
 	LocalAddr(ctx context.Context) (string, error)
+	// SendKeys types keys into the VM console, in the boot_command syntax
+	// of Packer (BOOT).
+	SendKeys(ctx context.Context, keys string) error
 }
 
 // Communicator runs commands in the VM and uploads files to it.
@@ -408,6 +411,14 @@ func runStage(ctx context.Context, p *plan.Plan, stage *plan.Stage, parent *exec
 	e.say("Starting VM")
 	if err := b.Start(ctx, cloudConfig); err != nil {
 		return nil, fmt.Errorf("starting VM: %w", err)
+	}
+
+	for _, boot := range stage.Boot {
+		keys := strings.ReplaceAll(boot.Keys, instructions.ServeAddrMarker, e.serveAddr)
+		e.say("BOOT %s", keys)
+		if err := b.SendKeys(ctx, keys); err != nil {
+			return nil, &plan.Error{File: p.File, Line: boot.Line(), Err: fmt.Errorf("BOOT: %w", err)}
+		}
 	}
 
 	if e.connect != nil {
