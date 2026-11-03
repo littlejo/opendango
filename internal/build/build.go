@@ -100,6 +100,9 @@ type Options struct {
 	// NoCache builds every stage, without looking up or storing templates
 	// in the cache.
 	NoCache bool
+	// FindPlugin finds the Packer plugin of the packer:// stages;
+	// FindPlugin when nil.
+	FindPlugin FindPluginFunc
 }
 
 // NewBuilder returns the builder of the stage's root FROM.
@@ -147,6 +150,9 @@ func Run(ctx context.Context, p *plan.Plan, opts Options) (err error) {
 	}
 	if opts.RetryDelay == 0 {
 		opts.RetryDelay = 5 * time.Second
+	}
+	if opts.FindPlugin == nil {
+		opts.FindPlugin = FindPlugin
 	}
 	if opts.NewBuilder == nil {
 		opts.NewBuilder = func(s *plan.Stage, parent string) (Builder, error) { return NewBuilder(s, parent, opts.Out) }
@@ -305,6 +311,9 @@ type console struct {
 // always ends as a template. key is the stage's cache key, empty when the
 // stage is not cached.
 func runStage(ctx context.Context, p *plan.Plan, stage *plan.Stage, parent *executor, needed bool, key string, con *console, opts Options) (_ *executor, err error) {
+	if stage.IsPacker() {
+		return runPackerStage(ctx, p, stage, con, opts)
+	}
 	parentTemplate := ""
 	if parent != nil {
 		parentTemplate = parent.b.ID()
@@ -399,26 +408,8 @@ func runStage(ctx context.Context, p *plan.Plan, stage *plan.Stage, parent *exec
 		}()
 	}
 
-	for _, step := range stage.Steps {
-		for {
-			err := e.step(ctx, step)
-			if err == nil {
-				break
-			}
-			err = &plan.Error{File: p.File, Line: step.Line(), Err: err}
-			if !opts.Ask || ctx.Err() != nil {
-				return nil, err
-			}
-			c := e.ask(ctx, err, true)
-			if c != choiceRetry {
-				return nil, answer(err, c)
-			}
-			// What was fixed by hand before the retry is not reproducible.
-			e.retried = true
-			if err := e.reconnect(ctx); err != nil {
-				return nil, err
-			}
-		}
+	if err := e.steps(ctx, p, stage, opts); err != nil {
+		return nil, err
 	}
 
 	grace := time.Duration(0)
@@ -468,6 +459,34 @@ func runStage(ctx context.Context, p *plan.Plan, stage *plan.Stage, parent *exec
 	}
 	e.say("Stage finished")
 	return e, nil
+}
+
+// steps runs the instructions of the stage. With --on-error=ask, a failed
+// instruction can be retried.
+func (e *executor) steps(ctx context.Context, p *plan.Plan, stage *plan.Stage, opts Options) error {
+	for _, step := range stage.Steps {
+		for {
+			err := e.step(ctx, step)
+			if err == nil {
+				break
+			}
+			err = &plan.Error{File: p.File, Line: step.Line(), Err: err}
+			if !opts.Ask || ctx.Err() != nil {
+				return err
+			}
+			c := e.ask(ctx, err, true)
+			if c != choiceRetry {
+				e.answer, e.answered = c, true
+				return answer(err, c)
+			}
+			// What was fixed by hand before the retry is not reproducible.
+			e.retried = true
+			if err := e.reconnect(ctx); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 // Cache tags, the same for every builder. Every template in the cache has
@@ -561,6 +580,10 @@ type executor struct {
 	cached bool
 	// retried is true once --on-error=ask retried an instruction.
 	retried bool
+	// answer is the answer to --on-error=ask that ended the stage, when
+	// answered is true.
+	answer   choice
+	answered bool
 
 	// State changed by the instructions.
 	user    string
@@ -875,12 +898,17 @@ func (e *executor) breakpoint(ctx context.Context, s *instructions.Breakpoint) e
 	e.console.mu.Lock()
 	defer e.console.mu.Unlock()
 	e.say("%s", title)
-	e.say("Build paused. Connect to the VM with:")
-	remove, err := e.printSSH()
-	if err != nil {
-		return err
+	if e.key == nil {
+		// packer://: no ephemeral key, the FROM flags hold the credentials.
+		e.say("Build paused. The plugin owns the connection: log in with the credentials of the FROM flags")
+	} else {
+		e.say("Build paused. Connect to the VM with:")
+		remove, err := e.printSSH()
+		if err != nil {
+			return err
+		}
+		defer remove()
 	}
-	defer remove()
 	e.say("Press Enter to continue (Ctrl+C aborts the build)")
 	if _, err := readLine(ctx, e.console.in); err != nil && !errors.Is(err, io.EOF) {
 		return err
@@ -1019,6 +1047,10 @@ func keep(err error, opts Options) bool {
 // reconnect opens a new connection before a retry: the failure may have
 // dropped the previous one (REBOOT, sshd restarted by hand).
 func (e *executor) reconnect(ctx context.Context) error {
+	if e.b == nil {
+		// packer://: the plugin owns the connection.
+		return nil
+	}
 	if e.comm != nil {
 		e.comm.Close()
 		e.comm = nil
