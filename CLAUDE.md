@@ -128,7 +128,7 @@ The Vates SDK (`xenorchestra-go-sdk`) was evaluated and not used: opendango need
   5. export the XVA (`GET /vms/{id}.xva?compress=`) and/or rename (`PATCH`) and convert to a template;
   6. clean up: `DELETE /vms/{id}` unless the VM became the template. Cleanup happens **even on failure or Ctrl+C**, unless `--on-error=keep` is set or `k` is answered to `--on-error=ask`.
 - `vm.convertToTemplate` returns before XO's object cache lists the template: the builder waits for `GET /vm-templates/{id}` before reporting the output done.
-- `FROM <stage>` creates the VM from the parent's template (its UUID, in the root's pool). Once converted, `Destroy` deletes the template (`DELETE /vm-templates/{id}`), which is how temporary templates are removed. A builder that found its template in the cache (`FindCache`) never deletes it. Tags are added with `PUT /vm-templates/{id}/tags/{tag}`.
+- `FROM <stage>` creates the VM from the parent's template (its UUID, in the root's pool). Once converted, `Destroy` deletes the template (`DELETE /vm-templates/{id}`), which is how temporary templates are removed. A builder that found its template in the cache (`FindCache`) never deletes it. Tags are added with `PUT /vm-templates/{id}/tags/{tag}`, then the builder waits until XO lists them (its object cache lags a moment behind the call, and the next stage may look up the cache right away). `create_vm` copies the template's tags to the VM: `Start` removes the copied cache tags (`DELETE /vms/{id}/tags/{tag}`, from the template's tags read before the creation), otherwise a cache lookup could return the child's template and `cache prune` could delete an `OUTPUT` template.
 
 ### Packer plugin compatibility
 
