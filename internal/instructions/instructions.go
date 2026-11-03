@@ -112,6 +112,13 @@ type Reboot struct {
 	Pos
 }
 
+// Breakpoint pauses the build until the user presses Enter.
+type Breakpoint struct {
+	Pos
+	// Message is shown with the pause (optional).
+	Message string
+}
+
 // Output kinds.
 const (
 	OutputTemplate = "template"
@@ -139,8 +146,7 @@ var Forbidden = map[string]bool{
 
 // NotYetSupported lists the instructions planned but not implemented yet.
 var NotYetSupported = map[string]bool{
-	"ADD": true, "BOOT": true, "BREAKPOINT": true, "LABEL": true,
-	"SERVE": true, "SHELL": true,
+	"ADD": true, "BOOT": true, "LABEL": true, "SERVE": true, "SHELL": true,
 }
 
 var (
@@ -391,6 +397,19 @@ func ParseReboot(cmd *parser.Command) (*Reboot, error) {
 		return nil, fmt.Errorf("REBOOT takes no argument")
 	}
 	return &Reboot{Pos: pos(cmd)}, nil
+}
+
+// ParseBreakpoint parses `BREAKPOINT [message]`. The words of the message
+// are joined with a space; an empty variable leaves no trailing space.
+func ParseBreakpoint(cmd *parser.Command, expand Expander) (*Breakpoint, error) {
+	if err := noFlags(cmd); err != nil {
+		return nil, err
+	}
+	words, err := expandAll(cmd.Args, expand)
+	if err != nil {
+		return nil, fmt.Errorf("BREAKPOINT: %w", err)
+	}
+	return &Breakpoint{Pos: pos(cmd), Message: strings.TrimSpace(strings.Join(words, " "))}, nil
 }
 
 // ParseOutput parses `OUTPUT --as=template [name]` and

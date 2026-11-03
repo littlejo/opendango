@@ -16,10 +16,14 @@ package xo_test
 //   go test -tags integration -timeout 60m ./builders/xo/
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -67,8 +71,9 @@ func setup(t *testing.T) (from, user, ctxDir string) {
 	return from, user, ctxDir
 }
 
-// run builds src and returns an XO client and a context for the checks.
-func run(t *testing.T, src, ctxDir string) (context.Context, *xo.Client) {
+// run builds src with opts and returns an XO client and a context for the
+// checks. The log goes to stdout when opts.Out is nil.
+func run(t *testing.T, src string, opts build.Options) (context.Context, *xo.Client) {
 	t.Helper()
 	res, err := parser.Parse(strings.NewReader(src))
 	if err != nil {
@@ -80,7 +85,10 @@ func run(t *testing.T, src, ctxDir string) (context.Context, *xo.Client) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 55*time.Minute)
 	t.Cleanup(cancel)
-	if err := build.Run(ctx, p, build.Options{ContextDir: ctxDir, Out: os.Stdout}); err != nil {
+	if opts.Out == nil {
+		opts.Out = os.Stdout
+	}
+	if err := build.Run(ctx, p, opts); err != nil {
 		t.Fatal(err)
 	}
 	client, err := xo.NewClientFromEnv()
@@ -114,12 +122,38 @@ COPY --chmod=0640 hello.txt ./
 RUN test "$(cat /opt/opendango/hello.txt)" = "hello from opendango"
 RUN grep -q '^OPENDANGO_IT="1"$' /etc/environment
 REBOOT
+BREAKPOINT checked by the test
 RUN test -f /opt/opendango/hello.txt
 OUTPUT --format=xva --compress=zstd out/it.xva
 OUTPUT --as=template %s
 `, from, user, name)
 
-	ctx, client := run(t, src, ctxDir)
+	// At the BREAKPOINT, log in with the printed ssh command, as a user would.
+	if _, err := exec.LookPath("ssh"); err != nil {
+		t.Fatal("the BREAKPOINT check needs the ssh client")
+	}
+	var log bytes.Buffer
+	sshCmd := regexp.MustCompile(`(?m)^    (ssh -i .*)$`)
+	breakpoint := false
+	stdin := readerFunc(func(p []byte) (int, error) {
+		// This runs in the build's goroutine: t.Error, not t.Fatal.
+		breakpoint = true
+		m := sshCmd.FindStringSubmatch(log.String())
+		if m == nil {
+			t.Error("no ssh command in the log")
+			return copy(p, "\n"), nil
+		}
+		out, err := exec.Command("/bin/sh", "-c", m[1]+" -o BatchMode=yes test -f /opt/opendango/hello.txt").CombinedOutput()
+		if err != nil {
+			t.Errorf("%s: %v\n%s", m[1], err, out)
+		}
+		return copy(p, "\n"), nil
+	})
+
+	ctx, client := run(t, src, build.Options{ContextDir: ctxDir, Out: io.MultiWriter(os.Stdout, &log), Stdin: stdin})
+	if !breakpoint {
+		t.Error("the build did not stop at the BREAKPOINT")
+	}
 	info, err := os.Stat(filepath.Join(ctxDir, "out", "it.xva"))
 	if err != nil || info.Size() == 0 {
 		t.Errorf("XVA not exported: %v", err)
@@ -146,7 +180,7 @@ RUN test "$(nproc)" = 2
 OUTPUT --as=template %s
 `, from, user, name)
 
-	ctx, client := run(t, src, ctxDir)
+	ctx, client := run(t, src, build.Options{ContextDir: ctxDir})
 	deleteTemplate(ctx, t, client, name)
 	tmp, err := xo.TemplatesWithPrefix(ctx, client, "opendango-tmp-base-")
 	if err != nil {
@@ -156,3 +190,8 @@ OUTPUT --as=template %s
 		t.Errorf("intermediate templates left behind: %v", tmp)
 	}
 }
+
+// readerFunc lets a test act when the build waits for input.
+type readerFunc func(p []byte) (int, error)
+
+func (f readerFunc) Read(p []byte) (int, error) { return f(p) }

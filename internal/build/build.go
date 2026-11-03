@@ -3,10 +3,12 @@
 package build
 
 import (
+	"bufio"
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
@@ -80,6 +82,9 @@ type Options struct {
 	Dial DialFunc
 	// RetryDelay is the pause between connection attempts; 5s when zero.
 	RetryDelay time.Duration
+	// Stdin is where BREAKPOINT waits for Enter. When nil (no terminal),
+	// BREAKPOINT is skipped with a warning.
+	Stdin io.Reader
 }
 
 // NewBuilder returns the builder of the stage's root FROM.
@@ -126,6 +131,10 @@ func Run(ctx context.Context, p *plan.Plan, opts Options) (err error) {
 	if opts.NewBuilder == nil {
 		opts.NewBuilder = func(s *plan.Stage, parent string) (Builder, error) { return NewBuilder(s, parent, opts.Out) }
 	}
+	var stdin *bufio.Reader
+	if opts.Stdin != nil {
+		stdin = bufio.NewReader(opts.Stdin)
+	}
 	stages, err := p.Select(opts.Target)
 	if err != nil {
 		return err
@@ -162,7 +171,7 @@ func Run(ctx context.Context, p *plan.Plan, opts Options) (err error) {
 		for _, c := range s.Children {
 			needed = needed || selected[c]
 		}
-		e, err := runStage(ctx, p, s, done[s.Parent], needed, opts)
+		e, err := runStage(ctx, p, s, done[s.Parent], needed, stdin, opts)
 		if err != nil {
 			return err
 		}
@@ -179,7 +188,7 @@ func Run(ctx context.Context, p *plan.Plan, opts Options) (err error) {
 // (nil for a root stage), whose final USER, WORKDIR and ENV are inherited.
 // needed is true when a selected stage starts from this one: the VM then
 // always ends as a template.
-func runStage(ctx context.Context, p *plan.Plan, stage *plan.Stage, parent *executor, needed bool, opts Options) (_ *executor, err error) {
+func runStage(ctx context.Context, p *plan.Plan, stage *plan.Stage, parent *executor, needed bool, stdin *bufio.Reader, opts Options) (_ *executor, err error) {
 	parentTemplate := ""
 	if parent != nil {
 		parentTemplate = parent.b.ID()
@@ -197,6 +206,7 @@ func runStage(ctx context.Context, p *plan.Plan, stage *plan.Stage, parent *exec
 		dial:       opts.Dial,
 		retryDelay: opts.RetryDelay,
 		contextDir: opts.ContextDir,
+		stdin:      stdin,
 	}
 	if parent != nil {
 		// Like a Docker image: USER, WORKDIR and ENV carry over, ARG does not.
@@ -310,9 +320,13 @@ type executor struct {
 	dial       DialFunc
 	retryDelay time.Duration
 	contextDir string
+	stdin      *bufio.Reader
 
+	key        ed25519.PrivateKey
 	signer     gossh.Signer
 	keyComment string
+	// host is the address of the current connection.
+	host string
 
 	// State changed by the instructions.
 	user    string
@@ -334,6 +348,7 @@ func (e *executor) generateKey() (string, error) {
 	if err != nil {
 		return "", err
 	}
+	e.key = priv
 	if e.signer, err = gossh.NewSignerFromKey(priv); err != nil {
 		return "", err
 	}
@@ -361,6 +376,7 @@ func (e *executor) open(ctx context.Context) error {
 			e.say("Connecting to %s@%s:%d", e.connect.User, host, e.connect.Port)
 			e.comm, err = e.dial(ctx, host, e.connect.Port, e.connect.User, e.signer)
 			if err == nil {
+				e.host = host
 				return nil
 			}
 		}
@@ -418,6 +434,11 @@ func (e *executor) step(ctx context.Context, step instructions.Instruction) erro
 		e.say("REBOOT")
 		if err := e.reboot(ctx); err != nil {
 			return fmt.Errorf("REBOOT: %w", err)
+		}
+		return nil
+	case *instructions.Breakpoint:
+		if err := e.breakpoint(ctx, s); err != nil {
+			return fmt.Errorf("BREAKPOINT: %w", err)
 		}
 		return nil
 	default:
@@ -608,6 +629,61 @@ func (e *executor) reboot(ctx context.Context) error {
 		case <-time.After(e.retryDelay):
 		}
 	}
+}
+
+// breakpoint writes the ephemeral key to a temporary file, prints the SSH
+// command to reach the VM and waits for Enter. The key file is removed when
+// the build resumes or is interrupted.
+func (e *executor) breakpoint(ctx context.Context, s *instructions.Breakpoint) error {
+	title := "BREAKPOINT"
+	if s.Message != "" {
+		title += " " + s.Message
+	}
+	if e.stdin == nil {
+		e.say("%s ignored: stdin is not a terminal", title)
+		return nil
+	}
+	e.say("%s", title)
+
+	block, err := gossh.MarshalPrivateKey(e.key, e.keyComment)
+	if err != nil {
+		return err
+	}
+	f, err := os.CreateTemp("", "opendango-key-")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(f.Name())
+	if _, err := f.Write(pem.EncodeToMemory(block)); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+
+	e.say("Build paused. Connect to the VM with:")
+	fmt.Fprintf(e.out, "    ssh -i %s -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -p %d %s@%s\n",
+		f.Name(), e.connect.Port, e.connect.User, e.host)
+	e.say("Press Enter to continue (Ctrl+C aborts the build)")
+
+	// The read cannot be interrupted: on cancellation it is left behind,
+	// and the build ends anyway.
+	read := make(chan error, 1)
+	go func() {
+		_, err := e.stdin.ReadString('\n')
+		read <- err
+	}()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case err := <-read:
+		if err != nil && !errors.Is(err, io.EOF) {
+			return err
+		}
+	}
+	e.say("Resuming the build")
+	return nil
 }
 
 // finish removes the ephemeral key from the image and shuts the VM down.

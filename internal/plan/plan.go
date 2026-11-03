@@ -35,7 +35,8 @@ type Stage struct {
 	// Connect is the stage's CONNECT, or the one inherited from its parent;
 	// nil when no instruction needs a connection.
 	Connect *instructions.Connect
-	// Steps run in order: *Arg, *Env, *User, *Workdir, *Run, *Copy, *Reboot.
+	// Steps run in order: *Arg, *Env, *User, *Workdir, *Run, *Copy, *Reboot,
+	// *Breakpoint.
 	Steps []instructions.Instruction
 	// Outputs run after all steps, once the VM is stopped.
 	Outputs []*instructions.Output
@@ -224,7 +225,7 @@ func Build(file string, res *parser.Result, buildArgs map[string]string) (*Plan,
 			}
 			stage.Steps = append(stage.Steps, u)
 
-		case "WORKDIR", "RUN", "COPY", "REBOOT":
+		case "WORKDIR", "RUN", "COPY", "REBOOT", "BREAKPOINT":
 			if stage.Connect == nil {
 				return fail(line, needsConnect(cmd.Keyword))
 			}
@@ -241,6 +242,8 @@ func Build(file string, res *parser.Result, buildArgs map[string]string) (*Plan,
 				step, err = instructions.ParseCopy(cmd, expand)
 			case "REBOOT":
 				step, err = instructions.ParseReboot(cmd)
+			case "BREAKPOINT":
+				step, err = instructions.ParseBreakpoint(cmd, expand)
 			}
 			if err != nil {
 				return fail(line, err)

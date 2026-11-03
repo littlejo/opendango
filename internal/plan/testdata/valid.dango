@@ -16,5 +16,6 @@ RUN <<EOF
 EOF
 COPY --chmod=0644 site/ /var/www/html/
 REBOOT
+BREAKPOINT "check debian ${DEBIAN}"
 OUTPUT --as=template "golden-debian-${DEBIAN}"
 OUTPUT --format=xva --compress=zstd ./dist/golden-${DEBIAN}.xva
