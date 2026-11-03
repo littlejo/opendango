@@ -163,6 +163,15 @@ func TestErrors(t *testing.T) {
 		{"FROM xo://t\nBOOT <enter>", "Dangofile:2: BOOT is not supported yet"},
 		{"FROM xo://t\nFOO", "Dangofile:2: unknown instruction FOO"},
 		{"FROM xo://t\nUSER a:b", "Dangofile:2: USER: groups are not supported"},
+		{"FROM xo://t\nSERVE http\nSERVE www", "Dangofile:3: SERVE already set at line 2"},
+		{"FROM xo://t\nCONNECT ssh --user=u\nSERVE http", "Dangofile:3: SERVE must come before CONNECT"},
+		{"FROM xo://t AS a\nCONNECT ssh --user=u\nFROM a\nRUN x\nSERVE http", "Dangofile:5: SERVE must come before CONNECT"},
+		{"FROM xo://t\nCONNECT ssh --user=u\nFROM xo://t\nENV --persist A=1\nSERVE http", "Dangofile:4: ENV --persist needs a connection"},
+		{"FROM xo://t\nSERVE ../http", "Dangofile:2: SERVE: \"../http\" is outside the Dangofile directory"},
+		{"FROM --remote_host=h packer://xenserver-iso\nSERVE --addr=10.0.0.1 http", "Dangofile:2: SERVE --addr is not supported in a packer:// stage"},
+		{"FROM xo://t\nSERVE http\nENV URL=http://${DANGO_HTTP_ADDR}/ks.cfg", "Dangofile:3: ENV URL: ${DANGO_HTTP_ADDR} is only set in RUN"},
+		{"FROM xo://t\nSERVE http\nENV DANGO_HTTP_ADDR=x", "Dangofile:3: DANGO_HTTP_ADDR is reserved"},
+		{"ARG DANGO_HTTP_ADDR\nFROM xo://t", "Dangofile:1: DANGO_HTTP_ADDR is reserved"},
 	}
 	for _, tt := range tests {
 		_, err := build(t, tt.src, nil)
@@ -271,6 +280,22 @@ func TestPackerStage(t *testing.T) {
 	// The plugin produces the artifact: no warning about a missing OUTPUT.
 	if len(p.Warnings) != 0 {
 		t.Errorf("warnings = %v", p.Warnings)
+	}
+}
+
+func TestServe(t *testing.T) {
+	src := "ARG DIR=http\nFROM xo://t AS a\nARG DIR\nUSER root\nSERVE --port=8080 ${DIR}\nCONNECT ssh --user=u\nRUN curl http://$DANGO_HTTP_ADDR/ks.cfg\n" +
+		"FROM a AS b\nOUTPUT --as=template\n"
+	p, err := build(t, src, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sv := p.Stages[0].Serve; sv == nil || sv.Dir != "http" || sv.Port != 8080 || sv.Line() != 5 {
+		t.Errorf("serve = %+v", sv)
+	}
+	// One server per stage: not inherited.
+	if p.Stages[1].Serve != nil {
+		t.Errorf("stage b inherits SERVE")
 	}
 }
 

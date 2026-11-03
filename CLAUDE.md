@@ -37,7 +37,7 @@
 | `ADD` | planned | `COPY` plus URL sources. |
 | `LABEL` | planned | Metadata or tags attached to the produced image. |
 | `BOOT` | planned | Types keystrokes into the VM console, for ISO installs (equivalent of `boot_command`). |
-| `SERVE` | planned | Serves a directory over HTTP during the build and exposes `${DANGO_HTTP_ADDR}`. |
+| `SERVE` | done | `SERVE [--port=N] [--addr=IP] <dir>`, at most one per stage, before `CONNECT` and the instructions that need the VM. Serves `<dir>` (relative to the Dangofile directory, staying inside it) over HTTP from before the VM starts to the end of the stage; not inherited by child stages, not started on a cache hit. `RUN` gets `DANGO_HTTP_ADDR=<ip>:<port>` exported (the remote shell expands it); expanding `${DANGO_HTTP_ADDR}` anywhere else, or declaring it with `ARG`/`ENV`, is an error. The IP is `--addr`, or the builder's `LocalAddr` (xo: the local address on the route to `XOA_ENDPOINT`); the port is free unless `--port`. Listens on every interface, reads through `os.Root` (no symlink escape), logs every request. The directory content is part of the cache key. |
 | `SHELL` | planned | Changes the shell used by `RUN`. |
 
 ### Multi-stage builds
@@ -53,7 +53,7 @@
 
 The cache works per stage: the stages are the layers. It is on by default; `opendango build --no-cache` neither reads nor fills it.
 
-- **Key** (`internal/build/cache.go`): a sha256 of the parent's key, the expanded `FROM` (builder, source or stage, flags), `CONNECT` (protocol, user, port), every step with its expanded values (`ARG`, `ENV`, `USER`, `WORKDIR`, `RUN` script, `COPY` arguments plus the path, mode and content of every source file) and the `OUTPUT --as=template` name. Line numbers and layout are left out. `cacheVersion` is bumped when the key changes meaning.
+- **Key** (`internal/build/cache.go`): a sha256 of the parent's key, the expanded `FROM` (builder, source or stage, flags), `CONNECT` (protocol, user, port), every step with its expanded values (`ARG`, `ENV`, `USER`, `WORKDIR`, `RUN` script, `COPY` arguments plus the path, mode and content of every source file), the `SERVE` directory and its content (not its port or address) and the `OUTPUT --as=template` name. Line numbers and layout are left out. `cacheVersion` is bumped when the key changes meaning.
 - **Not cached**: a stage with a `BREAKPOINT`, and its descendants (manual changes are not reproducible); a stage in which `--on-error=ask` retried an instruction; a stage that does not end as a template.
 - **Limit**: the base template is keyed by the name written in `FROM`; a template replaced under the same name is not detected (like a Docker tag). Use `--no-cache`, or the template UUID.
 - **Storage** (XO tags): every cached template has `opendango-cache:<key>`; intermediate ones also have `opendango-cache-created:<unix time>`. The lookup is in the pool of the template the VM would start from. On a hit, the stage starts no VM: its children start from the cached template, its `XVA` outputs are exported from it (`GET /vm-templates/{id}.xva`), and the final `USER`, `WORKDIR`, `ENV` are replayed from the instructions.
@@ -96,7 +96,7 @@ builders/packer/            Packer plugins: discovery, protocol, communicator ad
 
 Planned: `internal/communicator/winrm`, `internal/output` (qcow2, raw, vmdk, ova, checksums).
 
-The `Builder` interface lives in `internal/build`: `Start(cloudConfig)`, `Address`, `Stop(grace)`, `Output`, `Destroy`, `ID`, `FindCache(key)`, `Tag(tag)`. It grows with the roadmap (`SendKeys` for `BOOT`), not before. Builders are selected by a plain `switch` on the `FROM` scheme (`build.NewBuilder`, `plan.checkBuilder`).
+The `Builder` interface lives in `internal/build`: `Start(cloudConfig)`, `Address`, `Stop(grace)`, `Output`, `Destroy`, `ID`, `FindCache(key)`, `Tag(tag)`, `LocalAddr`. It grows with the roadmap (`SendKeys` for `BOOT`), not before. Builders are selected by a plain `switch` on the `FROM` scheme (`build.NewBuilder`, `plan.checkBuilder`).
 
 ### Dependencies
 
@@ -135,7 +135,8 @@ The Vates SDK (`xenorchestra-go-sdk`) was evaluated and not used: opendango need
 - **Discovery**: `packer-plugin-<name>` binaries in `PACKER_PLUGIN_PATH`, then Packer's plugin directory (`$PACKER_CONFIG_DIR` or `~/.config/packer/plugins`, searched recursively for the `packer-plugin-<name>_v<version>_x5.0_<os>_<arch>` files that `packer plugins install` writes), then `PATH`. The source type is `<plugin>-<builder>` as in Packer (`xenserver-iso`); the longest plugin name wins, then the first directory, then the highest version. `describe` checks the API version (`x5.*`) and the builder.
 - **Protocol**: opendango starts `<plugin> start builder <name>` with the SDK's magic cookie, reads `5|<minor>|<network>|<address>` on stdout, connects, and uses `packer-plugin-sdk/rpc` as a client: `Prepare(settings, packer_* settings)`, then `Run(ctx, ui, hook)`. The plugin runs in the Dangofile directory: relative paths in its configuration are relative to it. Its stderr (its log) is kept, and its last lines are shown when it fails.
 - **Config**: the FROM flags, unchanged (`--vm_name=x`). Values starting with `[` or `{` are JSON (lists, maps); the others are strings, converted by the plugin (`"2"` → int). The quotes left in FROM flag values are kept (BuildKit already removed the syntactic ones). Flags whose name contains password, secret or token are masked in the log and passed as `packer_sensitive_variables`. Pass secrets with `ARG` and `--build-arg`.
-- **CONNECT** is translated to `communicator=ssh`, `ssh_username`, `ssh_port`, `ssh_timeout` (setting these as flags is an error); without CONNECT, `communicator=none`. The credentials (`ssh_password`, `ssh_private_key_file`, …) are FROM flags: there is no ephemeral key.
+- **CONNECT** is translated to `communicator=ssh`, `ssh_username`, `ssh_port`, `ssh_timeout` (setting these as flags is an error); without CONNECT, `communicator=none`.
+- **SERVE** is translated to `http_directory` (absolute path) and, with `--port`, `http_port_min` = `http_port_max` (setting these as flags is an error): the plugin serves the directory, and `boot_command` uses `{{ .HTTPIP }}:{{ .HTTPPort }}`. `--addr` is an error (the plugin picks its address; vatesfr/xenserver has no setting for it), and `DANGO_HTTP_ADDR` is not exported. The credentials (`ssh_password`, `ssh_private_key_file`, …) are FROM flags: there is no ephemeral key.
 - **Flow**: the plugin creates the machine and connects; when it calls the `packer_provision` hook, opendango runs the stage instructions through the plugin's communicator (`packer.Comm`); then the plugin shuts down and produces its artifact, which opendango prints.
 - **Limits**: a packer:// stage is a root and cannot be a parent (`FROM <packer stage>` is an error); `OUTPUT` is an error (the plugin configuration sets the artifact); `REBOOT` is not supported yet; it is never cached; `BREAKPOINT` pauses without an SSH command.
 - **Errors**: `--on-error` becomes `packer_on_error` (abort → cleanup, keep → abort, ask → ask). With ask, a failed instruction offers retry; the plugin's own question after a failure is answered from that answer (keep → abort without cleanup), or asked.
@@ -153,7 +154,7 @@ The Vates SDK (`xenorchestra-go-sdk`) was evaluated and not used: opendango need
 1. **MVP**: parser, `validate`, `xo://` builder, SSH, `ARG`, `ENV`, `USER`, `WORKDIR`, `RUN`, `COPY`, `REBOOT`, `OUTPUT --as=template` and XVA.
 2. ~~Multi-stage, `--target`, `BREAKPOINT`, `--on-error=ask`, parallel builds (`-j`), `fmt`~~ (done).
 3. ~~`packer://` compatibility (builders), tested with `vatesfr/packer-plugin-xenserver`~~ (done); `REBOOT` in packer:// stages, `opendango plugins list|install`.
-4. Native `BOOT` and `SERVE`, then more builders (QEMU, Proxmox, AWS, vSphere).
+4. ~~`SERVE`~~ (done); native `BOOT`, then more builders (QEMU, Proxmox, AWS, vSphere).
 5. ~~Per-stage cache~~ (done); per-instruction caching based on snapshots, if the need is confirmed.
 
 ## Development rules

@@ -47,8 +47,10 @@ func TestCacheKey(t *testing.T) {
 		os.Chmod(p, mode)
 	}
 	write("site/index.html", "v1", 0o644)
+	write("http/ks.cfg", "v1", 0o644)
 	const src = `ARG T=debian
 FROM --cpus=2 xo://${T} AS base
+SERVE --port=8000 http
 CONNECT ssh --user=debian
 ARG V=1
 ENV A=$V
@@ -83,9 +85,12 @@ OUTPUT --as=template app
 		{name: "COPY content", src: src, change: func() { write("site/index.html", "v2", 0o644) }},
 		{name: "COPY mode", src: src, change: func() { write("site/index.html", "v1", 0o600) }},
 		{name: "COPY new file", src: src, change: func() { write("site/new.css", "x", 0o644) }},
+		{name: "SERVE content", src: src, change: func() { write("http/ks.cfg", "v2", 0o644) }},
+		{name: "SERVE port", src: strings.Replace(src, "--port=8000", "--port=8001", 1), same: []string{"base", "app"}},
 	}
 	for _, tt := range tests {
 		write("site/index.html", "v1", 0o644)
+		write("http/ks.cfg", "v1", 0o644)
 		os.Remove(filepath.Join(ctxDir, "site/new.css"))
 		if tt.change != nil {
 			tt.change()

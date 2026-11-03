@@ -261,6 +261,37 @@ func TestParseBreakpoint(t *testing.T) {
 	}
 }
 
+func TestParseServe(t *testing.T) {
+	tests := []struct {
+		src  string
+		want Serve
+		err  string
+	}{
+		{"SERVE http", Serve{Dir: "http"}, ""},
+		{"SERVE --port=8080 --addr=10.0.0.5 http/${V}", Serve{Dir: "http/val", Port: 8080, Addr: "10.0.0.5"}, ""},
+		{"SERVE http --port=8080", Serve{Dir: "http", Port: 8080}, ""},
+		{"SERVE .", Serve{Dir: "."}, ""},
+		{"SERVE", Serve{}, "exactly one directory"},
+		{"SERVE a b", Serve{}, "exactly one directory"},
+		{"SERVE ../http", Serve{}, "outside the Dangofile directory"},
+		{"SERVE /srv/http", Serve{}, "outside the Dangofile directory"},
+		{"SERVE --port=0 http", Serve{}, "invalid --port"},
+		{"SERVE --port=web http", Serve{}, "invalid --port"},
+		{"SERVE --addr=host.lan http", Serve{}, "invalid --addr"},
+		{"SERVE --bind=0.0.0.0 http", Serve{}, "unknown flag"},
+	}
+	for _, tt := range tests {
+		got, err := ParseServe(parse(t, tt.src), expander())
+		if !checkErr(t, tt.src, err, tt.err) {
+			continue
+		}
+		tt.want.Pos = Pos{StartLine: 1}
+		if *got != tt.want {
+			t.Errorf("%q: got %+v, want %+v", tt.src, *got, tt.want)
+		}
+	}
+}
+
 func TestParseOutput(t *testing.T) {
 	tests := []struct {
 		src  string

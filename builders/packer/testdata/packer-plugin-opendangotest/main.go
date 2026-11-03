@@ -38,6 +38,10 @@ type Config struct {
 	SSHUsername  string `mapstructure:"ssh_username"`
 	SSHPort      int    `mapstructure:"ssh_port"`
 	SSHTimeout   string `mapstructure:"ssh_timeout"`
+
+	HTTPDir     string `mapstructure:"http_directory"`
+	HTTPPortMin int    `mapstructure:"http_port_min"`
+	HTTPPortMax int    `mapstructure:"http_port_max"`
 }
 
 type Builder struct{ config Config }
@@ -59,6 +63,9 @@ func (b *Builder) Run(ctx context.Context, ui packersdk.Ui, hook packersdk.Hook)
 	ui.Say(fmt.Sprintf("config: build=%s type=%s on_error=%s count=%d items=%s communicator=%s ssh=%s:%d timeout=%s",
 		c.PackerBuildName, c.PackerBuilderType, c.PackerOnError, c.Count, strings.Join(c.Items, ","),
 		c.Communicator, c.SSHUsername, c.SSHPort, c.SSHTimeout))
+	if c.HTTPDir != "" {
+		ui.Say(fmt.Sprintf("http: dir=%s ports=%d-%d", c.HTTPDir, c.HTTPPortMin, c.HTTPPortMax))
+	}
 	if err := hook.Run(ctx, packersdk.HookProvision, ui, &comm{root: c.Root}, nil); err != nil {
 		if c.PackerOnError == "ask" {
 			answer, _ := ui.Ask("[c] Clean up and exit, [a] abort without cleanup, or [r] retry step?")

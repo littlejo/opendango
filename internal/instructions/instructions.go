@@ -7,6 +7,8 @@ package instructions
 
 import (
 	"fmt"
+	"net"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -119,6 +121,21 @@ type Breakpoint struct {
 	Message string
 }
 
+// Serve serves a directory over HTTP while the stage builds.
+type Serve struct {
+	Pos
+	// Dir is relative to the Dangofile directory.
+	Dir string
+	// Port is 0 for a free port chosen at build time.
+	Port int
+	// Addr is the address the VM reaches the server at; detected at build
+	// time when empty.
+	Addr string
+}
+
+// ServeAddrVar is the variable that holds the server address (ip:port).
+const ServeAddrVar = "DANGO_HTTP_ADDR"
+
 // Output kinds.
 const (
 	OutputTemplate = "template"
@@ -146,7 +163,7 @@ var Forbidden = map[string]bool{
 
 // NotYetSupported lists the instructions planned but not implemented yet.
 var NotYetSupported = map[string]bool{
-	"ADD": true, "BOOT": true, "LABEL": true, "SERVE": true, "SHELL": true,
+	"ADD": true, "BOOT": true, "LABEL": true, "SHELL": true,
 }
 
 var (
@@ -410,6 +427,36 @@ func ParseBreakpoint(cmd *parser.Command, expand Expander) (*Breakpoint, error) 
 		return nil, fmt.Errorf("BREAKPOINT: %w", err)
 	}
 	return &Breakpoint{Pos: pos(cmd), Message: strings.TrimSpace(strings.Join(words, " "))}, nil
+}
+
+// ParseServe parses `SERVE [--port=N] [--addr=IP] <dir>`. The directory must
+// stay inside the Dangofile directory.
+func ParseServe(cmd *parser.Command, expand Expander) (*Serve, error) {
+	flags, err := parseFlags(cmd, expand, map[string]bool{"port": true, "addr": true})
+	if err != nil {
+		return nil, err
+	}
+	args, err := expandAll(cmd.Args, expand)
+	if err != nil {
+		return nil, fmt.Errorf("SERVE: %w", err)
+	}
+	if len(args) != 1 || args[0] == "" {
+		return nil, fmt.Errorf("SERVE requires exactly one directory")
+	}
+	s := &Serve{Pos: pos(cmd), Dir: args[0], Addr: flags["addr"]}
+	if !filepath.IsLocal(filepath.FromSlash(s.Dir)) {
+		return nil, fmt.Errorf("SERVE: %q is outside the Dangofile directory", s.Dir)
+	}
+	if p, ok := flags["port"]; ok {
+		s.Port, err = strconv.Atoi(p)
+		if err != nil || s.Port < 1 || s.Port > 65535 {
+			return nil, fmt.Errorf("SERVE: invalid --port %q", p)
+		}
+	}
+	if _, ok := flags["addr"]; ok && net.ParseIP(s.Addr) == nil {
+		return nil, fmt.Errorf("SERVE: invalid --addr %q (expected an IP address)", s.Addr)
+	}
+	return s, nil
 }
 
 // ParseOutput parses `OUTPUT --as=template [name]` and

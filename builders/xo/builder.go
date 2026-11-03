@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -166,6 +167,29 @@ func cached(objs []object, poolID, key string) string {
 // Tag adds tag to the template the VM became.
 func (b *Builder) Tag(ctx context.Context, tag string) error {
 	return b.client.do(ctx, http.MethodPut, "/vm-templates/"+url.PathEscape(b.vmID)+"/tags/"+url.PathEscape(tag), nil, nil)
+}
+
+// LocalAddr returns the IP address of this machine on the route to XO: the
+// address SERVE advertises to the VM by default. No packet is sent.
+func (b *Builder) LocalAddr(ctx context.Context) (string, error) {
+	u, err := url.Parse(b.client.BaseURL)
+	if err != nil {
+		return "", err
+	}
+	port := u.Port()
+	if port == "" {
+		port = "443"
+		if u.Scheme == "http" {
+			port = "80"
+		}
+	}
+	var d net.Dialer
+	conn, err := d.DialContext(ctx, "udp", net.JoinHostPort(u.Hostname(), port))
+	if err != nil {
+		return "", fmt.Errorf("finding the local address on the route to %s: %w", u.Host, err)
+	}
+	defer conn.Close()
+	return conn.LocalAddr().(*net.UDPAddr).IP.String(), nil
 }
 
 // vm is the subset of VM fields read by the builder.

@@ -83,6 +83,33 @@ COPY a.txt copied/
 	}
 }
 
+// TestPackerStageServe checks that SERVE becomes the plugin's
+// http_directory and port range.
+func TestPackerStageServe(t *testing.T) {
+	ctxDir := t.TempDir()
+	os.Mkdir(filepath.Join(ctxDir, "http"), 0o755)
+	tests := []struct{ serve, want string }{
+		{"SERVE --port=8123 http", "==> stage-0: http: dir=" + filepath.Join(ctxDir, "http") + " ports=8123-8123"},
+		{"SERVE http", "==> stage-0: http: dir=" + filepath.Join(ctxDir, "http") + " ports=0-0"},
+	}
+	for _, tt := range tests {
+		src := fmt.Sprintf("FROM --root=%s packer://opendangotest-local\n%s\n", t.TempDir(), tt.serve)
+		var log syncBuffer
+		if err := Run(context.Background(), mustPlan(t, src), Options{ContextDir: ctxDir, Out: &log, FindPlugin: testPlugin(t)}); err != nil {
+			t.Fatalf("%s: %v\n%s", tt.serve, err, log.String())
+		}
+		if !strings.Contains(log.String(), tt.want) {
+			t.Errorf("%s: log lacks %q:\n%s", tt.serve, tt.want, log.String())
+		}
+	}
+
+	src := fmt.Sprintf("FROM --root=%s packer://opendangotest-local\nSERVE nope\n", t.TempDir())
+	err := Run(context.Background(), mustPlan(t, src), Options{ContextDir: ctxDir, FindPlugin: testPlugin(t)})
+	if err == nil || err.Error() != "Dangofile:2: SERVE: nope is not a directory" {
+		t.Errorf("err = %v", err)
+	}
+}
+
 func TestPackerStageFailure(t *testing.T) {
 	src := func(root string) string {
 		return fmt.Sprintf("FROM --root=%s packer://opendangotest-local\nCONNECT ssh --user=tester\nRUN test -f marker || { touch marker; exit 3; }\n", root)

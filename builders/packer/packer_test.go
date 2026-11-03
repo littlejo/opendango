@@ -45,6 +45,8 @@ func TestParseConfig(t *testing.T) {
 		{"xenserver-iso", map[string]string{"ssh_username": "x"}, "--ssh_username is set by CONNECT ssh --user=<user>"},
 		{"xenserver-iso", map[string]string{"communicator": "winrm"}, "--communicator is set by CONNECT ssh"},
 		{"xenserver-iso", map[string]string{"packer_force": "true"}, "reserved"},
+		{"xenserver-iso", map[string]string{"http_directory": "http"}, "--http_directory is set by SERVE <dir>"},
+		{"xenserver-iso", map[string]string{"http_port_min": "8000"}, "--http_port_min is set by SERVE --port=<port>"},
 		{"xenserver-iso", map[string]string{"boot_command": `["a"`}, "--boot_command: invalid JSON"},
 	} {
 		if _, err := ParseConfig(tt.source, tt.flags); err == nil || !strings.Contains(err.Error(), tt.err) {

@@ -96,6 +96,10 @@ opendango build --build-arg XAPI_PASSWORD="$XAPI_PASSWORD"
   flags named `*password*`, `*secret*` or `*token*` are masked in the log.
 - Plugins are found in `PACKER_PLUGIN_PATH`, in Packer's plugin directory
   (`packer plugins install github.com/vatesfr/xenserver`), or in `PATH`.
+- `SERVE <dir>` sets the plugin's `http_directory` (and `--port` its
+  `http_port_min` and `http_port_max`): the plugin serves it, and
+  `boot_command` reaches it at `{{ .HTTPIP }}:{{ .HTTPPort }}`.
+  `${DANGO_HTTP_ADDR}` and `SERVE --addr` are not available.
 - Only builders are supported. A packer:// stage cannot be a parent stage,
   and `OUTPUT` and `REBOOT` are not available in it.
 
@@ -166,6 +170,7 @@ The template needs **cloud-init** and the **guest tools**.
 | `WORKDIR` | `WORKDIR /opt/app` |
 | `REBOOT` | `REBOOT` |
 | `BREAKPOINT` | `BREAKPOINT "check nginx"` |
+| `SERVE` | `SERVE --port=8080 --addr=10.0.0.5 http/` (before `CONNECT`) |
 | `OUTPUT` | `OUTPUT --as=template "name"`, `OUTPUT --format=xva --compress=zstd ./out.xva` |
 
 `ENV` values only exist during the build; add `--persist` to write them to
@@ -176,7 +181,16 @@ Dangofile directory.
 VM with the temporary key; press Enter to resume, Ctrl+C to abort. When
 stdin is not a terminal (CI), it is skipped with a message.
 
-`ADD`, `LABEL`, `SHELL`, `BOOT` and `SERVE` are planned and
+`SERVE <dir>` serves a directory of the Dangofile directory over HTTP while
+the stage builds (from before the VM starts), for kickstart or preseed files
+for instance. `RUN` gets its address as `$DANGO_HTTP_ADDR` (`ip:port`):
+`RUN curl -fsS http://$DANGO_HTTP_ADDR/setup.sh | sh`. The IP is the one of
+this machine on the route to XO; set `--addr` when the VM reaches it at
+another address. The port is a free one unless `--port` is set. The server
+listens on every interface and has no authentication: do not serve secrets
+on an untrusted network.
+
+`ADD`, `LABEL`, `SHELL` and `BOOT` are planned and
 rejected for now. `CMD`, `ENTRYPOINT`, `EXPOSE`, `HEALTHCHECK`, `VOLUME`,
 `ONBUILD` and `STOPSIGNAL` have no meaning for a VM image and are rejected.
 
