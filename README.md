@@ -44,6 +44,9 @@ OUTPUT --as=template debian-nginx
 - A parent stage without `OUTPUT --as=template` gets a temporary template,
   deleted at the end of the build.
 - If a stage fails, the outputs of the stages already finished are kept.
+- Stages are built one at a time. `opendango build -j 4` builds up to four
+  stages at the same time, each one as soon as its parent is done. After a
+  failure, no new stage starts and the running ones finish.
 
 ## Install
 
@@ -64,6 +67,9 @@ export XOA_INSECURE=true        # only for a self-signed certificate
 opendango validate -f Dangofile
 opendango build -f Dangofile --build-arg TEMPLATE=debian-13-cloud
 opendango build --target nginx  # one stage and the stages it starts from
+opendango build -j 4            # up to 4 stages (VMs) at the same time
+opendango fmt -w                # rewrite the Dangofile in its canonical layout
+opendango fmt --check           # exit 1 if it is not formatted (CI)
 opendango build --on-error=keep # leave the VM in place when the build fails
 opendango build --on-error=ask  # on failure: retry the instruction, clean up or keep
 ```

@@ -65,10 +65,11 @@ jobs:
       - name: Test (integration, skipped when not configured)
         run: go test -tags integration -count=1 ./...
 
-      - name: Validate the examples
+      - name: Validate and check the format of the examples
         run: |
           for f in examples/*/Dangofile; do
             go run ./cmd/opendango validate -f "$f"
+            go run ./cmd/opendango fmt --check -f "$f"
           done
 
       - name: Build

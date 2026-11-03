@@ -47,7 +47,7 @@
 - `opendango build` builds **every** stage, in file order; `--target X` builds X and its ancestors only.
 - A stage that a selected stage starts from always ends as a template: its `OUTPUT --as=template`, or a temporary `opendango-tmp-<stage>-<unix time>` template deleted at the end of the build (children first). A stage nobody starts from and without `OUTPUT` triggers a warning: its VM is destroyed.
 - On failure the build stops: finished `OUTPUT`s (templates, XVA) of the previous stages are kept; the failing VM and the intermediate templates are deleted, unless `--on-error=keep` (or the answer `k` to `--on-error=ask`).
-- Stages run sequentially; parallel builds (`-j`) are planned.
+- Stages run one at a time by default (`-j 1`). With `-j N`, up to N stages run at the same time; a stage starts once its parent is done, in file order. After a failure, no new stage starts and the running ones finish (their `OUTPUT`s are kept); Ctrl+C stops everything. All failures are reported. Log lines are prefixed with the stage name, and `BREAKPOINT` / `--on-error=ask` questions are asked one at a time.
 
 Planned instructions fail with `<X> is not supported yet`. `EXPOSE`, `HEALTHCHECK`, `VOLUME`, `CMD`, `ENTRYPOINT`, `ONBUILD` and `STOPSIGNAL` fail with `<X> has no meaning for a VM image`. Both are reported by `validate`.
 
@@ -56,14 +56,17 @@ Planned instructions fail with `<X> is not supported yet`. `EXPOSE`, `HEALTHCHEC
 Implemented (standard library `flag` package; move to cobra only if the CLI grows):
 
 ```
-opendango build    [-f Dangofile] [--build-arg K=V]... [--target X] [--on-error=abort|keep|ask]
+opendango build    [-f Dangofile] [--build-arg K=V]... [--target X] [-j N] [--on-error=abort|keep|ask]
 opendango validate [-f Dangofile] [--build-arg K=V]...
+opendango fmt      [-f Dangofile] [-w | --check]
 opendango version
 ```
 
 `--on-error=ask` needs a terminal on stdin (checked with `golang.org/x/term`; `opendango build` exits with code 2 otherwise). When an instruction fails, it prints the `ssh` command (if the VM was reached and the key is still installed) and asks `[r]` retry the instruction (after a new connection), `[c]` clean up (like `abort`) or `[k]` keep (like `keep`). Failures outside the instructions (start, connection, stop, `OUTPUT`, a later stage's builder) offer only `c` and `k`. End of input and Ctrl+C mean `c`. The returned error is the instruction's, whatever the answer.
 
-Planned: `-j N`, `opendango fmt`, `opendango plugins list|install`.
+`opendango fmt` (`internal/format`) prints the canonical layout, like gofmt; `-w` rewrites the file, `--check` exits with code 1 when it differs (the CI runs it on `examples/`). It only changes the layout: upper-case keywords with one space before the arguments, no trailing spaces, at most one blank line between instructions, one blank line before each `FROM` but the first (above its comments), a final newline. Arguments, continuation lines and heredoc bodies are never changed; the tests check that the formatted file parses to the same instructions and that formatting is stable.
+
+Planned: `opendango plugins list|install`.
 
 ## Architecture
 
@@ -72,6 +75,7 @@ cmd/opendango/              CLI (standard library flag)
 internal/parser/            BuildKit parser → flat list of commands (recovers custom instruction args)
 internal/instructions/      one type per instruction, parsing and validation
 internal/plan/              ARG/ENV scoping, variable expansion, stage-level rules → Plan
+internal/format/            opendango fmt: canonical layout of a Dangofile
 internal/build/             executor: runs a Plan with a Builder and a Communicator
 internal/communicator/ssh/  SSH commands and SFTP uploads
 builders/xo/                Xen Orchestra builder
@@ -124,7 +128,7 @@ The Vates SDK (`xenorchestra-go-sdk`) was evaluated and not used: opendango need
 ## Roadmap
 
 1. **MVP**: parser, `validate`, `xo://` builder, SSH, `ARG`, `ENV`, `USER`, `WORKDIR`, `RUN`, `COPY`, `REBOOT`, `OUTPUT --as=template` and XVA.
-2. ~~Multi-stage, `--target`, `BREAKPOINT`, `--on-error=ask`~~ (done), parallel builds, `fmt`.
+2. ~~Multi-stage, `--target`, `BREAKPOINT`, `--on-error=ask`, parallel builds (`-j`), `fmt`~~ (done).
 3. `packer://` compatibility, tested first with `vatesfr/packer-plugin-xenserver`.
 4. Native `BOOT` and `SERVE`, then more builders (QEMU, Proxmox, AWS, vSphere).
 5. Per-instruction caching based on snapshots.

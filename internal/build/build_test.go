@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -895,4 +896,177 @@ func TestOnErrorAsk(t *testing.T) {
 			t.Errorf("err = %v, calls %v", err, b.calls)
 		}
 	})
+}
+
+// syncBuffer is a log that stages running in parallel write to while the
+// test reads it.
+type syncBuffer struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (s *syncBuffer) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.Write(p)
+}
+
+func (s *syncBuffer) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.String()
+}
+
+// gatedBuilder runs gate when its VM starts.
+type gatedBuilder struct {
+	fakeBuilder
+	gate func()
+}
+
+func (b *gatedBuilder) Start(ctx context.Context, cloudConfig string) error {
+	if b.gate != nil {
+		b.gate()
+	}
+	return b.fakeBuilder.Start(ctx, cloudConfig)
+}
+
+// parallelBuilders creates one gatedBuilder per stage, safely from several
+// goroutines.
+type parallelBuilders struct {
+	mu      sync.Mutex
+	gates   map[string]func()
+	started []string
+	byStage map[string]*gatedBuilder
+}
+
+func (pb *parallelBuilders) factory() NewBuilderFunc {
+	return func(s *plan.Stage, parent string) (Builder, error) {
+		pb.mu.Lock()
+		defer pb.mu.Unlock()
+		b := &gatedBuilder{fakeBuilder: fakeBuilder{id: "vm-" + s.Name(), parent: parent}, gate: pb.gates[s.Name()]}
+		pb.started = append(pb.started, s.Name())
+		if pb.byStage == nil {
+			pb.byStage = map[string]*gatedBuilder{}
+		}
+		pb.byStage[s.Name()] = b
+		return b, nil
+	}
+}
+
+// dialNew gives each connection its own scriptComm: stages in parallel do
+// not share one.
+func dialNew(reply func(string) (string, error)) DialFunc {
+	return func(context.Context, string, int, string, gossh.Signer) (Communicator, error) {
+		return &scriptComm{reply: reply}, nil
+	}
+}
+
+func TestParallel(t *testing.T) {
+	const src = `FROM xo://t AS base
+CONNECT ssh --user=debian
+
+FROM base AS a
+RUN true
+OUTPUT --as=template a
+
+FROM base AS b
+RUN true
+OUTPUT --as=template b
+`
+	for _, tt := range []struct {
+		jobs        int
+		concurrent  bool
+		wantStarted string
+	}{
+		{1, false, "base a b"},
+		{2, true, "base a b"},
+	} {
+		// a and b each wait for the other to start, for a short while.
+		var mu sync.Mutex
+		count := 0
+		both := make(chan struct{})
+		concurrent := true
+		meet := func() {
+			mu.Lock()
+			count++
+			if count == 2 {
+				close(both)
+			}
+			mu.Unlock()
+			select {
+			case <-both:
+			case <-time.After(200 * time.Millisecond):
+				mu.Lock()
+				concurrent = false
+				mu.Unlock()
+			}
+		}
+		pb := &parallelBuilders{gates: map[string]func(){"a": meet, "b": meet}}
+		var log syncBuffer
+		err := Run(context.Background(), mustPlan(t, src), Options{NewBuilder: pb.factory(), Dial: dialNew(nil), Out: &log, Jobs: tt.jobs})
+		if err != nil {
+			t.Fatalf("-j %d: %v", tt.jobs, err)
+		}
+		if concurrent != tt.concurrent {
+			t.Errorf("-j %d: a and b concurrent = %v", tt.jobs, concurrent)
+		}
+		if got := strings.Join(pb.started, " "); tt.jobs == 1 && got != tt.wantStarted {
+			t.Errorf("-j 1: order %q, want %q", got, tt.wantStarted)
+		}
+		// Both children start from base's intermediate template, deleted
+		// once they are done.
+		for _, name := range []string{"a", "b"} {
+			if p := pb.byStage[name].parent; p != "vm-base" {
+				t.Errorf("-j %d: %s starts from %q", tt.jobs, name, p)
+			}
+		}
+		if !contains(pb.byStage["base"].calls, "destroy") || !strings.Contains(log.String(), "==> Build finished\n") {
+			t.Errorf("-j %d: base calls %v, log:\n%s", tt.jobs, pb.byStage["base"].calls, log.String())
+		}
+	}
+}
+
+// TestParallelFailure checks that after a failure no stage starts and the
+// running ones finish with their OUTPUT.
+func TestParallelFailure(t *testing.T) {
+	const src = `FROM xo://t AS x
+CONNECT ssh --user=debian
+RUN false
+
+FROM xo://t AS y
+CONNECT ssh --user=debian
+OUTPUT --as=template y
+
+FROM xo://t AS z
+OUTPUT --as=template z
+`
+	var log syncBuffer
+	// y goes on only once the build knows that x failed.
+	waitForFailure := func() {
+		deadline := time.Now().Add(5 * time.Second)
+		for !strings.Contains(log.String(), "==> Stage x failed, waiting for the 1 running stage(s) to finish") {
+			if time.Now().After(deadline) {
+				t.Error("x's failure was not reported")
+				return
+			}
+			time.Sleep(time.Millisecond)
+		}
+	}
+	pb := &parallelBuilders{gates: map[string]func(){"y": waitForFailure}}
+	reply := func(cmd string) (string, error) {
+		if strings.Contains(cmd, "false") {
+			return "", &sshcomm.ExitError{Code: 1}
+		}
+		return "", nil
+	}
+	err := Run(context.Background(), mustPlan(t, src), Options{NewBuilder: pb.factory(), Dial: dialNew(reply), Out: &log, Jobs: 2})
+	if err == nil || err.Error() != "Dangofile:3: RUN: exit code 1" {
+		t.Fatalf("err = %v", err)
+	}
+	if got := strings.Join(pb.byStage["y"].calls, " "); !strings.Contains(got, "output:template") {
+		t.Errorf("y did not finish: %s", got)
+	}
+	if got := strings.Join(pb.started, " "); got != "x y" && got != "y x" {
+		t.Errorf("started %q: z must not start after a failure", got)
+	}
 }

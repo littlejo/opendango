@@ -39,10 +39,11 @@ go test -tags integration -count=1 -timeout 60m -v -run EndToEnd ./builders/xo/
 """
 
 [tasks.validate-examples]
-description = "Validate every Dangofile under examples/"
+description = "Validate and check the format of every Dangofile under examples/"
 run = """
 set -e
 for f in examples/*/Dangofile; do
   go run ./cmd/opendango validate -f "$f"
+  go run ./cmd/opendango fmt --check -f "$f"
 done
 """
