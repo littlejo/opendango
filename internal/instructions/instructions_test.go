@@ -224,6 +224,34 @@ func TestParseLabel(t *testing.T) {
 	}
 }
 
+func TestParseAdd(t *testing.T) {
+	sum := strings.Repeat("0", 64)
+	tests := []struct {
+		src  string
+		want *Add
+		err  string
+	}{
+		{"ADD --chown=www a https://x.org/${V}.tgz /srv/", &Add{Copy: Copy{Pos: Pos{1}, Sources: []string{"a", "https://x.org/val.tgz"}, Dest: "/srv/", Chown: "www"}}, ""},
+		{"ADD --checksum=sha256:" + sum + " http://x.org/f /f", &Add{Copy: Copy{Pos: Pos{1}, Sources: []string{"http://x.org/f"}, Dest: "/f"}, Checksum: "sha256:" + sum}, ""},
+		{"ADD --checksum=sha256:" + sum + " a /f", nil, "--checksum requires exactly one http(s) URL source"},
+		{"ADD --checksum=sha256:" + sum + " http://x/a http://x/b /d/", nil, "--checksum requires exactly one"},
+		{"ADD --checksum=md5:abc http://x/f /f", nil, "invalid --checksum"},
+		{"ADD --checksum=sha256:ABC http://x/f /f", nil, "invalid --checksum"},
+		{"ADD https://github.com/x/y.git /src", nil, "git sources are not supported yet"},
+		{"ADD git@github.com:x/y.git /src", nil, "git sources are not supported yet"},
+		{"ADD --keep-git-dir a b", nil, "unknown flag --keep-git-dir"},
+		{"ADD --chmod=rw a b", nil, "ADD: invalid --chmod"},
+		{"ADD a", nil, "ADD requires at least one source and a destination"},
+		{`ADD ["a", "b"]`, nil, "ADD: the JSON form"},
+	}
+	for _, tt := range tests {
+		got, err := ParseAdd(parse(t, tt.src), expander())
+		if checkErr(t, tt.src, err, tt.err) && !reflect.DeepEqual(got, tt.want) {
+			t.Errorf("%q: got %+v, want %+v", tt.src, got, tt.want)
+		}
+	}
+}
+
 func TestParseShell(t *testing.T) {
 	tests := []struct {
 		src  string

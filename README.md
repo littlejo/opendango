@@ -181,7 +181,7 @@ The variables are the same as [xo-gocli](https://github.com/littlejo/xo-gocli).
    `CONNECT` user.
 2. opendango waits for the IP address reported by the guest tools and
    connects over SSH.
-3. `RUN`, `COPY`, `ENV`, `USER`, `SHELL`, `WORKDIR`, `REBOOT` and
+3. `RUN`, `COPY`, `ADD`, `ENV`, `USER`, `SHELL`, `WORKDIR`, `REBOOT` and
    `BREAKPOINT` run in order.
 4. The temporary key is removed and the VM is shut down.
 5. The `OUTPUT` instructions run: XVA exports, then the conversion to a
@@ -208,6 +208,7 @@ The template needs **cloud-init** and the **guest tools**.
 | `RUN` | `RUN apt-get update`, `RUN ["systemctl", "enable", "nginx"]`, `RUN <<EOF ... EOF` |
 | `SHELL` | `SHELL ["/bin/bash", "-o", "pipefail", "-c"]` |
 | `COPY` | `COPY --chmod=0644 --chown=www-data site/ /var/www/html/` |
+| `ADD` | `ADD --checksum=sha256:<hex> https://example.org/tool.tar.gz /opt/` |
 | `ENV` | `ENV DEBIAN_FRONTEND=noninteractive`, `ENV --persist APP_ENV=prod` |
 | `USER` | `USER root` (through `sudo`) |
 | `WORKDIR` | `WORKDIR /opt/app` |
@@ -243,7 +244,15 @@ default), as in Docker: the script is its last argument. The exec form
 `OUTPUT --as=template` (required in the stage). A stage inherits the labels
 of the stage it starts from; a key set again replaces the value.
 
-`ADD` is planned and rejected for now. `CMD`, `ENTRYPOINT`, `EXPOSE`, `HEALTHCHECK`, `VOLUME`,
+`ADD` is `COPY` plus http(s) URL sources, downloaded by opendango (not by
+the VM) with mode 0600 unless `--chmod` is set; the file name is the URL's
+when the destination is a directory. `--checksum=sha256:<hex>` checks a
+single URL source: without it, the stage is not cached (the content is
+unknown until downloaded). Unlike Docker, local archives are not extracted:
+`ADD` refuses them (use `COPY`, then `RUN tar -xf`), and git sources are not
+supported yet.
+
+`CMD`, `ENTRYPOINT`, `EXPOSE`, `HEALTHCHECK`, `VOLUME`,
 `ONBUILD` and `STOPSIGNAL` have no meaning for a VM image and are rejected.
 
 See [`examples/`](examples/) and [`CLAUDE.md`](CLAUDE.md) for the design and

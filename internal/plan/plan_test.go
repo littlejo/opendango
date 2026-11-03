@@ -162,7 +162,7 @@ func TestErrors(t *testing.T) {
 		{"FROM xo://t AS a\nLABEL a=b\nFROM a\nOUTPUT --as=template", "Dangofile:2: LABEL needs OUTPUT --as=template"},
 		{"FROM xo://t\nLABEL opendango-cache:x=1\nOUTPUT --as=template", "Dangofile:2: LABEL opendango-cache:x: keys starting with opendango-cache are reserved"},
 		{"FROM packer://p-b\nLABEL a=b", "Dangofile:2: LABEL is not supported in a packer:// stage"},
-		{"FROM xo://t\nADD a b", "Dangofile:2: ADD is not supported yet"},
+		{"FROM xo://t\nADD a b", "Dangofile:2: ADD needs a connection"},
 		{"FROM xo://t\nFOO", "Dangofile:2: unknown instruction FOO"},
 		{"FROM xo://t\nUSER a:b", "Dangofile:2: USER: groups are not supported"},
 		{"FROM xo://t\nSERVE http\nSERVE www", "Dangofile:3: SERVE already set at line 2"},

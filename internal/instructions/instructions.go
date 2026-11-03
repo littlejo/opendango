@@ -128,6 +128,13 @@ type Copy struct {
 	Chown   string
 }
 
+// Add is COPY plus http(s) URL sources, downloaded by opendango.
+type Add struct {
+	Copy
+	// Checksum is the expected digest of the URL source (algo:hex), or "".
+	Checksum string
+}
+
 // Reboot reboots the VM and waits for the connection to come back.
 type Reboot struct {
 	Pos
@@ -194,9 +201,7 @@ var Forbidden = map[string]bool{
 }
 
 // NotYetSupported lists the instructions planned but not implemented yet.
-var NotYetSupported = map[string]bool{
-	"ADD": true,
-}
+var NotYetSupported = map[string]bool{}
 
 var (
 	varName   = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
@@ -465,31 +470,72 @@ func ParseShell(cmd *parser.Command) (*Shell, error) {
 
 // ParseCopy parses `COPY [--chmod=MODE] [--chown=USER[:GROUP]] <src>... <dest>`.
 func ParseCopy(cmd *parser.Command, expand Expander) (*Copy, error) {
-	flags, err := parseFlags(cmd, expand, map[string]bool{"chmod": true, "chown": true})
+	c, _, err := parseCopy(cmd, expand, map[string]bool{"chmod": true, "chown": true})
+	return c, err
+}
+
+// checksumLen is the length in hex of the digests ADD --checksum accepts.
+var checksumLen = map[string]int{"sha256": 64, "sha384": 96, "sha512": 128}
+
+// ParseAdd parses `ADD [--chmod=MODE] [--chown=USER[:GROUP]]
+// [--checksum=ALGO:HEX] <src>... <dest>`: COPY plus http(s) URL sources.
+// --checksum needs a single URL source, like in Docker.
+func ParseAdd(cmd *parser.Command, expand Expander) (*Add, error) {
+	c, flags, err := parseCopy(cmd, expand, map[string]bool{"chmod": true, "chown": true, "checksum": true})
 	if err != nil {
 		return nil, err
 	}
+	a := &Add{Copy: *c, Checksum: flags["checksum"]}
+	for _, src := range a.Sources {
+		if strings.HasPrefix(src, "git@") || strings.HasPrefix(src, "git://") || (IsURL(src) && (strings.HasSuffix(src, ".git") || strings.Contains(src, ".git#"))) {
+			return nil, fmt.Errorf("ADD %s: git sources are not supported yet", src)
+		}
+	}
+	if _, ok := flags["checksum"]; ok {
+		if len(a.Sources) != 1 || !IsURL(a.Sources[0]) {
+			return nil, fmt.Errorf("ADD: --checksum requires exactly one http(s) URL source")
+		}
+		algo, sum, _ := strings.Cut(a.Checksum, ":")
+		if n, ok := checksumLen[algo]; !ok || len(sum) != n || strings.Trim(sum, "0123456789abcdef") != "" {
+			return nil, fmt.Errorf("ADD: invalid --checksum %q (expected sha256:<hex>, sha384:<hex> or sha512:<hex>)", a.Checksum)
+		}
+	}
+	return a, nil
+}
+
+// IsURL tells whether an ADD source is an http(s) URL.
+func IsURL(src string) bool {
+	return strings.HasPrefix(src, "http://") || strings.HasPrefix(src, "https://")
+}
+
+// parseCopy parses the arguments and flags shared by COPY and ADD.
+func parseCopy(cmd *parser.Command, expand Expander, allowed map[string]bool) (*Copy, map[string]string, error) {
+	kw := cmd.Keyword
+	flags, err := parseFlags(cmd, expand, allowed)
+	if err != nil {
+		return nil, nil, err
+	}
 	if len(cmd.Heredocs) > 0 {
-		return nil, fmt.Errorf("COPY with a heredoc is not supported yet")
+		return nil, nil, fmt.Errorf("%s with a heredoc is not supported yet", kw)
 	}
 	if cmd.JSON {
-		return nil, fmt.Errorf("COPY: the JSON form is not supported yet")
+		return nil, nil, fmt.Errorf("%s: the JSON form is not supported yet", kw)
 	}
 	args, err := expandAll(cmd.Args, expand)
 	if err != nil {
-		return nil, fmt.Errorf("COPY: %w", err)
+		return nil, nil, fmt.Errorf("%s: %w", kw, err)
 	}
 	if len(args) < 2 {
-		return nil, fmt.Errorf("COPY requires at least one source and a destination")
+		return nil, nil, fmt.Errorf("%s requires at least one source and a destination", kw)
 	}
 	c := &Copy{Pos: pos(cmd), Sources: args[:len(args)-1], Dest: args[len(args)-1], Chmod: flags["chmod"], Chown: flags["chown"]}
 	if c.Chmod != "" && !regexp.MustCompile(`^[0-7]{3,4}$`).MatchString(c.Chmod) {
-		return nil, fmt.Errorf("COPY: invalid --chmod %q (expected an octal mode such as 0644)", c.Chmod)
+		return nil, nil, fmt.Errorf("%s: invalid --chmod %q (expected an octal mode such as 0644)", kw, c.Chmod)
 	}
 	if _, ok := flags["chown"]; ok && !regexp.MustCompile(`^[A-Za-z0-9_.-]+(:[A-Za-z0-9_.-]+)?$`).MatchString(c.Chown) {
-		return nil, fmt.Errorf("COPY: invalid --chown %q (expected user or user:group)", c.Chown)
+		return nil, nil, fmt.Errorf("%s: invalid --chown %q (expected user or user:group)", kw, c.Chown)
 	}
-	return c, nil
+	return c, flags, nil
 }
 
 // ParseReboot parses `REBOOT`.

@@ -24,7 +24,8 @@ const cacheVersion = "opendango-cache-v1"
 // and the content of the COPY sources and of the SERVE directory. Line
 // numbers are left out. It returns "" when the stage cannot be cached: it,
 // or an ancestor, has a BREAKPOINT (whatever is done by hand during the
-// pause is not reproducible).
+// pause is not reproducible) or an ADD of a URL without --checksum (the
+// content is unknown until downloaded).
 func cacheKey(file string, s *plan.Stage, parentKey, contextDir string) (string, error) {
 	if s.Parent != nil && parentKey == "" {
 		return "", nil
@@ -79,16 +80,23 @@ func cacheKey(file string, s *plan.Stage, parentKey, contextDir string) (string,
 			fmt.Fprintf(h, "RUN %q\n", st.Script)
 		case *instructions.Copy:
 			fmt.Fprintf(h, "COPY %q %q %q %q\n", st.Sources, st.Dest, st.Chmod, st.Chown)
-			for _, pattern := range st.Sources {
-				matches, err := resolveSource(contextDir, pattern)
-				if err != nil {
-					return "", &plan.Error{File: file, Line: st.Line(), Err: fmt.Errorf("COPY: %w", err)}
+			if err := hashSources(h, contextDir, st.Sources); err != nil {
+				return "", &plan.Error{File: file, Line: st.Line(), Err: fmt.Errorf("COPY: %w", err)}
+			}
+		case *instructions.Add:
+			fmt.Fprintf(h, "ADD %q %q %q %q %q\n", st.Sources, st.Dest, st.Chmod, st.Chown, st.Checksum)
+			var local []string
+			for _, src := range st.Sources {
+				switch {
+				case !instructions.IsURL(src):
+					local = append(local, src)
+				case st.Checksum == "":
+					// The content is unknown until downloaded: not cached.
+					return "", nil
 				}
-				for _, m := range matches {
-					if err := hashTree(h, contextDir, m); err != nil {
-						return "", &plan.Error{File: file, Line: st.Line(), Err: fmt.Errorf("COPY: %w", err)}
-					}
-				}
+			}
+			if err := hashSources(h, contextDir, local); err != nil {
+				return "", &plan.Error{File: file, Line: st.Line(), Err: fmt.Errorf("ADD: %w", err)}
 			}
 		case *instructions.Reboot:
 			fmt.Fprintln(h, "REBOOT")
@@ -107,6 +115,22 @@ func cacheKey(file string, s *plan.Stage, parentKey, contextDir string) (string,
 		}
 	}
 	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+// hashSources hashes the files of COPY sources (glob patterns).
+func hashSources(h hash.Hash, contextDir string, patterns []string) error {
+	for _, pattern := range patterns {
+		matches, err := resolveSource(contextDir, pattern)
+		if err != nil {
+			return err
+		}
+		for _, m := range matches {
+			if err := hashTree(h, contextDir, m); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 // hashTree writes the path (relative to contextDir), mode and content of

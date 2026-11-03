@@ -4,14 +4,20 @@ package build
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/sha256"
+	"crypto/sha512"
 	"encoding/hex"
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"hash"
 	"io"
+	"net/http"
+	"net/url"
 	"os"
 	"path"
 	"path/filepath"
@@ -735,6 +741,12 @@ func (e *executor) step(ctx context.Context, step instructions.Instruction) erro
 			return fmt.Errorf("COPY: %w", err)
 		}
 		return nil
+	case *instructions.Add:
+		e.say("ADD %s %s", strings.Join(s.Sources, " "), s.Dest)
+		if err := e.add(ctx, s); err != nil {
+			return fmt.Errorf("ADD: %w", err)
+		}
+		return nil
 	case *instructions.Reboot:
 		e.say("REBOOT")
 		if err := e.reboot(ctx); err != nil {
@@ -822,7 +834,59 @@ func (e *executor) copy(ctx context.Context, c *instructions.Copy) error {
 		}
 		srcs = append(srcs, matches...)
 	}
+	return e.upload(ctx, c, srcs)
+}
 
+// add runs ADD: the URL sources are downloaded on this machine, then
+// everything is uploaded like COPY. Docker would extract a local archive:
+// that is not supported yet, so archives are refused rather than copied as
+// they are.
+func (e *executor) add(ctx context.Context, a *instructions.Add) error {
+	dir, err := os.MkdirTemp("", "opendango-add-")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(dir)
+	toDir := len(a.Sources) > 1 || strings.HasSuffix(a.Dest, "/")
+	var srcs []string
+	for i, src := range a.Sources {
+		if !instructions.IsURL(src) {
+			matches, err := resolveSource(e.contextDir, src)
+			if err != nil {
+				return err
+			}
+			for _, m := range matches {
+				archive, err := isArchive(m)
+				if err != nil {
+					return err
+				}
+				if archive {
+					rel, _ := filepath.Rel(e.contextDir, m)
+					return fmt.Errorf("%s is an archive or a compressed file: ADD does not extract them yet (use COPY, then RUN tar -xf)", rel)
+				}
+			}
+			srcs = append(srcs, matches...)
+			continue
+		}
+		// The file name is the URL's when the destination is a directory.
+		name := "download"
+		if toDir {
+			if name = urlFileName(src); name == "" {
+				return fmt.Errorf("%s: no file name in the URL: set the destination file", src)
+			}
+		}
+		local := filepath.Join(dir, fmt.Sprint(i), name)
+		e.say("Downloading %s", src)
+		if err := download(ctx, src, local, a.Checksum); err != nil {
+			return err
+		}
+		srcs = append(srcs, local)
+	}
+	return e.upload(ctx, &a.Copy, srcs)
+}
+
+// upload copies local files and directories to c.Dest, as the current USER.
+func (e *executor) upload(ctx context.Context, c *instructions.Copy, srcs []string) error {
 	tmp, err := e.output(ctx, "mktemp -d /tmp/opendango.XXXXXX")
 	if err != nil {
 		return fmt.Errorf("creating a temporary directory: %w", err)
@@ -879,6 +943,84 @@ func (e *executor) copy(ctx context.Context, c *instructions.Copy) error {
 		}
 	}
 	return e.run(ctx, e.wrap(script.String()))
+}
+
+// urlFileName returns the last element of the URL path, or "".
+func urlFileName(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return ""
+	}
+	name := path.Base(u.Path)
+	if name == "/" || name == "." {
+		return ""
+	}
+	return name
+}
+
+// download saves url to dst with mode 0600 (like Docker), and checks its
+// checksum (algo:hex) unless empty.
+func download(ctx context.Context, rawURL, dst, checksum string) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
+	if err != nil {
+		return err
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("downloading %s: %s", rawURL, resp.Status)
+	}
+	if err := os.MkdirAll(filepath.Dir(dst), 0o700); err != nil {
+		return err
+	}
+	f, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	algo, want, _ := strings.Cut(checksum, ":")
+	h := map[string]func() hash.Hash{"sha256": sha256.New, "sha384": sha512.New384, "sha512": sha512.New}[algo]
+	w := io.Writer(f)
+	var sum hash.Hash
+	if h != nil {
+		sum = h()
+		w = io.MultiWriter(f, sum)
+	}
+	if _, err := io.Copy(w, resp.Body); err != nil {
+		return fmt.Errorf("downloading %s: %w", rawURL, err)
+	}
+	if sum != nil {
+		if got := hex.EncodeToString(sum.Sum(nil)); got != want {
+			return fmt.Errorf("%s: checksum mismatch: got %s:%s, want %s", rawURL, algo, got, checksum)
+		}
+	}
+	return f.Close()
+}
+
+// isArchive tells whether a regular file is a tar archive or a compressed
+// file (gzip, bzip2, xz, zstd), which Docker's ADD would extract.
+func isArchive(p string) (bool, error) {
+	info, err := os.Stat(p)
+	if err != nil || info.IsDir() {
+		return false, err
+	}
+	f, err := os.Open(p)
+	if err != nil {
+		return false, err
+	}
+	defer f.Close()
+	head := make([]byte, 512)
+	n, _ := io.ReadFull(f, head)
+	head = head[:n]
+	for _, magic := range [][]byte{{0x1f, 0x8b}, []byte("BZh"), {0xfd, '7', 'z', 'X', 'Z', 0}, {0x28, 0xb5, 0x2f, 0xfd}} {
+		if bytes.HasPrefix(head, magic) {
+			return true, nil
+		}
+	}
+	return len(head) >= 262 && string(head[257:262]) == "ustar", nil
 }
 
 // resolveSource expands a COPY source relative to the build context and
