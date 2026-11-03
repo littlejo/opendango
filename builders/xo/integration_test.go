@@ -169,11 +169,13 @@ OUTPUT --as=template %s
 	deleteTemplate(ctx, t, client, name)
 }
 
-// TestMultiStageEndToEnd builds a child stage from the intermediate
-// template of its parent, and checks what the child inherits.
+// TestMultiStageEndToEnd builds two child stages in parallel (-j 2) from
+// the intermediate template of their parent, and checks what a child
+// inherits.
 func TestMultiStageEndToEnd(t *testing.T) {
 	from, user, ctxDir := setup(t)
 	name := fmt.Sprintf("opendango-it-ms-%d", time.Now().Unix())
+	sibling := name + "-sibling"
 	src := fmt.Sprintf(`FROM %s AS base
 CONNECT ssh --user=%s --timeout=15m
 USER root
@@ -186,10 +188,20 @@ RUN test -f /opt/opendango/hello.txt
 RUN test "$STAGE_ENV" = from-base && test "$(pwd)" = /opt/opendango && test "$(id -u)" = 0
 RUN test "$(nproc)" = 2
 OUTPUT --as=template %s
-`, from, user, name)
 
-	ctx, client := run(t, src, build.Options{ContextDir: ctxDir})
+FROM base AS sibling
+RUN test -f /opt/opendango/hello.txt
+OUTPUT --as=template %s
+`, from, user, name, sibling)
+
+	var log bytes.Buffer
+	ctx, client := run(t, src, build.Options{ContextDir: ctxDir, Out: io.MultiWriter(os.Stdout, &log), Jobs: 2})
 	deleteTemplate(ctx, t, client, name)
+	deleteTemplate(ctx, t, client, sibling)
+	// With -j 2, the sibling starts before app is finished.
+	if strings.Index(log.String(), "==> sibling: Starting VM") > strings.Index(log.String(), "==> app: Stage finished") {
+		t.Error("app and sibling were not built in parallel")
+	}
 	tmp, err := xo.TemplatesWithPrefix(ctx, client, "opendango-tmp-base-")
 	if err != nil {
 		t.Fatal(err)

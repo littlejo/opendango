@@ -16,6 +16,7 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	gossh "golang.org/x/crypto/ssh"
@@ -88,6 +89,8 @@ type Options struct {
 	// Stdin is where BREAKPOINT waits for Enter and Ask reads the answer.
 	// When nil (no terminal), BREAKPOINT is skipped with a warning.
 	Stdin io.Reader
+	// Jobs is the number of stages built at the same time; 1 when zero.
+	Jobs int
 }
 
 // NewBuilder returns the builder of the stage's root FROM.
@@ -125,6 +128,11 @@ func Run(ctx context.Context, p *plan.Plan, opts Options) (err error) {
 	if opts.Out == nil {
 		opts.Out = io.Discard
 	}
+	// Stages running in parallel share the log; each write is a whole line.
+	opts.Out = &lockedWriter{w: opts.Out}
+	if opts.Jobs == 0 {
+		opts.Jobs = 1
+	}
 	if opts.Dial == nil {
 		opts.Dial = dialSSH
 	}
@@ -137,9 +145,9 @@ func Run(ctx context.Context, p *plan.Plan, opts Options) (err error) {
 	if opts.Ask && opts.Stdin == nil {
 		return errors.New("--on-error=ask needs a terminal")
 	}
-	var stdin *bufio.Reader
+	var con *console
 	if opts.Stdin != nil {
-		stdin = bufio.NewReader(opts.Stdin)
+		con = &console{in: bufio.NewReader(opts.Stdin)}
 	}
 	stages, err := p.Select(opts.Target)
 	if err != nil {
@@ -156,8 +164,10 @@ func Run(ctx context.Context, p *plan.Plan, opts Options) (err error) {
 		// A stage failure was already answered in runStage; this asks for
 		// the failures before any VM exists (the builder of a stage).
 		if err != nil && opts.Ask && len(temporary) > 0 && !answered(err) && ctx.Err() == nil {
+			con.mu.Lock()
 			fmt.Fprintf(opts.Out, "==> Build failed: %v\n", err)
-			err = answer(err, ask(ctx, stdin, opts.Out, "build", false))
+			err = answer(err, ask(ctx, con.in, opts.Out, "build", false))
+			con.mu.Unlock()
 		}
 		if err != nil && keep(err, opts) {
 			for _, e := range temporary {
@@ -178,29 +188,97 @@ func Run(ctx context.Context, p *plan.Plan, opts Options) (err error) {
 		}
 	}()
 
-	for _, s := range stages {
-		needed := false
-		for _, c := range s.Children {
-			needed = needed || selected[c]
+	// A stage starts once its parent is done, up to opts.Jobs at a time, in
+	// file order. After a failure, no stage starts and the running ones
+	// finish: their OUTPUTs are kept.
+	type result struct {
+		stage *plan.Stage
+		e     *executor
+		err   error
+	}
+	results := make(chan result)
+	pending := stages
+	running := 0
+	var errs []error
+	for {
+		for i := 0; len(errs) == 0 && ctx.Err() == nil && running < opts.Jobs && i < len(pending); {
+			s := pending[i]
+			if s.Parent != nil && done[s.Parent] == nil {
+				i++
+				continue
+			}
+			pending = append(pending[:i:i], pending[i+1:]...)
+			needed := needsTemplate(s, selected)
+			running++
+			go func(parent *executor) {
+				e, err := runStage(ctx, p, s, parent, needed, con, opts)
+				results <- result{s, e, err}
+			}(done[s.Parent])
 		}
-		e, err := runStage(ctx, p, s, done[s.Parent], needed, stdin, opts)
-		if err != nil {
-			return err
+		if running == 0 {
+			break
 		}
-		done[s] = e
-		if needed && s.TemplateOutput() == nil {
-			temporary = append(temporary, e)
+		r := <-results
+		running--
+		if r.err != nil {
+			errs = append(errs, r.err)
+			if running > 0 {
+				fmt.Fprintf(opts.Out, "==> Stage %s failed, waiting for the %d running stage(s) to finish\n", r.stage.Name(), running)
+			}
+			continue
 		}
+		done[r.stage] = r.e
+		if needsTemplate(r.stage, selected) && r.stage.TemplateOutput() == nil {
+			temporary = append(temporary, r.e)
+		}
+	}
+	switch len(errs) {
+	case 0:
+	case 1:
+		return errs[0]
+	default:
+		return errors.Join(errs...)
+	}
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 	fmt.Fprintln(opts.Out, "==> Build finished")
 	return nil
+}
+
+// needsTemplate tells whether a selected stage starts from s.
+func needsTemplate(s *plan.Stage, selected map[*plan.Stage]bool) bool {
+	for _, c := range s.Children {
+		if selected[c] {
+			return true
+		}
+	}
+	return false
+}
+
+// lockedWriter serializes the writes of the stages running in parallel.
+type lockedWriter struct {
+	mu sync.Mutex
+	w  io.Writer
+}
+
+func (l *lockedWriter) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.w.Write(p)
+}
+
+// console is the terminal shared by the stages: one question at a time.
+type console struct {
+	mu sync.Mutex
+	in *bufio.Reader
 }
 
 // runStage builds one stage. parent is the executor of the parent stage
 // (nil for a root stage), whose final USER, WORKDIR and ENV are inherited.
 // needed is true when a selected stage starts from this one: the VM then
 // always ends as a template.
-func runStage(ctx context.Context, p *plan.Plan, stage *plan.Stage, parent *executor, needed bool, stdin *bufio.Reader, opts Options) (_ *executor, err error) {
+func runStage(ctx context.Context, p *plan.Plan, stage *plan.Stage, parent *executor, needed bool, con *console, opts Options) (_ *executor, err error) {
 	parentTemplate := ""
 	if parent != nil {
 		parentTemplate = parent.b.ID()
@@ -218,7 +296,7 @@ func runStage(ctx context.Context, p *plan.Plan, stage *plan.Stage, parent *exec
 		dial:       opts.Dial,
 		retryDelay: opts.RetryDelay,
 		contextDir: opts.ContextDir,
-		stdin:      stdin,
+		console:    con,
 	}
 	if parent != nil {
 		// Like a Docker image: USER, WORKDIR and ENV carry over, ARG does not.
@@ -246,8 +324,7 @@ func runStage(ctx context.Context, p *plan.Plan, stage *plan.Stage, parent *exec
 		// Failures outside the instructions (start, connection, stop,
 		// OUTPUT): no retry, but the VM can be kept.
 		if err != nil && opts.Ask && !answered(err) && ctx.Err() == nil {
-			e.say("Build failed: %v", err)
-			err = answer(err, e.ask(ctx, false))
+			err = answer(err, e.ask(ctx, err, false))
 		}
 		if err != nil && keep(err, opts) {
 			e.say("Build failed, keeping VM %s", b.ID())
@@ -287,8 +364,7 @@ func runStage(ctx context.Context, p *plan.Plan, stage *plan.Stage, parent *exec
 			if !opts.Ask || ctx.Err() != nil {
 				return nil, err
 			}
-			e.say("Build failed: %v", err)
-			c := e.ask(ctx, true)
+			c := e.ask(ctx, err, true)
 			if c != choiceRetry {
 				return nil, answer(err, c)
 			}
@@ -353,7 +429,7 @@ type executor struct {
 	dial       DialFunc
 	retryDelay time.Duration
 	contextDir string
-	stdin      *bufio.Reader
+	console    *console
 
 	key        ed25519.PrivateKey
 	signer     gossh.Signer
@@ -671,10 +747,12 @@ func (e *executor) breakpoint(ctx context.Context, s *instructions.Breakpoint) e
 	if s.Message != "" {
 		title += " " + s.Message
 	}
-	if e.stdin == nil {
+	if e.console == nil {
 		e.say("%s ignored: stdin is not a terminal", title)
 		return nil
 	}
+	e.console.mu.Lock()
+	defer e.console.mu.Unlock()
 	e.say("%s", title)
 	e.say("Build paused. Connect to the VM with:")
 	remove, err := e.printSSH()
@@ -683,7 +761,7 @@ func (e *executor) breakpoint(ctx context.Context, s *instructions.Breakpoint) e
 	}
 	defer remove()
 	e.say("Press Enter to continue (Ctrl+C aborts the build)")
-	if _, err := readLine(ctx, e.stdin); err != nil && !errors.Is(err, io.EOF) {
+	if _, err := readLine(ctx, e.console.in); err != nil && !errors.Is(err, io.EOF) {
 		return err
 	}
 	e.say("Resuming the build")
@@ -718,8 +796,12 @@ func (e *executor) printSSH() (remove func(), err error) {
 
 // readLine reads one line from in, or returns when ctx is done. The read
 // cannot be interrupted: on cancellation it is left behind, and the build
-// ends anyway.
+// ends anyway. No read starts once ctx is done, so that two reads never
+// share in.
 func readLine(ctx context.Context, in *bufio.Reader) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 	type result struct {
 		line string
 		err  error
@@ -746,16 +828,19 @@ const (
 	choiceRetry
 )
 
-// ask prints the SSH command when the VM was reached, then asks what to do
-// with the failure.
-func (e *executor) ask(ctx context.Context, canRetry bool) choice {
+// ask prints the failure and the SSH command when the VM was reached, then
+// asks what to do.
+func (e *executor) ask(ctx context.Context, failure error, canRetry bool) choice {
+	e.console.mu.Lock()
+	defer e.console.mu.Unlock()
+	e.say("Build failed: %v", failure)
 	if e.host != "" {
 		e.say("Inspect the VM with:")
 		if remove, err := e.printSSH(); err == nil {
 			defer remove()
 		}
 	}
-	return ask(ctx, e.stdin, e.out, e.name, canRetry)
+	return ask(ctx, e.console.in, e.out, e.name, canRetry)
 }
 
 // ask reads the answer until it is valid. End of input and Ctrl+C mean
