@@ -45,9 +45,20 @@
 - `FROM <stage>` refers to an earlier stage by its `AS` name (no forward reference, names are unique).
 - A stage inherits from its parent: `CONNECT` (it may set its own), `USER`, `WORKDIR` and `ENV`. `ARG` is not inherited, and `FROM` lines only see the global ARGs, like in Docker. Each stage gets its own ephemeral key: cloud-init sees a new instance because XO sets `instance-id` to the VM UUID.
 - `opendango build` builds **every** stage, in file order; `--target X` builds X and its ancestors only.
-- A stage that a selected stage starts from always ends as a template: its `OUTPUT --as=template`, or a temporary `opendango-tmp-<stage>-<unix time>` template deleted at the end of the build (children first). A stage nobody starts from and without `OUTPUT` triggers a warning: its VM is destroyed.
-- On failure the build stops: finished `OUTPUT`s (templates, XVA) of the previous stages are kept; the failing VM and the intermediate templates are deleted, unless `--on-error=keep` (or the answer `k` to `--on-error=ask`).
+- A stage that a selected stage starts from always ends as a template: its `OUTPUT --as=template`, or an intermediate template. With the cache (default), the intermediate template is `opendango-cache-<stage>-<unix time>` and stays (see *Cache*); with `--no-cache` (or when the stage is not cacheable), it is a temporary `opendango-tmp-<stage>-<unix time>` deleted at the end of the build (children first). A stage nobody starts from and without `OUTPUT` triggers a warning: its VM is destroyed.
+- On failure the build stops: finished `OUTPUT`s (templates, XVA) and cached templates of the previous stages are kept, so the next build resumes from them; the failing VM and the temporary templates are deleted, unless `--on-error=keep` (or the answer `k` to `--on-error=ask`).
 - Stages run one at a time by default (`-j 1`). With `-j N`, up to N stages run at the same time; a stage starts once its parent is done, in file order. After a failure, no new stage starts and the running ones finish (their `OUTPUT`s are kept); Ctrl+C stops everything. All failures are reported. Log lines are prefixed with the stage name, and `BREAKPOINT` / `--on-error=ask` questions are asked one at a time.
+
+### Cache
+
+The cache works per stage: the stages are the layers. It is on by default; `opendango build --no-cache` neither reads nor fills it.
+
+- **Key** (`internal/build/cache.go`): a sha256 of the parent's key, the expanded `FROM` (builder, source or stage, flags), `CONNECT` (protocol, user, port), every step with its expanded values (`ARG`, `ENV`, `USER`, `WORKDIR`, `RUN` script, `COPY` arguments plus the path, mode and content of every source file) and the `OUTPUT --as=template` name. Line numbers and layout are left out. `cacheVersion` is bumped when the key changes meaning.
+- **Not cached**: a stage with a `BREAKPOINT`, and its descendants (manual changes are not reproducible); a stage in which `--on-error=ask` retried an instruction; a stage that does not end as a template.
+- **Limit**: the base template is keyed by the name written in `FROM`; a template replaced under the same name is not detected (like a Docker tag). Use `--no-cache`, or the template UUID.
+- **Storage** (XO tags): every cached template has `opendango-cache:<key>`; intermediate ones also have `opendango-cache-created:<unix time>`. The lookup is in the pool of the template the VM would start from. On a hit, the stage starts no VM: its children start from the cached template, its `XVA` outputs are exported from it (`GET /vm-templates/{id}.xva`), and the final `USER`, `WORKDIR`, `ENV` are replayed from the instructions.
+- **Cleanup**: `opendango cache prune [--older-than=DURATION] [--dry-run]` deletes the intermediate cache templates (with the creation tag) only, never the `OUTPUT` templates. Nothing is deleted automatically.
+- Per-instruction caching (snapshots) is not done: there is no documented way to create a VM from a snapshot in the REST API, snapshots belong to the build VM, and VHD chains are limited to about 30 snapshots.
 
 Planned instructions fail with `<X> is not supported yet`. `EXPOSE`, `HEALTHCHECK`, `VOLUME`, `CMD`, `ENTRYPOINT`, `ONBUILD` and `STOPSIGNAL` fail with `<X> has no meaning for a VM image`. Both are reported by `validate`.
 
@@ -56,9 +67,10 @@ Planned instructions fail with `<X> is not supported yet`. `EXPOSE`, `HEALTHCHEC
 Implemented (standard library `flag` package; move to cobra only if the CLI grows):
 
 ```
-opendango build    [-f Dangofile] [--build-arg K=V]... [--target X] [-j N] [--on-error=abort|keep|ask]
+opendango build    [-f Dangofile] [--build-arg K=V]... [--target X] [-j N] [--no-cache] [--on-error=abort|keep|ask]
 opendango validate [-f Dangofile] [--build-arg K=V]...
 opendango fmt      [-f Dangofile] [-w | --check]
+opendango cache prune [--older-than=DURATION] [--dry-run]
 opendango version
 ```
 
@@ -83,7 +95,7 @@ builders/xo/                Xen Orchestra builder
 
 Planned: `internal/communicator/winrm`, `internal/output` (qcow2, raw, vmdk, ova, checksums), `builders/packer`.
 
-The `Builder` interface lives in `internal/build`: `Start(cloudConfig)`, `Address`, `Stop(grace)`, `Output`, `Destroy`, `ID`. It grows with the roadmap (`SendKeys` for `BOOT`, `Snapshot` for the cache), not before. Builders are selected by a plain `switch` on the `FROM` scheme (`build.NewBuilder`, `plan.checkBuilder`).
+The `Builder` interface lives in `internal/build`: `Start(cloudConfig)`, `Address`, `Stop(grace)`, `Output`, `Destroy`, `ID`, `FindCache(key)`, `Tag(tag)`. It grows with the roadmap (`SendKeys` for `BOOT`), not before. Builders are selected by a plain `switch` on the `FROM` scheme (`build.NewBuilder`, `plan.checkBuilder`).
 
 ### Dependencies
 
@@ -111,7 +123,7 @@ The Vates SDK (`xenorchestra-go-sdk`) was evaluated and not used: opendango need
   5. export the XVA (`GET /vms/{id}.xva?compress=`) and/or rename (`PATCH`) and convert to a template;
   6. clean up: `DELETE /vms/{id}` unless the VM became the template. Cleanup happens **even on failure or Ctrl+C**, unless `--on-error=keep` is set or `k` is answered to `--on-error=ask`.
 - `vm.convertToTemplate` returns before XO's object cache lists the template: the builder waits for `GET /vm-templates/{id}` before reporting the output done.
-- `FROM <stage>` creates the VM from the parent's template (its UUID, in the root's pool). Once converted, `Destroy` deletes the template (`DELETE /vm-templates/{id}`), which is how intermediate templates are removed.
+- `FROM <stage>` creates the VM from the parent's template (its UUID, in the root's pool). Once converted, `Destroy` deletes the template (`DELETE /vm-templates/{id}`), which is how temporary templates are removed. A builder that found its template in the cache (`FindCache`) never deletes it. Tags are added with `PUT /vm-templates/{id}/tags/{tag}`.
 
 ### Packer plugin compatibility
 
@@ -131,7 +143,7 @@ The Vates SDK (`xenorchestra-go-sdk`) was evaluated and not used: opendango need
 2. ~~Multi-stage, `--target`, `BREAKPOINT`, `--on-error=ask`, parallel builds (`-j`), `fmt`~~ (done).
 3. `packer://` compatibility, tested first with `vatesfr/packer-plugin-xenserver`.
 4. Native `BOOT` and `SERVE`, then more builders (QEMU, Proxmox, AWS, vSphere).
-5. Per-instruction caching based on snapshots.
+5. ~~Per-stage cache~~ (done); per-instruction caching based on snapshots, if the need is confirmed.
 
 ## Development rules
 

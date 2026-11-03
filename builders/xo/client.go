@@ -89,16 +89,17 @@ func (c *Client) send(ctx context.Context, method, path string, body any) (*http
 
 // object is the subset of fields read from XO objects.
 type object struct {
-	ID        string `json:"id"`
-	UUID      string `json:"uuid"`
-	NameLabel string `json:"name_label"`
-	Pool      string `json:"$pool"`
+	ID        string   `json:"id"`
+	UUID      string   `json:"uuid"`
+	NameLabel string   `json:"name_label"`
+	Pool      string   `json:"$pool"`
+	Tags      []string `json:"tags"`
 }
 
 // list returns a collection with the fields of object.
 func (c *Client) list(ctx context.Context, collection string) ([]object, error) {
 	var objs []object
-	err := c.do(ctx, http.MethodGet, "/"+collection+"?fields="+url.QueryEscape("id,uuid,name_label,$pool"), nil, &objs)
+	err := c.do(ctx, http.MethodGet, "/"+collection+"?fields="+url.QueryEscape("id,uuid,name_label,$pool,tags"), nil, &objs)
 	return objs, err
 }
 

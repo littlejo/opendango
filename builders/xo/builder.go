@@ -24,6 +24,9 @@ type Builder struct {
 	vmID   string
 	// converted is true once the VM is a template.
 	converted bool
+	// cached is true when the builder stands for a template found in the
+	// cache: there is no VM, and Destroy leaves the template alone.
+	cached bool
 	// pollInterval is the pause between two state checks.
 	pollInterval time.Duration
 }
@@ -44,21 +47,11 @@ func (b *Builder) ID() string {
 // Start resolves the template, pool, SR and network, then creates and boots
 // the VM with the cloud-config.
 func (b *Builder) Start(ctx context.Context, cloudConfig string) error {
-	poolID := ""
-	if b.cfg.Pool != "" {
-		pool, err := b.find(ctx, "pools", "pool", b.cfg.Pool, "")
-		if err != nil {
-			return err
-		}
-		poolID = pool.ID
-	}
-	// The same template UUID can exist in several pools (XO Hub
-	// templates): restrict to --pool when set.
-	tmpl, err := b.find(ctx, "vm-templates", "template", b.cfg.Template, poolID)
+	tmpl, err := b.template(ctx)
 	if err != nil {
 		return err
 	}
-	poolID = tmpl.Pool
+	poolID := tmpl.Pool
 
 	body := map[string]any{
 		"name_label":       b.name,
@@ -112,6 +105,67 @@ func (b *Builder) Start(ctx context.Context, cloudConfig string) error {
 	}
 	b.vmID = created.ID
 	return nil
+}
+
+// template resolves the template the VM is created from. The same template
+// UUID can exist in several pools (XO Hub templates): the lookup is
+// restricted to --pool when set.
+func (b *Builder) template(ctx context.Context) (*object, error) {
+	poolID := ""
+	if b.cfg.Pool != "" {
+		pool, err := b.find(ctx, "pools", "pool", b.cfg.Pool, "")
+		if err != nil {
+			return nil, err
+		}
+		poolID = pool.ID
+	}
+	return b.find(ctx, "vm-templates", "template", b.cfg.Template, poolID)
+}
+
+// Cache tags, the same as build.CacheTagPrefix and build.CreatedTagPrefix
+// (package build imports this one).
+const (
+	cacheTag   = "opendango-cache:"
+	createdTag = "opendango-cache-created:"
+)
+
+// FindCache looks for a template tagged with key in the pool of the
+// template the VM would be created from. When found, the builder stands for
+// that template: ID returns it, Output exports it, Destroy leaves it.
+func (b *Builder) FindCache(ctx context.Context, key string) (bool, error) {
+	tmpl, err := b.template(ctx)
+	if err != nil {
+		return false, err
+	}
+	objs, err := b.client.list(ctx, "vm-templates")
+	if err != nil {
+		return false, err
+	}
+	if id := cached(objs, tmpl.Pool, key); id != "" {
+		b.vmID, b.converted, b.cached = id, true, true
+		return true, nil
+	}
+	return false, nil
+}
+
+// cached returns the id of a template of poolID tagged with key.
+func cached(objs []object, poolID, key string) string {
+	for _, o := range objs {
+		if o.Pool != poolID {
+			continue
+		}
+		for _, t := range o.Tags {
+			if t == cacheTag+key {
+				return o.ID
+			}
+		}
+	}
+	return ""
+}
+
+// Tag adds tag to the template the VM became.
+func (b *Builder) Tag(ctx context.Context, tag string) error {
+	return b.client.do(ctx, http.MethodPut, "/vm-templates/"+url.PathEscape(b.vmID)+"/tags/"+url.PathEscape(tag), nil, nil)
 }
 
 // vm is the subset of VM fields read by the builder.
@@ -245,6 +299,10 @@ func (b *Builder) waitTemplate(ctx context.Context) error {
 // exportXVA streams the export to a temporary file renamed on success.
 func (b *Builder) exportXVA(ctx context.Context, dest, compress string) error {
 	p := "/vms/" + b.vmID + ".xva"
+	if b.converted {
+		// A template found in the cache.
+		p = "/vm-templates/" + url.PathEscape(b.vmID) + ".xva"
+	}
 	if compress != "" {
 		p += "?compress=" + url.QueryEscape(compress)
 	}
@@ -274,7 +332,7 @@ func (b *Builder) exportXVA(ctx context.Context, dest, compress string) error {
 // Destroy deletes the template the VM became, or forces the VM off if
 // needed and deletes it, with its disks.
 func (b *Builder) Destroy(ctx context.Context) error {
-	if b.vmID == "" {
+	if b.vmID == "" || b.cached {
 		return nil
 	}
 	if b.converted {

@@ -46,6 +46,12 @@ type Builder interface {
 	// ID identifies the VM; once converted, it identifies the template, and
 	// is what NewBuilder receives as parentTemplate for the child stages.
 	ID() string
+	// FindCache looks for a template tagged with the cache key, where the
+	// VM would be created. When found, the builder stands for it: ID
+	// returns it, Output exports it, and Destroy leaves it in place.
+	FindCache(ctx context.Context, key string) (bool, error)
+	// Tag adds a tag to the template the VM became.
+	Tag(ctx context.Context, tag string) error
 }
 
 // Communicator runs commands in the VM and uploads files to it.
@@ -91,6 +97,9 @@ type Options struct {
 	Stdin io.Reader
 	// Jobs is the number of stages built at the same time; 1 when zero.
 	Jobs int
+	// NoCache builds every stage, without looking up or storing templates
+	// in the cache.
+	NoCache bool
 }
 
 // NewBuilder returns the builder of the stage's root FROM.
@@ -157,6 +166,16 @@ func Run(ctx context.Context, p *plan.Plan, opts Options) (err error) {
 	for _, s := range stages {
 		selected[s] = true
 	}
+	// Cache keys, computed before anything starts: a missing COPY source
+	// fails early.
+	keys := map[*plan.Stage]string{}
+	if !opts.NoCache {
+		for _, s := range stages {
+			if keys[s], err = cacheKey(p.File, s, keys[s.Parent], opts.ContextDir); err != nil {
+				return err
+			}
+		}
+	}
 
 	done := map[*plan.Stage]*executor{}
 	var temporary []*executor
@@ -209,9 +228,14 @@ func Run(ctx context.Context, p *plan.Plan, opts Options) (err error) {
 			}
 			pending = append(pending[:i:i], pending[i+1:]...)
 			needed := needsTemplate(s, selected)
+			// Only a stage that ends as a template can be cached.
+			key := keys[s]
+			if !needed && s.TemplateOutput() == nil {
+				key = ""
+			}
 			running++
 			go func(parent *executor) {
-				e, err := runStage(ctx, p, s, parent, needed, con, opts)
+				e, err := runStage(ctx, p, s, parent, needed, key, con, opts)
 				results <- result{s, e, err}
 			}(done[s.Parent])
 		}
@@ -228,7 +252,8 @@ func Run(ctx context.Context, p *plan.Plan, opts Options) (err error) {
 			continue
 		}
 		done[r.stage] = r.e
-		if needsTemplate(r.stage, selected) && r.stage.TemplateOutput() == nil {
+		// A template in the cache stays for the next builds.
+		if needsTemplate(r.stage, selected) && r.stage.TemplateOutput() == nil && !r.e.cached {
 			temporary = append(temporary, r.e)
 		}
 	}
@@ -277,8 +302,9 @@ type console struct {
 // runStage builds one stage. parent is the executor of the parent stage
 // (nil for a root stage), whose final USER, WORKDIR and ENV are inherited.
 // needed is true when a selected stage starts from this one: the VM then
-// always ends as a template.
-func runStage(ctx context.Context, p *plan.Plan, stage *plan.Stage, parent *executor, needed bool, con *console, opts Options) (_ *executor, err error) {
+// always ends as a template. key is the stage's cache key, empty when the
+// stage is not cached.
+func runStage(ctx context.Context, p *plan.Plan, stage *plan.Stage, parent *executor, needed bool, key string, con *console, opts Options) (_ *executor, err error) {
 	parentTemplate := ""
 	if parent != nil {
 		parentTemplate = parent.b.ID()
@@ -304,14 +330,33 @@ func runStage(ctx context.Context, p *plan.Plan, stage *plan.Stage, parent *exec
 		e.env = append([]instructions.KeyValue{}, parent.env...)
 	}
 
+	if e.connect != nil && e.user == "" {
+		e.user = e.connect.User
+	}
+
+	if key != "" {
+		found, err := b.FindCache(ctx, key)
+		if err != nil {
+			return nil, fmt.Errorf("looking up the cache: %w", err)
+		}
+		if found {
+			e.say("Using the cached template %s (key %s)", b.ID(), key[:12])
+			e.cached = true
+			// The child stages inherit the final USER, WORKDIR and ENV.
+			e.replay(stage.Steps)
+			if err := exportXVA(ctx, p, stage, e, opts); err != nil {
+				return nil, err
+			}
+			e.say("Stage finished (cached)")
+			return e, nil
+		}
+	}
+
 	cloudConfig := ""
 	if e.connect != nil {
 		authorizedKey, err := e.generateKey()
 		if err != nil {
 			return nil, err
-		}
-		if e.user == "" {
-			e.user = e.connect.User
 		}
 		cloudConfig = CloudConfig(e.connect.User, authorizedKey)
 	}
@@ -368,6 +413,8 @@ func runStage(ctx context.Context, p *plan.Plan, stage *plan.Stage, parent *exec
 			if c != choiceRetry {
 				return nil, answer(err, c)
 			}
+			// What was fixed by hand before the retry is not reproducible.
+			e.retried = true
 			if err := e.reconnect(ctx); err != nil {
 				return nil, err
 			}
@@ -388,6 +435,63 @@ func runStage(ctx context.Context, p *plan.Plan, stage *plan.Stage, parent *exec
 
 	// Exports first: the conversion to a template is the last thing done
 	// to the VM.
+	if err := exportXVA(ctx, p, stage, e, opts); err != nil {
+		return nil, err
+	}
+	store := key != "" && !e.retried
+	if out := stage.TemplateOutput(); out != nil {
+		e.say("Converting VM %s to a template", b.ID())
+		if err := b.Output(ctx, out); err != nil {
+			return nil, &plan.Error{File: p.File, Line: out.Line(), Err: err}
+		}
+		converted = true
+		if store {
+			e.cached = e.tag(ctx, CacheTagPrefix+key)
+		}
+	} else if needed {
+		prefix := "opendango-tmp-"
+		if store {
+			prefix = "opendango-cache-"
+		}
+		now := time.Now().Unix()
+		name := fmt.Sprintf("%s%s-%d", prefix, stage.Name(), now)
+		e.say("Converting VM %s to the intermediate template %s", b.ID(), name)
+		if err := b.Output(ctx, &instructions.Output{Kind: instructions.OutputTemplate, Name: name}); err != nil {
+			return nil, fmt.Errorf("converting to an intermediate template: %w", err)
+		}
+		converted = true
+		// The creation tag first: a template with the key but without it
+		// would never be pruned.
+		if store {
+			e.cached = e.tag(ctx, fmt.Sprintf("%s%d", CreatedTagPrefix, now)) && e.tag(ctx, CacheTagPrefix+key)
+		}
+	}
+	e.say("Stage finished")
+	return e, nil
+}
+
+// Cache tags, the same for every builder. Every template in the cache has
+// CacheTagPrefix+key; the intermediate ones also have CreatedTagPrefix+<unix
+// time>, which tells them from the OUTPUT templates for opendango cache
+// prune.
+const (
+	CacheTagPrefix   = "opendango-cache:"
+	CreatedTagPrefix = "opendango-cache-created:"
+)
+
+// tag tags the template and reports whether it worked. A failure only
+// means that the template is not cached: an untagged intermediate template
+// is deleted at the end of the build like with --no-cache.
+func (e *executor) tag(ctx context.Context, tag string) bool {
+	if err := e.b.Tag(ctx, tag); err != nil {
+		e.say("Warning: tagging template %s failed, it is not cached: %v", e.b.ID(), err)
+		return false
+	}
+	return true
+}
+
+// exportXVA runs the XVA OUTPUTs of the stage.
+func exportXVA(ctx context.Context, p *plan.Plan, stage *plan.Stage, e *executor, opts Options) error {
 	for _, out := range stage.Outputs {
 		if out.Kind != instructions.OutputXVA {
 			continue
@@ -397,26 +501,40 @@ func runStage(ctx context.Context, p *plan.Plan, stage *plan.Stage, parent *exec
 			o.Path = filepath.Join(opts.ContextDir, o.Path)
 		}
 		e.say("Exporting XVA to %s", o.Path)
-		if err := b.Output(ctx, &o); err != nil {
-			return nil, &plan.Error{File: p.File, Line: out.Line(), Err: err}
+		if err := e.b.Output(ctx, &o); err != nil {
+			return &plan.Error{File: p.File, Line: out.Line(), Err: err}
 		}
 	}
-	if out := stage.TemplateOutput(); out != nil {
-		e.say("Converting VM %s to a template", b.ID())
-		if err := b.Output(ctx, out); err != nil {
-			return nil, &plan.Error{File: p.File, Line: out.Line(), Err: err}
+	return nil
+}
+
+// replay applies the state changes of the steps (ARG, ENV, USER, WORKDIR)
+// without running anything: for a stage found in the cache.
+func (e *executor) replay(steps []instructions.Instruction) {
+	for _, step := range steps {
+		switch s := step.(type) {
+		case *instructions.Arg:
+			if s.Set {
+				e.args = setVar(e.args, s.Name, s.Value)
+			}
+		case *instructions.Env:
+			for _, kv := range s.Vars {
+				e.env = setVar(e.env, kv.Key, kv.Value)
+			}
+		case *instructions.User:
+			e.user = s.Name
+		case *instructions.Workdir:
+			e.workdir = e.workdirPath(s.Path)
 		}
-		converted = true
-	} else if needed {
-		name := fmt.Sprintf("opendango-tmp-%s-%d", stage.Name(), time.Now().Unix())
-		e.say("Converting VM %s to the intermediate template %s", b.ID(), name)
-		if err := b.Output(ctx, &instructions.Output{Kind: instructions.OutputTemplate, Name: name}); err != nil {
-			return nil, fmt.Errorf("converting to an intermediate template: %w", err)
-		}
-		converted = true
 	}
-	e.say("Stage finished")
-	return e, nil
+}
+
+// workdirPath joins a relative WORKDIR to the current one.
+func (e *executor) workdirPath(dir string) string {
+	if !path.IsAbs(dir) && e.workdir != "" {
+		return path.Join(e.workdir, dir)
+	}
+	return dir
 }
 
 type executor struct {
@@ -437,6 +555,12 @@ type executor struct {
 	// host is the address of the current connection; empty once the VM
 	// cannot be reached anymore with the ephemeral key.
 	host string
+
+	// cached is true when the stage's template is in the cache: found
+	// there, or tagged at the end of the stage.
+	cached bool
+	// retried is true once --on-error=ask retried an instruction.
+	retried bool
 
 	// State changed by the instructions.
 	user    string
@@ -518,10 +642,7 @@ func (e *executor) step(ctx context.Context, step instructions.Instruction) erro
 		e.user = s.Name
 		return nil
 	case *instructions.Workdir:
-		dir := s.Path
-		if !path.IsAbs(dir) && e.workdir != "" {
-			dir = path.Join(e.workdir, dir)
-		}
+		dir := e.workdirPath(s.Path)
 		e.say("WORKDIR %s", dir)
 		if err := e.run(ctx, e.wrap("mkdir -p "+instructions.ShellQuote(dir))); err != nil {
 			return fmt.Errorf("WORKDIR: %w", err)
@@ -618,7 +739,7 @@ func (e *executor) persistEnv(ctx context.Context, s *instructions.Env) error {
 func (e *executor) copy(ctx context.Context, c *instructions.Copy) error {
 	var srcs []string
 	for _, pattern := range c.Sources {
-		matches, err := e.resolveSource(pattern)
+		matches, err := resolveSource(e.contextDir, pattern)
 		if err != nil {
 			return err
 		}
@@ -685,11 +806,11 @@ func (e *executor) copy(ctx context.Context, c *instructions.Copy) error {
 
 // resolveSource expands a COPY source relative to the build context and
 // refuses anything outside of it.
-func (e *executor) resolveSource(pattern string) ([]string, error) {
+func resolveSource(contextDir, pattern string) ([]string, error) {
 	if filepath.IsAbs(pattern) {
 		return nil, fmt.Errorf("%s: sources must be relative to the Dangofile directory", pattern)
 	}
-	matches, err := filepath.Glob(filepath.Join(e.contextDir, pattern))
+	matches, err := filepath.Glob(filepath.Join(contextDir, pattern))
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", pattern, err)
 	}
@@ -697,7 +818,7 @@ func (e *executor) resolveSource(pattern string) ([]string, error) {
 		return nil, fmt.Errorf("%s: no such file or directory", pattern)
 	}
 	for _, m := range matches {
-		rel, err := filepath.Rel(e.contextDir, m)
+		rel, err := filepath.Rel(contextDir, m)
 		if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 			return nil, fmt.Errorf("%s: sources must stay inside the Dangofile directory", pattern)
 		}
