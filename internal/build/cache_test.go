@@ -113,6 +113,31 @@ OUTPUT --as=template app
 	}
 }
 
+// TestCacheKeyAdd checks that ADD of a URL is cached only with --checksum.
+func TestCacheKeyAdd(t *testing.T) {
+	ctxDir := t.TempDir()
+	os.WriteFile(filepath.Join(ctxDir, "local.txt"), []byte("v1"), 0o644)
+	sum := strings.Repeat("a", 64)
+	src := "FROM xo://t AS base\nCONNECT ssh --user=u\nADD --checksum=sha256:" + sum + " https://example.org/f /f\nADD local.txt /l\n" +
+		"FROM base AS app\nRUN make\nOUTPUT --as=template app\n"
+	k := keys(t, src, ctxDir, nil)
+	if k["base"] == "" || k["app"] == "" {
+		t.Fatalf("keys = %v", k)
+	}
+	if got := keys(t, strings.Replace(src, sum, strings.Repeat("b", 64), 1), ctxDir, nil); got["base"] == k["base"] {
+		t.Error("the checksum is not part of the key")
+	}
+	os.WriteFile(filepath.Join(ctxDir, "local.txt"), []byte("v2"), 0o644)
+	if got := keys(t, src, ctxDir, nil); got["base"] == k["base"] {
+		t.Error("the local source is not part of the key")
+	}
+	// Without a checksum, neither the stage nor its children are cached.
+	noSum := strings.Replace(src, "--checksum=sha256:"+sum+" ", "", 1)
+	if got := keys(t, noSum, ctxDir, nil); got["base"] != "" || got["app"] != "" {
+		t.Errorf("keys without checksum = %v", got)
+	}
+}
+
 func TestCacheKeyBreakpoint(t *testing.T) {
 	src := "FROM xo://t AS base\nCONNECT ssh --user=u\nBREAKPOINT\nFROM base AS app\nRUN x\nFROM xo://t AS other\n"
 	got := keys(t, src, t.TempDir(), nil)
