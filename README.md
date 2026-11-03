@@ -215,6 +215,7 @@ The template needs **cloud-init** and the **guest tools**.
 | `BREAKPOINT` | `BREAKPOINT "check nginx"` |
 | `SERVE` | `SERVE --port=8080 --addr=10.0.0.5 http/` (before `CONNECT`) |
 | `BOOT` | `BOOT <wait10><esc>auto url=http://${DANGO_HTTP_ADDR}/preseed.cfg<enter>` (before `CONNECT`) |
+| `LABEL` | `LABEL org.opencontainers.image.version=1.2 team=web` (with `OUTPUT --as=template`) |
 | `OUTPUT` | `OUTPUT --as=template "name"`, `OUTPUT --format=xva --compress=zstd ./out.xva` |
 
 `ENV` values only exist during the build; add `--persist` to write them to
@@ -238,7 +239,11 @@ on an untrusted network.
 default), as in Docker: the script is its last argument. The exec form
 (`RUN ["..."]`) is not affected.
 
-`ADD` and `LABEL` are planned and rejected for now. `CMD`, `ENTRYPOINT`, `EXPOSE`, `HEALTHCHECK`, `VOLUME`,
+`LABEL key=value` becomes the XO tag `key=value` on the template of
+`OUTPUT --as=template` (required in the stage). A stage inherits the labels
+of the stage it starts from; a key set again replaces the value.
+
+`ADD` is planned and rejected for now. `CMD`, `ENTRYPOINT`, `EXPOSE`, `HEALTHCHECK`, `VOLUME`,
 `ONBUILD` and `STOPSIGNAL` have no meaning for a VM image and are rejected.
 
 See [`examples/`](examples/) and [`CLAUDE.md`](CLAUDE.md) for the design and

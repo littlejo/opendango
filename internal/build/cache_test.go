@@ -60,6 +60,7 @@ COPY site/ /var/www/
 
 FROM base AS app
 RUN make
+LABEL team=web
 OUTPUT --as=template app
 `
 	base := keys(t, src, ctxDir, nil)
@@ -89,6 +90,7 @@ OUTPUT --as=template app
 		{name: "SERVE content", src: src, change: func() { write("http/ks.cfg", "v2", 0o644) }},
 		{name: "SERVE port", src: strings.Replace(src, "--port=8000", "--port=8001", 1), same: []string{"base", "app"}},
 		{name: "BOOT keys", src: strings.Replace(src, "<enter>", "<wait><enter>", 1)},
+		{name: "LABEL", src: strings.Replace(src, "team=web", "team=ops", 1), same: []string{"base"}},
 		{name: "SHELL", src: strings.Replace(src, "RUN apt-get update", "SHELL [\"/bin/bash\", \"-c\"]\nRUN apt-get update", 1)},
 	}
 	for _, tt := range tests {

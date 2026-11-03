@@ -158,7 +158,10 @@ func TestErrors(t *testing.T) {
 		{"FROM xo://t\nOUTPUT --format=xva a\nOUTPUT --format=xva a", "Dangofile:3: OUTPUT a already written at line 2"},
 		{"FROM xo://t\nEXPOSE 80", "Dangofile:2: EXPOSE has no meaning for a VM image"},
 		{"FROM xo://t\nCMD x", "Dangofile:2: CMD has no meaning"},
-		{"FROM xo://t\nLABEL a=b", "Dangofile:2: LABEL is not supported yet"},
+		{"FROM xo://t\nLABEL a=b\nLABEL c=d\nOUTPUT --format=xva x.xva", "Dangofile:2: LABEL needs OUTPUT --as=template"},
+		{"FROM xo://t AS a\nLABEL a=b\nFROM a\nOUTPUT --as=template", "Dangofile:2: LABEL needs OUTPUT --as=template"},
+		{"FROM xo://t\nLABEL opendango-cache:x=1\nOUTPUT --as=template", "Dangofile:2: LABEL opendango-cache:x: keys starting with opendango-cache are reserved"},
+		{"FROM packer://p-b\nLABEL a=b", "Dangofile:2: LABEL is not supported in a packer:// stage"},
 		{"FROM xo://t\nADD a b", "Dangofile:2: ADD is not supported yet"},
 		{"FROM xo://t\nFOO", "Dangofile:2: unknown instruction FOO"},
 		{"FROM xo://t\nUSER a:b", "Dangofile:2: USER: groups are not supported"},
@@ -300,6 +303,44 @@ func TestServe(t *testing.T) {
 	// One server per stage: not inherited.
 	if p.Stages[1].Serve != nil {
 		t.Errorf("stage b inherits SERVE")
+	}
+}
+
+func TestLabel(t *testing.T) {
+	src := `ARG V=1
+FROM xo://t AS base
+ARG V
+LABEL vendor=acme team=infra
+OUTPUT --as=template base
+LABEL version=$V
+
+FROM base AS app
+ENV T=web
+LABEL "team"="${T}" app=shop
+OUTPUT --as=template app
+
+FROM base AS plain
+OUTPUT --as=template plain
+`
+	p, err := build(t, src, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The child overrides in place and adds after; a stage without LABEL
+	// inherits its parent's.
+	want := map[string]string{
+		"base":  "vendor=acme team=infra version=1",
+		"app":   "vendor=acme team=web version=1 app=shop",
+		"plain": "vendor=acme team=infra version=1",
+	}
+	for _, s := range p.Stages {
+		var got []string
+		for _, l := range s.Labels {
+			got = append(got, l.Key+"="+l.Value)
+		}
+		if strings.Join(got, " ") != want[s.Name()] {
+			t.Errorf("%s labels = %q, want %q", s.Name(), got, want[s.Name()])
+		}
 	}
 }
 

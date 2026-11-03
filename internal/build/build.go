@@ -50,7 +50,9 @@ type Builder interface {
 	// VM would be created. When found, the builder stands for it: ID
 	// returns it, Output exports it, and Destroy leaves it in place.
 	FindCache(ctx context.Context, key string) (bool, error)
-	// Tag adds a tag to the template the VM became.
+	// Tag adds a tag to the template the VM became; a key=value tag
+	// (LABEL) replaces the tags of the same key inherited from the source
+	// template.
 	Tag(ctx context.Context, tag string) error
 	// LocalAddr returns the IP address of this machine that the VM can
 	// reach: where SERVE is advertised when --addr is not set.
@@ -462,6 +464,13 @@ func runStage(ctx context.Context, p *plan.Plan, stage *plan.Stage, parent *exec
 			return nil, &plan.Error{File: p.File, Line: out.Line(), Err: err}
 		}
 		converted = true
+		// The labels before the cache tag: a cached template has them.
+		for _, l := range stage.Labels {
+			e.say("LABEL %s=%s", l.Key, l.Value)
+			if err := b.Tag(ctx, l.Key+"="+l.Value); err != nil {
+				return nil, &plan.Error{File: p.File, Line: out.Line(), Err: fmt.Errorf("LABEL %s: tagging the template: %w", l.Key, err)}
+			}
+		}
 		if store {
 			e.cached = e.tag(ctx, CacheTagPrefix+key)
 		}

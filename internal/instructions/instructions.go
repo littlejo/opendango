@@ -105,6 +105,13 @@ type Run struct {
 	Exec bool
 }
 
+// Label attaches metadata to the image: tags key=value on the template of
+// OUTPUT --as=template.
+type Label struct {
+	Pos
+	Labels []KeyValue
+}
+
 // Shell sets the shell that runs the shell form of RUN: the script is its
 // last argument, like in Docker.
 type Shell struct {
@@ -188,7 +195,7 @@ var Forbidden = map[string]bool{
 
 // NotYetSupported lists the instructions planned but not implemented yet.
 var NotYetSupported = map[string]bool{
-	"ADD": true, "LABEL": true,
+	"ADD": true,
 }
 
 var (
@@ -400,6 +407,45 @@ func ParseRun(cmd *parser.Command) (*Run, error) {
 		run.Script = cmd.Args[0]
 	}
 	return run, nil
+}
+
+// LabelReservedPrefix starts the cache tags: no label key may start with it.
+const LabelReservedPrefix = "opendango-cache"
+
+// ParseLabel parses `LABEL key=value ...` and the legacy `LABEL key value`.
+// Keys and values are expanded, like in Docker.
+func ParseLabel(cmd *parser.Command, expand Expander) (*Label, error) {
+	if err := noFlags(cmd); err != nil {
+		return nil, err
+	}
+	// BuildKit gives (key, value, separator) triplets, as for ENV.
+	if len(cmd.Args) == 0 || len(cmd.Args)%3 != 0 {
+		return nil, fmt.Errorf("LABEL requires at least one key=value")
+	}
+	l := &Label{Pos: pos(cmd)}
+	for i := 0; i < len(cmd.Args); i += 3 {
+		key, err := expand(cmd.Args[i])
+		if err != nil {
+			return nil, fmt.Errorf("LABEL: %w", err)
+		}
+		switch {
+		case key == "":
+			return nil, fmt.Errorf("LABEL: empty key")
+		case strings.HasPrefix(key, LabelReservedPrefix):
+			return nil, fmt.Errorf("LABEL %s: keys starting with %s are reserved for the cache", key, LabelReservedPrefix)
+		case strings.ContainsAny(key, "=\n"):
+			return nil, fmt.Errorf("LABEL %q: a key cannot contain = or a newline", key)
+		}
+		value, err := expand(cmd.Args[i+1])
+		if err != nil {
+			return nil, fmt.Errorf("LABEL %s: %w", key, err)
+		}
+		if strings.Contains(value, "\n") {
+			return nil, fmt.Errorf("LABEL %s: a value cannot contain a newline", key)
+		}
+		l.Labels = append(l.Labels, KeyValue{Key: key, Value: value})
+	}
+	return l, nil
 }
 
 // ParseShell parses `SHELL ["executable", "parameters"...]`. Like in
