@@ -14,10 +14,12 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+	"text/tabwriter"
 	"time"
 
 	"golang.org/x/term"
 
+	"github.com/littlejo/opendango/builders/packer"
 	"github.com/littlejo/opendango/builders/xo"
 	"github.com/littlejo/opendango/internal/build"
 	"github.com/littlejo/opendango/internal/format"
@@ -34,6 +36,7 @@ Commands:
   validate   Check a Dangofile without building it
   fmt        Rewrite a Dangofile in its canonical layout
   cache      Manage the cache of stage templates (cache prune)
+  plugin     Manage the Packer plugins (pull, search, list, rm)
   version    Print the version
 
 Run 'opendango <command> -h' for the flags of a command.
@@ -60,6 +63,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return cmdFmt(args[1:], stdout, stderr)
 	case "cache":
 		return cmdCache(args[1:], stdout, stderr)
+	case "plugin":
+		return cmdPlugin(args[1:], stdout, stderr)
 	case "version":
 		fmt.Fprintln(stdout, "opendango", version)
 		return 0
@@ -307,6 +312,145 @@ func cmdCache(args []string, stdout, stderr io.Writer) int {
 	}
 	if !*dryRun {
 		fmt.Fprintf(stdout, "%d cache template(s) deleted\n", deleted)
+	}
+	return 0
+}
+
+const pluginUsage = `Usage:
+  opendango plugin pull <name|github.com/owner/name>[@version]...
+  opendango plugin search <term>
+  opendango plugin list
+  opendango plugin rm <name|github.com/owner/name>[@version]...
+
+A name is the official HashiCorp plugin of that name, or else the only
+GitHub repository named packer-plugin-<name>. Plugins are installed in
+Packer's plugin directory (` + "`$PACKER_CONFIG_DIR/plugins` or `~/.config/packer/plugins`" + `).
+GITHUB_TOKEN, when set, raises the rate limits of the GitHub API.
+`
+
+func cmdPlugin(args []string, stdout, stderr io.Writer) int {
+	if len(args) == 0 {
+		fmt.Fprint(stderr, pluginUsage)
+		return 2
+	}
+	cmd, args := args[0], args[1:]
+	if len(args) > 0 && (args[0] == "-h" || args[0] == "--help") {
+		fmt.Fprint(stdout, pluginUsage)
+		return 0
+	}
+	switch {
+	case cmd == "-h", cmd == "--help", cmd == "help":
+		fmt.Fprint(stdout, pluginUsage)
+		return 0
+	case cmd == "list" && len(args) == 0:
+		return pluginList(stdout)
+	case cmd == "search" && len(args) == 1:
+	case (cmd == "pull" || cmd == "rm") && len(args) > 0:
+	default:
+		fmt.Fprint(stderr, pluginUsage)
+		return 2
+	}
+	reg, err := packer.NewRegistry()
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	switch cmd {
+	case "search":
+		return pluginSearch(ctx, reg, args[0], stdout, stderr)
+	case "rm":
+		return pluginRemove(reg, args, stdout, stderr)
+	}
+	for _, ref := range args {
+		if err := pluginPull(ctx, reg, ref, stdout); err != nil {
+			fmt.Fprintf(stderr, "opendango plugin pull %s: %v\n", ref, err)
+			return 1
+		}
+	}
+	return 0
+}
+
+func pluginPull(ctx context.Context, reg *packer.Registry, ref string, stdout io.Writer) error {
+	name, src, version, err := packer.ParseRef(ref)
+	if err != nil {
+		return err
+	}
+	if src == nil {
+		s, err := reg.Resolve(ctx, name)
+		if err != nil {
+			return err
+		}
+		src = &s
+	}
+	pl, installed, err := reg.Install(ctx, *src, version)
+	if err != nil {
+		return err
+	}
+	if installed {
+		fmt.Fprintf(stdout, "Installed %s %s: %s\n", src, pl.Version, pl.Path)
+	} else {
+		fmt.Fprintf(stdout, "%s %s is already installed: %s\n", src, pl.Version, pl.Path)
+	}
+	return nil
+}
+
+func pluginSearch(ctx context.Context, reg *packer.Registry, term string, stdout, stderr io.Writer) int {
+	results, err := reg.Search(ctx, term)
+	w := tabwriter.NewWriter(stdout, 0, 4, 2, ' ', 0)
+	if len(results) > 0 {
+		fmt.Fprintln(w, "SOURCE\tSTARS\tDESCRIPTION")
+	}
+	for _, r := range results {
+		desc := r.Description
+		switch {
+		case r.Official:
+			desc = strings.TrimSpace("[official] " + desc)
+		case r.Fork:
+			desc = strings.TrimSpace("[fork] " + desc)
+		}
+		fmt.Fprintf(w, "%s\t%d\t%s\n", r.Source, r.Stars, desc)
+	}
+	w.Flush()
+	if err != nil {
+		fmt.Fprintf(stderr, "opendango plugin search: %v\n", err)
+		return 1
+	}
+	if len(results) == 0 {
+		fmt.Fprintf(stderr, "no plugin matches %q\n", term)
+		return 1
+	}
+	return 0
+}
+
+// pluginList prints the plugins that a packer:// stage can use, in the
+// order they are looked up.
+func pluginList(stdout io.Writer) int {
+	plugins := packer.Discover(packer.SearchDirs(), filepath.SplitList(os.Getenv("PATH")))
+	w := tabwriter.NewWriter(stdout, 0, 4, 2, ' ', 0)
+	fmt.Fprintln(w, "NAME\tVERSION\tPATH")
+	for _, pl := range plugins {
+		fmt.Fprintf(w, "%s\t%s\t%s\n", pl.Name, pl.Version, pl.Path)
+	}
+	w.Flush()
+	return 0
+}
+
+func pluginRemove(reg *packer.Registry, refs []string, stdout, stderr io.Writer) int {
+	for _, ref := range refs {
+		name, src, version, err := packer.ParseRef(ref)
+		if err == nil {
+			var removed []string
+			removed, err = reg.Remove(name, src, version)
+			for _, p := range removed {
+				fmt.Fprintf(stdout, "Removed %s\n", p)
+			}
+		}
+		if err != nil {
+			fmt.Fprintf(stderr, "opendango plugin rm %s: %v\n", ref, err)
+			return 1
+		}
 	}
 	return 0
 }

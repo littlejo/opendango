@@ -135,7 +135,8 @@ opendango build --build-arg XAPI_PASSWORD="$XAPI_PASSWORD"
   the credentials (`ssh_password`, `ssh_private_key_file`) are flags. Values of
   flags named `*password*`, `*secret*` or `*token*` are masked in the log.
 - Plugins are found in `PACKER_PLUGIN_PATH`, in Packer's plugin directory
-  (`packer plugins install github.com/vatesfr/xenserver`), or in `PATH`.
+  (where `opendango plugin pull` and `packer plugins install` put them), or in
+  `PATH`.
 - `SERVE <dir>` sets the plugin's `http_directory` (and `--port` its
   `http_port_min` and `http_port_max`), and the `BOOT` lines its
   `boot_command`, with `${DANGO_HTTP_ADDR}` turned into
@@ -144,6 +145,31 @@ opendango build --build-arg XAPI_PASSWORD="$XAPI_PASSWORD"
   `$DANGO_HTTP_ADDR` in `RUN`.
 - Only builders are supported. A packer:// stage cannot be a parent stage,
   and `OUTPUT` and `REBOOT` are not available in it.
+
+### Installing plugins
+
+```sh
+opendango plugin pull qemu                           # the official HashiCorp plugin
+opendango plugin pull github.com/vatesfr/xenserver   # a plugin published on GitHub
+opendango plugin pull qemu@1.1.7                     # a given version
+opendango plugin search xenserver                    # official plugins, then GitHub repositories
+opendango plugin list                                # the plugins packer:// stages can use
+opendango plugin rm qemu@1.1.7                       # remove an installed version
+```
+
+- A name alone is the official HashiCorp plugin of that name (from
+  releases.hashicorp.com), or else the only GitHub repository named
+  `packer-plugin-<name>` that is not a fork. When several match, give the
+  source, like in Packer: `github.com/<owner>/<name>` for the repository
+  `<owner>/packer-plugin-<name>`.
+- The archive is checked against the release's `SHA256SUMS` (signatures are
+  not checked), and the plugin must speak the plugin API `x5`. It is installed
+  in Packer's plugin directory (`$PACKER_CONFIG_DIR/plugins`, or
+  `~/.config/packer/plugins`), in the layout of `packer plugins install`:
+  Packer and opendango share their plugins.
+- `search` lists the forks that have a star (some maintained plugins are
+  forks, such as `vatesfr/xenserver`). Without a token, the GitHub search API
+  allows 10 requests a minute: set `GITHUB_TOKEN` to raise the limits.
 
 ## Install
 

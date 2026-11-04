@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -52,6 +53,11 @@ func TestUsage(t *testing.T) {
 	if code := run([]string{"cache", "prune", "--older-than=soon"}, &stdout, &stderr); code != 2 {
 		t.Errorf("cache prune --older-than=soon: exit %d", code)
 	}
+	for _, args := range [][]string{{"plugin"}, {"plugin", "search"}, {"plugin", "search", "a", "b"}, {"plugin", "pull"}, {"plugin", "rm"}, {"plugin", "list", "x"}, {"plugin", "nope"}} {
+		if code := run(args, &stdout, &stderr); code != 2 {
+			t.Errorf("%q: exit %d", args, code)
+		}
+	}
 	if code := run([]string{"nope"}, &stdout, &stderr); code != 2 {
 		t.Errorf("unknown command: exit %d", code)
 	}
@@ -85,5 +91,38 @@ func TestFmt(t *testing.T) {
 	}
 	if code := run([]string{"fmt", "-w", "--check", "-f", file}, &stdout, &stderr); code != 2 {
 		t.Errorf("-w --check: exit %d", code)
+	}
+}
+
+func TestPlugin(t *testing.T) {
+	config := t.TempDir()
+	t.Setenv("PACKER_CONFIG_DIR", config)
+	t.Setenv("PACKER_PLUGIN_PATH", "")
+	t.Setenv("PATH", "")
+	bin := filepath.Join(config, "plugins/github.com/hashicorp/qemu/packer-plugin-qemu_v1.1.8_x5.0_"+runtime.GOOS+"_"+runtime.GOARCH)
+	os.MkdirAll(filepath.Dir(bin), 0o755)
+	if err := os.WriteFile(bin, nil, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"plugin", "list"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("list: exit %d: %s", code, stderr.String())
+	}
+	if want := "NAME  VERSION  PATH\nqemu  1.1.8    " + bin + "\n"; stdout.String() != want {
+		t.Errorf("list:\n%s\nwant:\n%s", stdout.String(), want)
+	}
+
+	// Offline: an invalid reference fails before any request.
+	stdout.Reset()
+	if code := run([]string{"plugin", "pull", "Qemu"}, &stdout, &stderr); code != 1 || !strings.Contains(stderr.String(), `opendango plugin pull Qemu: invalid plugin name "Qemu"`) {
+		t.Errorf("pull Qemu: exit %d, stderr %q", code, stderr.String())
+	}
+
+	if code := run([]string{"plugin", "rm", "github.com/hashicorp/qemu@1.1.8"}, &stdout, &stderr); code != 0 || stdout.String() != "Removed "+bin+"\n" {
+		t.Errorf("rm: exit %d, stdout %q, stderr %q", code, stdout.String(), stderr.String())
+	}
+	if _, err := os.Stat(bin); !os.IsNotExist(err) {
+		t.Errorf("rm left %s: %v", bin, err)
 	}
 }
