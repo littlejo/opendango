@@ -32,16 +32,26 @@ type Plugin struct {
 func SearchDirs() []string {
 	var dirs []string
 	dirs = append(dirs, filepath.SplitList(os.Getenv("PACKER_PLUGIN_PATH"))...)
-	configDir := os.Getenv("PACKER_CONFIG_DIR")
-	if configDir == "" {
-		if home, err := os.UserHomeDir(); err == nil {
-			configDir = filepath.Join(home, ".config", "packer")
-		}
-	}
-	if configDir != "" {
-		dirs = append(dirs, filepath.Join(configDir, "plugins"))
+	if dir := PluginDir(); dir != "" {
+		dirs = append(dirs, dir)
 	}
 	return dirs
+}
+
+// PluginDir returns Packer's plugin directory, where `packer plugins
+// install` and `opendango plugin pull` put the plugins:
+// $PACKER_CONFIG_DIR/plugins, or ~/.config/packer/plugins. It is empty when
+// neither is known.
+func PluginDir() string {
+	configDir := os.Getenv("PACKER_CONFIG_DIR")
+	if configDir == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return ""
+		}
+		configDir = filepath.Join(home, ".config", "packer")
+	}
+	return filepath.Join(configDir, "plugins")
 }
 
 // Discover lists the plugin binaries of dirs (searched recursively, for the

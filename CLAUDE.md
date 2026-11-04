@@ -71,6 +71,10 @@ opendango build    [-f Dangofile] [--build-arg K=V]... [--target X] [-j N] [--no
 opendango validate [-f Dangofile] [--build-arg K=V]...
 opendango fmt      [-f Dangofile] [-w | --check]
 opendango cache prune [--older-than=DURATION] [--dry-run]
+opendango plugin pull <name|github.com/owner/name>[@version]...
+opendango plugin search <term>
+opendango plugin list
+opendango plugin rm <name|github.com/owner/name>[@version]...
 opendango version
 ```
 
@@ -78,7 +82,12 @@ opendango version
 
 `opendango fmt` (`internal/format`) prints the canonical layout, like gofmt; `-w` rewrites the file, `--check` exits with code 1 when it differs (the CI runs it on `examples/`). It only changes the layout: upper-case keywords with one space before the arguments, no trailing spaces, at most one blank line between instructions, one blank line before each `FROM` but the first (above its comments), a final newline. Arguments, continuation lines and heredoc bodies are never changed; the tests check that the formatted file parses to the same instructions and that formatting is stable.
 
-Planned: `opendango plugins list|install`.
+`opendango plugin` (`builders/packer/registry.go`) installs Packer plugins:
+- **Resolution**: a name alone is the official HashiCorp plugin of that name (the `packer-plugin-*` products of `api.releases.hashicorp.com/v1/products`), or else the only GitHub repository named `packer-plugin-<name>` that is not a fork (GitHub search API); several matches are an error that lists the sources. A source `github.com/<owner>/<name>` is the repository `<owner>/packer-plugin-<name>`, like in Packer.
+- **Download**: official plugins come from `api.releases.hashicorp.com/v1/releases/packer-plugin-<name>/<latest|version>` (they are not published on GitHub); the others from the GitHub release (`releases/latest` or `releases/tags/v<version>`), asset `packer-plugin-<name>_v<version>_x5.<n>_<os>_<arch>.zip`. The zip is checked against the release's `SHA256SUMS` (no GPG signature check: it would need a dependency); it must hold exactly one `packer-plugin-<name>_v<version>_x5.<n>_<os>_<arch>` binary, written with mode 0755 next to a `_SHA256SUM` file (its hex sha256), then `describe` must succeed, or both are removed.
+- **Layout**: Packer's plugin directory (`PluginDir`: `$PACKER_CONFIG_DIR/plugins`, or `~/.config/packer/plugins`), `github.com/<owner>/<name>/`, like `packer plugins install`: the discovery finds them, and Packer and opendango share them. An installed version is kept as is. `rm` only touches that directory.
+- **search**: the official plugins whose name contains the term, then the GitHub repositories (`packer-plugin <term> fork:true in:name`) named `packer-plugin-*` with the term in the name, the most starred first; archived repositories and forks without a star are left out.
+- `GITHUB_TOKEN` is sent to the GitHub API only (never to the downloads). Without it, the search API allows 10 requests a minute: the error says so.
 
 ## Architecture
 
@@ -91,7 +100,7 @@ internal/format/            opendango fmt: canonical layout of a Dangofile
 internal/build/             executor: runs a Plan with a Builder and a Communicator
 internal/communicator/ssh/  SSH commands and SFTP uploads
 builders/xo/                Xen Orchestra builder
-builders/packer/            Packer plugins: discovery, protocol, communicator adapter
+builders/packer/            Packer plugins: discovery, installation, protocol, communicator adapter
 ```
 
 Planned: `internal/communicator/winrm`, `internal/output` (qcow2, raw, vmdk, ova, checksums).
@@ -134,7 +143,7 @@ The Vates SDK (`xenorchestra-go-sdk`) was evaluated and not used: opendango need
 
 `FROM [--flags] packer://<plugin>-<builder> [AS name]` (`builders/packer`, `internal/build/packer.go`). Only builders are supported (no provisioners, post-processors or datasources).
 
-- **Discovery**: `packer-plugin-<name>` binaries in `PACKER_PLUGIN_PATH`, then Packer's plugin directory (`$PACKER_CONFIG_DIR` or `~/.config/packer/plugins`, searched recursively for the `packer-plugin-<name>_v<version>_x5.0_<os>_<arch>` files that `packer plugins install` writes), then `PATH`. The source type is `<plugin>-<builder>` as in Packer (`xenserver-iso`); the longest plugin name wins, then the first directory, then the highest version. `describe` checks the API version (`x5.*`) and the builder.
+- **Discovery**: `packer-plugin-<name>` binaries in `PACKER_PLUGIN_PATH`, then Packer's plugin directory (`$PACKER_CONFIG_DIR/plugins` or `~/.config/packer/plugins`, searched recursively for the `packer-plugin-<name>_v<version>_x5.0_<os>_<arch>` files that `packer plugins install` and `opendango plugin pull` write), then `PATH`. The source type is `<plugin>-<builder>` as in Packer (`xenserver-iso`); the longest plugin name wins, then the first directory, then the highest version. `describe` checks the API version (`x5.*`) and the builder.
 - **Protocol**: opendango starts `<plugin> start builder <name>` with the SDK's magic cookie, reads `5|<minor>|<network>|<address>` on stdout, connects, and uses `packer-plugin-sdk/rpc` as a client: `Prepare(settings, packer_* settings)`, then `Run(ctx, ui, hook)`. The plugin runs in the Dangofile directory: relative paths in its configuration are relative to it. Its stderr (its log) is kept, and its last lines are shown when it fails.
 - **Config**: the FROM flags, unchanged (`--vm_name=x`). Values starting with `[` or `{` are JSON (lists, maps); the others are strings, converted by the plugin (`"2"` → int). The quotes left in FROM flag values are kept (BuildKit already removed the syntactic ones). Flags whose name contains password, secret or token are masked in the log and passed as `packer_sensitive_variables`. Pass secrets with `ARG` and `--build-arg`.
 - **BOOT** is translated to `boot_command` (one entry per line, `${DANGO_HTTP_ADDR}` → `{{ .HTTPIP }}:{{ .HTTPPort }}`; setting `boot_command` as a flag is an error).
@@ -156,7 +165,7 @@ The Vates SDK (`xenorchestra-go-sdk`) was evaluated and not used: opendango need
 
 1. **MVP**: parser, `validate`, `xo://` builder, SSH, `ARG`, `ENV`, `USER`, `WORKDIR`, `RUN`, `COPY`, `REBOOT`, `OUTPUT --as=template` and XVA.
 2. ~~Multi-stage, `--target`, `BREAKPOINT`, `--on-error=ask`, parallel builds (`-j`), `fmt`~~ (done).
-3. ~~`packer://` compatibility (builders), tested with `vatesfr/packer-plugin-xenserver`~~ (done); `REBOOT` in packer:// stages, `opendango plugins list|install`.
+3. ~~`packer://` compatibility (builders), tested with `vatesfr/packer-plugin-xenserver`, `opendango plugin pull|search|list|rm`~~ (done); `REBOOT` in packer:// stages.
 4. ~~`SERVE`, `BOOT` and `FROM --iso`~~ (done); then more builders (QEMU, Proxmox, AWS, vSphere).
 5. ~~Per-stage cache~~ (done); per-instruction caching based on snapshots, if the need is confirmed.
 
@@ -181,6 +190,6 @@ The Vates SDK (`xenorchestra-go-sdk`) was evaluated and not used: opendango need
 - `mise run test:integration` reads `.env` (git-ignored, template in `.env.example`). The integration test cannot run on GitHub-hosted runners (no access to XO): it skips there.
 - Write table-driven tests. The parser and the planner are tested without any infrastructure (Dangofiles live in `testdata/`).
 - Tests that need a real XO instance use the `integration` build tag and read `XOA_ENDPOINT`, `XOA_TOKEN`, `XOA_INSECURE`, `OPENDANGO_TEST_TEMPLATE`, `OPENDANGO_TEST_USER` (optional: `OPENDANGO_TEST_POOL`, `OPENDANGO_TEST_NETWORK`, `OPENDANGO_TEST_SR`, and `OPENDANGO_TEST_ISO` for the installation from an ISO). Run them with `go test -tags integration -timeout 60m ./builders/xo/`.
-- The packer:// end-to-end test (`builders/packer/integration_test.go`) uses `vatesfr/packer-plugin-xenserver` and reads `XAPI_ENDPOINT`, `XAPI_USERNAME`, `XAPI_PASSWORD`, `PACKER_PLUGIN_PATH` and the xo:// variables (`OPENDANGO_TEST_POOL` and `OPENDANGO_TEST_NETWORK` required): the xva builder of the plugin cannot change the network of a cloned template, so the test first makes a temporary template on the DHCP network with xo://. It works around two bugs of the xva builder (v0.11.4) with `--firmware=bios` and `--installtimeout=10m`. The other packer:// tests build `builders/packer/testdata/packer-plugin-opendangotest`, a real plugin (same protocol) that runs the commands locally: no infrastructure needed.
+- The packer:// end-to-end test (`builders/packer/integration_test.go`) uses `vatesfr/packer-plugin-xenserver` and reads `XAPI_ENDPOINT`, `XAPI_USERNAME`, `XAPI_PASSWORD`, `PACKER_PLUGIN_PATH` and the xo:// variables (`OPENDANGO_TEST_POOL` and `OPENDANGO_TEST_NETWORK` required): the xva builder of the plugin cannot change the network of a cloned template, so the test first makes a temporary template on the DHCP network with xo://. It works around two bugs of the xva builder (v0.11.4) with `--firmware=bios` and `--installtimeout=10m`. `TestPluginPullEndToEnd` (same file set, `integration` tag) installs the real `qemu` (releases.hashicorp.com) and `vatesfr/xenserver` plugins in a temporary directory: it needs the network only, and does not use the GitHub search (rate-limited). The registry unit tests serve both APIs with `httptest`. The other packer:// tests build `builders/packer/testdata/packer-plugin-opendangotest`, a real plugin (same protocol) that runs the commands locally: no infrastructure needed.
 - Executor unit tests (`internal/build`) use a recording builder and either a scripted communicator or the local `/bin/sh` in a sandbox where `sudo`, `shutdown` and `reboot` are stubs. Never let a unit test run a real `shutdown`, `reboot` or write outside its temporary directories.
 - Validation errors point to the file and line: `Dangofile:12: ...`.
