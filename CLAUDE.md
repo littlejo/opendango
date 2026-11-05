@@ -6,7 +6,10 @@
 
 - Language: **Go**
 - License: **Apache-2.0**
-- First target builder: **Xen Orchestra** (REST API `/rest/v0`)
+- **Builders are Packer plugins** (`FROM plugin://<plugin>-<builder>`): opendango follows Packer's model (the plugin creates the machine and connects; the Dangofile instructions replace the provisioners) and shares Packer's plugin binaries and directory. The docs lead with plugins and stay builder-neutral; examples use a widely available plugin (`plugin://qemu`) rather than one infrastructure.
+- A table of **known builders** (`builders/packer/known.go`) gives some plugins the full feature set (`OUTPUT`, `LABEL`, multi-stage, cache): `xenorchestra` (github.com/littlejo/packer-plugin-xenorchestra) first.
+- `xo://` is a **native** Xen Orchestra builder (REST API `/rest/v0`), written first to prove the approach; `plugin://xenorchestra` is at parity with it and serves as the comparison. Removing the native core is not planned yet.
+- Long-term: an OpenTofu-style plugin registry/mirror, so that `opendango plugin pull` does not depend on HashiCorp's servers (not started).
 
 ## Design principles
 
@@ -14,9 +17,10 @@
 - Flags follow the BuildKit form `--key=value`. For standard Dockerfile instructions (`FROM`, `RUN`, `COPY`, …) they come **before** positional arguments, as BuildKit requires. Custom instructions (`CONNECT`, `OUTPUT`, …) accept them anywhere on the line (`CONNECT ssh --user=debian`): BuildKit drops their arguments, so `internal/parser` re-reads the original line.
 - Expand variables the Dockerfile way (`${VAR}`), not with Go templates.
 - `FROM` carries both the builder and the source, as a URL: `FROM <builder>://<source> [AS <name>]`.
-  - Examples: `xo://debian-12-cloud`, `plugin://xenserver-iso`.
-  - If the name contains spaces, use the UUID or `--template="..."`.
-- Secrets come from the environment, never from the Dangofile. The XO variables are the ones of [xo-gocli](https://github.com/littlejo/xo-gocli): `XOA_ENDPOINT`, `XOA_TOKEN`, `XOA_INSECURE`.
+  - Examples: `plugin://qemu`, `plugin://xenserver-iso`, `xo://debian-12-cloud`.
+  - `plugin://`, not `packer://`: Packer is a HashiCorp trademark, and the syntax must not suggest an official or affiliated product. Saying that opendango runs Packer plugins is fine in the docs.
+  - If the name contains spaces, use a flag (`--template="..."`).
+- Secrets come from the environment, never from the Dangofile: plugin flags take them through `ARG` and `--build-arg`. The XO variables are the ones of [xo-gocli](https://github.com/littlejo/xo-gocli): `XOA_ENDPOINT`, `XOA_TOKEN`, `XOA_INSECURE`.
 
 ## Instructions
 
@@ -33,9 +37,9 @@
 | `WORKDIR` | MVP | Created (`mkdir -p`) as the current `USER`, like BuildKit. A relative path is joined to the previous `WORKDIR`; without one, relative paths start from the connection user's home. |
 | `REBOOT` | MVP | Runs `reboot` as root, then reconnects until `/proc/sys/kernel/random/boot_id` changes, within the `CONNECT` timeout. |
 | `BREAKPOINT` | done | `BREAKPOINT [message]`. Needs `CONNECT`. Writes the ephemeral private key to a temporary file (mode 0600, removed when the build resumes or aborts), prints the `ssh` command for the `CONNECT` user and waits for Enter; Ctrl+C aborts the build (normal cleanup). Skipped with a message when stdin is not a terminal, so a forgotten `BREAKPOINT` does not block a CI build. |
-| `OUTPUT` | MVP | Runs after all other instructions, once the VM is stopped: XVA exports first, then the template conversion. `OUTPUT --as=template [name]` (at most one) or `OUTPUT --format=xva [--compress=zstd\|gzip] <path>` (path relative to the Dangofile directory). Without `--as=template`, the VM is destroyed at the end. Other formats are planned. In a plugin:// stage, the settings of a known builder (see *Packer plugin compatibility*), an error otherwise. |
+| `OUTPUT` | MVP | Runs after all other instructions, once the VM is stopped: XVA exports first, then the template conversion. `OUTPUT --as=template [name]` (at most one) or `OUTPUT --format=xva [--compress=zstd\|gzip] <path>` (path relative to the Dangofile directory). Without `--as=template`, the VM is destroyed at the end. Other formats are planned. In a plugin:// stage, the settings of a known builder (see *Plugins*), an error otherwise. |
 | `ADD` | done | `ADD [--chmod] [--chown] [--checksum=ALGO:HEX] <src>... <dest>`: `COPY` plus http(s) URL sources. A URL is downloaded by opendango (`net/http`, proxy from the environment) to a temporary file, then uploaded like `COPY`: mode 0600 unless `--chmod` (like Docker); the file name is the last element of the URL path when the destination is a directory (an error when it has none). `--checksum` (`sha256`, `sha384`, `sha512`) needs exactly one URL source and is checked after the download. Local sources are refused when they are a tar archive or a compressed file (gzip, bzip2, xz, zstd, by content): Docker would extract them, which is not supported yet; a directory is copied without checking its files. Git sources (`git@`, `git://`, `*.git`) are an error. Cache key: the arguments, the checksum and the local sources' content; a URL without `--checksum` makes the stage (and its children) not cached. |
-| `LABEL` | done | `LABEL key=value ...` (and the legacy `LABEL key value`); keys and values are expanded. Each label becomes the tag `key=value` of the stage's `OUTPUT --as=template` template, added after the conversion and before the cache tag; a stage with `LABEL` needs `OUTPUT --as=template`. Inherited by child stages (a key set again replaces the value, in place); intermediate templates get none. Keys cannot start with `opendango-cache` (the cache tags) nor contain `=` or a newline. Failing to set a tag fails the stage (the template stays). Part of the cache key with the template name. In a plugin:// stage, the `tags` of a known builder (see *Packer plugin compatibility*), an error otherwise. |
+| `LABEL` | done | `LABEL key=value ...` (and the legacy `LABEL key value`); keys and values are expanded. Each label becomes the tag `key=value` of the stage's `OUTPUT --as=template` template, added after the conversion and before the cache tag; a stage with `LABEL` needs `OUTPUT --as=template`. Inherited by child stages (a key set again replaces the value, in place); intermediate templates get none. Keys cannot start with `opendango-cache` (the cache tags) nor contain `=` or a newline. Failing to set a tag fails the stage (the template stays). Part of the cache key with the template name. In a plugin:// stage, the `tags` of a known builder (see *Plugins*), an error otherwise. |
 | `BOOT` | done | `BOOT <keys>`, any number, before `CONNECT` and the instructions that need the VM (after `SERVE`). Typed in order into the VM console once the VM has started (`Builder.SendKeys`), with the `boot_command` syntax of Packer (`<enter>`, `<wait10>`, `<leftCtrlOn>`…): parsed, checked and typed by `packer-plugin-sdk/bootcommand`. The parser keeps the rest of the line as written (no flags; quotes, spaces and `--` are typed). Expansion keeps the quotes (`SkipProcessQuotes`); the escape character escapes `$` and itself. `${DANGO_HTTP_ADDR}` needs `SERVE`: it is a marker (`instructions.ServeAddrMarker`) until build time. Part of the cache key, with the marker. A failed `BOOT` ends the stage (no retry). |
 | `SERVE` | done | `SERVE [--port=N] [--addr=IP] <dir>`, at most one per stage, before `CONNECT` and the instructions that need the VM. Serves `<dir>` (relative to the Dangofile directory, staying inside it) over HTTP from before the VM starts to the end of the stage; not inherited by child stages, not started on a cache hit. `RUN` gets `DANGO_HTTP_ADDR=<ip>:<port>` exported (the remote shell expands it); expanding `${DANGO_HTTP_ADDR}` anywhere else, or declaring it with `ARG`/`ENV`, is an error. The IP is `--addr`, or the builder's `LocalAddr` (xo: the local address on the route to `XOA_ENDPOINT`); the port is free unless `--port`. Listens on every interface, reads through `os.Root` (no symlink escape), logs every request. The directory content is part of the cache key. |
 | `SHELL` | done | `SHELL ["executable", "parameters"...]`, JSON form only, not expanded (like Docker). The shell form of `RUN` becomes the SHELL with the script as its last argument; the exec form is not affected. The exports and the `cd` of `WORKDIR` still run in `/bin/sh`, which then `exec`s the SHELL. Needs no connection; inherited by child stages and replayed on a cache hit, like `USER`; part of the cache key. |
@@ -54,7 +58,7 @@
 The cache works per stage: the stages are the layers. It is on by default; `opendango build --no-cache` neither reads nor fills it.
 
 - **Key** (`internal/build/cache.go`): a sha256 of the parent's key, the expanded `FROM` (builder, source or stage, flags), `CONNECT` (protocol, user, port), every step with its expanded values (`ARG`, `ENV`, `USER`, `SHELL`, `WORKDIR`, `RUN` script, `COPY` and `ADD` arguments plus the path, mode and content of every local source file, the `ADD --checksum`), the `SERVE` directory and its content (not its port or address) the `OUTPUT --as=template` name and the labels. Line numbers and layout are left out. `cacheVersion` is bumped when the key changes meaning.
-- **Not cached**: a plugin:// stage of a builder that is not in the table (see *Packer plugin compatibility*); a stage with a `BREAKPOINT`, and its descendants (manual changes are not reproducible); a stage with an `ADD` of a URL without `--checksum`, and its descendants; a stage in which `--on-error=ask` retried an instruction; a stage that does not end as a template.
+- **Not cached**: a plugin:// stage of a builder that is not in the table (see *Plugins*); a stage with a `BREAKPOINT`, and its descendants (manual changes are not reproducible); a stage with an `ADD` of a URL without `--checksum`, and its descendants; a stage in which `--on-error=ask` retried an instruction; a stage that does not end as a template.
 - **Limit**: the base template is keyed by the name written in `FROM`; a template replaced under the same name is not detected (like a Docker tag). Use `--no-cache`, or the template UUID.
 - **Storage** (XO tags): every cached template has `opendango-cache:<key>`; intermediate ones also have `opendango-cache-created:<unix time>`. The lookup is in the pool of the template the VM would start from. On a hit, the stage starts no VM: its children start from the cached template, its `XVA` outputs are exported from it (`GET /vm-templates/{id}.xva`), and the final `USER`, `SHELL`, `WORKDIR`, `ENV` are replayed from the instructions.
 - **Cleanup**: `opendango cache prune [--older-than=DURATION] [--dry-run]` deletes the intermediate cache templates (with the creation tag) only, never the `OUTPUT` templates. Nothing is deleted automatically.
@@ -99,8 +103,8 @@ internal/plan/              ARG/ENV scoping, variable expansion, stage-level rul
 internal/format/            opendango fmt: canonical layout of a Dangofile
 internal/build/             executor: runs a Plan with a Builder and a Communicator
 internal/communicator/ssh/  SSH commands and SFTP uploads
-builders/xo/                Xen Orchestra builder
-builders/packer/            Packer plugins: discovery, installation, protocol, communicator adapter
+builders/packer/            Packer plugins (plugin://): discovery, installation, protocol, known builders, data sources, post-processors
+builders/xo/                native Xen Orchestra builder (xo://)
 ```
 
 Planned: `internal/communicator/winrm`, `internal/output` (qcow2, raw, vmdk, ova, checksums).
@@ -121,25 +125,7 @@ The `Builder` interface lives in `internal/build`: `Start(cloudConfig)`, `Addres
 
 The Vates SDK (`xenorchestra-go-sdk`) was evaluated and not used: opendango needs about 8 endpoints, and the SDK covers neither the streamed XVA export nor the conversion to a template, while adding many dependencies.
 
-### Xen Orchestra builder
-
-- It goes through the XO REST API with a thin client (`builders/xo/client.go`). The route reference is served at `/rest/v0/docs` on each instance; the source is `@xen-orchestra/rest-api` in `vatesfr/xen-orchestra`.
-- The REST API can neither convert a VM to a template nor set its boot order: those calls go through JSON-RPC (`session.signIn`, then `vm.convertToTemplate`, `vm.setBootOrder` or `vm.ejectCd`, on the `/api/` WebSocket, `builders/xo/jsonrpc.go`). Switch to REST when XO adds the endpoints.
-- Templates live in the `vm-templates` collection. A default template's id is `<pool>-<uuid>`; `create_vm` takes the bare UUID. Names, ids and UUIDs are all accepted. The same template UUID can exist in several pools (XO Hub templates): `--pool` restricts the lookup, and a template found in several pools without `--pool` is an error.
-- Requirements on the template: cloud-init (for the SSH key) and the guest tools (XO only reports the IP address through them). With `--iso`, the same requirements apply to the installed system.
-- **Console** (`builders/xo/console.go`): the WebSocket `/api/consoles/{vm id}` of the XO web UI (cookie `token=<XOA_TOKEN>`, `operate` permission), which carries raw RFB to the VM's VNC console. The client does the RFB 3.8 handshake with security type None (XO checks the token) and only sends `KeyEvent` messages. One connection per `BOOT` line.
-- **`--iso`**: the VM is created stopped with `install: {method: cdrom, repository: <ISO VDI>}` and `destroy_cloud_config_vdi: false` (XO would delete the drive at most 10 minutes after the start, during the installation). XO sets the boot order to CD first, and installers cannot always eject the ISO (Debian with UEFI cannot): the builder sets it to `cd` (disk first: the empty disk is skipped until the system is installed) with the JSON-RPC `vm.setBootOrder`, then starts the VM. A template without disks (no `$VBDs`, no `template_info.disks`) gets a new disk named after the VM and needs `--disk`; otherwise `--disk` resizes the template's disk 0. After the stop, `removeInstallMedia` ejects the ISO (JSON-RPC `vm.ejectCd`; deleting the CD VBD instead breaks `vm.convertToTemplate`, which ejects from XO's cache) and deletes the `XO CloudConfigDrive` VDI.
-- Flow:
-  1. `POST /pools/{id}/actions/create_vm?sync=true` with the template, CPU, memory, disk, network, cloud-config, `boot: true` and `destroy_cloud_config_vdi: true` (the cloud-config holds the SSH key);
-  2. poll `GET /vms/{id}` until `mainIpAddress` (or an `addresses` IPv4) is set;
-  3. connect over SSH and run the instructions;
-  4. remove the ephemeral key, `shutdown -h now` from the guest, wait for `Halted`, then `clean_shutdown`, then `hard_shutdown`;
-  5. export the XVA (`GET /vms/{id}.xva?compress=`) and/or rename (`PATCH`) and convert to a template;
-  6. clean up: `DELETE /vms/{id}` unless the VM became the template. Cleanup happens **even on failure or Ctrl+C**, unless `--on-error=keep` is set or `k` is answered to `--on-error=ask`.
-- `vm.convertToTemplate` returns before XO's object cache lists the template: the builder waits for `GET /vm-templates/{id}` before reporting the output done.
-- `FROM <stage>` creates the VM from the parent's template (its UUID, in the root's pool). Once converted, `Destroy` deletes the template (`DELETE /vm-templates/{id}`), which is how temporary templates are removed. A builder that found its template in the cache (`FindCache`) never deletes it. Tags are added with `PUT /vm-templates/{id}/tags/{tag}`, then the builder waits until XO lists them (its object cache lags a moment behind the call, and the next stage may look up the cache right away). `create_vm` copies the template's tags to the VM: `Start` removes the copied cache tags (`DELETE /vms/{id}/tags/{tag}`, from the template's tags read before the creation), otherwise a cache lookup could return the child's template and `cache prune` could delete an `OUTPUT` template; a `key=value` tag (`LABEL`) replaces the copied tags of the same key.
-
-### Packer plugin compatibility
+### Plugins (`plugin://`)
 
 `FROM [--flags] plugin://<plugin>-<builder> [AS name]` (`builders/packer`, `internal/build/packer.go`). Builders run the stages; the data sources and post-processors of a known builder's plugin serve the cache and `OUTPUT --format=xva` (no provisioners: the instructions are opendango's).
 
@@ -160,6 +146,24 @@ The Vates SDK (`xenorchestra-go-sdk`) was evaluated and not used: opendango need
 - **Dependencies**: `packer-plugin-sdk` needs a go-cty with gob support: `go.mod` replaces `github.com/zclconf/go-cty` with `github.com/nywilken/go-cty v1.13.3` (MIT), like every Packer plugin (`packer-sdc fix`).
 - `opendango` silences the standard `log` package, which the SDK uses for its internal messages.
 
+### Native Xen Orchestra builder (`xo://`)
+
+- It goes through the XO REST API with a thin client (`builders/xo/client.go`). The route reference is served at `/rest/v0/docs` on each instance; the source is `@xen-orchestra/rest-api` in `vatesfr/xen-orchestra`.
+- The REST API can neither convert a VM to a template nor set its boot order: those calls go through JSON-RPC (`session.signIn`, then `vm.convertToTemplate`, `vm.setBootOrder` or `vm.ejectCd`, on the `/api/` WebSocket, `builders/xo/jsonrpc.go`). Switch to REST when XO adds the endpoints.
+- Templates live in the `vm-templates` collection. A default template's id is `<pool>-<uuid>`; `create_vm` takes the bare UUID. Names, ids and UUIDs are all accepted. The same template UUID can exist in several pools (XO Hub templates): `--pool` restricts the lookup, and a template found in several pools without `--pool` is an error.
+- Requirements on the template: cloud-init (for the SSH key) and the guest tools (XO only reports the IP address through them). With `--iso`, the same requirements apply to the installed system.
+- **Console** (`builders/xo/console.go`): the WebSocket `/api/consoles/{vm id}` of the XO web UI (cookie `token=<XOA_TOKEN>`, `operate` permission), which carries raw RFB to the VM's VNC console. The client does the RFB 3.8 handshake with security type None (XO checks the token) and only sends `KeyEvent` messages. One connection per `BOOT` line.
+- **`--iso`**: the VM is created stopped with `install: {method: cdrom, repository: <ISO VDI>}` and `destroy_cloud_config_vdi: false` (XO would delete the drive at most 10 minutes after the start, during the installation). XO sets the boot order to CD first, and installers cannot always eject the ISO (Debian with UEFI cannot): the builder sets it to `cd` (disk first: the empty disk is skipped until the system is installed) with the JSON-RPC `vm.setBootOrder`, then starts the VM. A template without disks (no `$VBDs`, no `template_info.disks`) gets a new disk named after the VM and needs `--disk`; otherwise `--disk` resizes the template's disk 0. After the stop, `removeInstallMedia` ejects the ISO (JSON-RPC `vm.ejectCd`; deleting the CD VBD instead breaks `vm.convertToTemplate`, which ejects from XO's cache) and deletes the `XO CloudConfigDrive` VDI.
+- Flow:
+  1. `POST /pools/{id}/actions/create_vm?sync=true` with the template, CPU, memory, disk, network, cloud-config, `boot: true` and `destroy_cloud_config_vdi: true` (the cloud-config holds the SSH key);
+  2. poll `GET /vms/{id}` until `mainIpAddress` (or an `addresses` IPv4) is set;
+  3. connect over SSH and run the instructions;
+  4. remove the ephemeral key, `shutdown -h now` from the guest, wait for `Halted`, then `clean_shutdown`, then `hard_shutdown`;
+  5. export the XVA (`GET /vms/{id}.xva?compress=`) and/or rename (`PATCH`) and convert to a template;
+  6. clean up: `DELETE /vms/{id}` unless the VM became the template. Cleanup happens **even on failure or Ctrl+C**, unless `--on-error=keep` is set or `k` is answered to `--on-error=ask`.
+- `vm.convertToTemplate` returns before XO's object cache lists the template: the builder waits for `GET /vm-templates/{id}` before reporting the output done.
+- `FROM <stage>` creates the VM from the parent's template (its UUID, in the root's pool). Once converted, `Destroy` deletes the template (`DELETE /vm-templates/{id}`), which is how temporary templates are removed. A builder that found its template in the cache (`FindCache`) never deletes it. Tags are added with `PUT /vm-templates/{id}/tags/{tag}`, then the builder waits until XO lists them (its object cache lags a moment behind the call, and the next stage may look up the cache right away). `create_vm` copies the template's tags to the VM: `Start` removes the copied cache tags (`DELETE /vms/{id}/tags/{tag}`, from the template's tags read before the creation), otherwise a cache lookup could return the child's template and `cache prune` could delete an `OUTPUT` template; a `key=value` tag (`LABEL`) replaces the copied tags of the same key.
+
 ## License constraints (mandatory)
 
 - **Never copy code from Packer** (`hashicorp/packer`, under BSL 1.1 since version 1.10). The core must be written from scratch.
@@ -171,7 +175,7 @@ The Vates SDK (`xenorchestra-go-sdk`) was evaluated and not used: opendango need
 1. **MVP**: parser, `validate`, `xo://` builder, SSH, `ARG`, `ENV`, `USER`, `WORKDIR`, `RUN`, `COPY`, `REBOOT`, `OUTPUT --as=template` and XVA.
 2. ~~Multi-stage, `--target`, `BREAKPOINT`, `--on-error=ask`, parallel builds (`-j`), `fmt`~~ (done).
 3. ~~`plugin://` compatibility (builders), tested with `vatesfr/packer-plugin-xenserver`, `opendango plugin pull|search|list|rm`, `REBOOT` in plugin:// stages, plugin://xenorchestra at parity with xo:// (table of known builders: OUTPUT, LABEL, multi-stage, cache)~~ (done).
-4. ~~`SERVE`, `BOOT` and `FROM --iso`~~ (done); then more builders (QEMU, Proxmox, AWS, vSphere).
+4. ~~`SERVE`, `BOOT` and `FROM --iso`~~ (done); more builders in the table of known builders (QEMU first, with a CI job on GitHub runners; Proxmox, AWS, vSphere).
 5. ~~Per-stage cache~~ (done); per-instruction caching based on snapshots, if the need is confirmed.
 
 ## Development rules
