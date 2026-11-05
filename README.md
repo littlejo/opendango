@@ -93,7 +93,7 @@ plugin attaches it as a CD, and the image is written to `dist/`.
 | `CONNECT` | `CONNECT ssh --user=debian --port=22 --timeout=10m` (or `dango.connect` in [`dango.yaml`](#plugin-settings-file-dangoyaml)) |
 | `RUN` | `RUN apt-get update`, `RUN ["systemctl", "enable", "nginx"]`, `RUN <<EOF ... EOF` |
 | `SHELL` | `SHELL ["/bin/bash", "-o", "pipefail", "-c"]` |
-| `COPY` | `COPY --chmod=0644 --chown=www-data site/ /var/www/html/` |
+| `COPY` | `COPY --chmod=0644 --chown=www-data site/ /var/www/html/`, `COPY --from=build /opt/app /usr/local/bin/` (see [Copying from another stage](#copying-from-another-stage)) |
 | `ADD` | `ADD --checksum=sha256:<hex> https://example.org/tool.tar.gz /opt/` |
 | `ENV` | `ENV DEBIAN_FRONTEND=noninteractive`, `ENV --persist APP_ENV=prod` |
 | `USER` | `USER root` (through `sudo`) |
@@ -370,6 +370,41 @@ amazon-ebs:
   failure, no new stage starts and the running ones finish. Independent
   stages may use different plugins.
 
+## Copying from another stage
+
+`COPY --from=<stage>` copies files out of an earlier stage, which can have
+nothing to do with this one (another system, another plugin), like a Docker
+build stage and its runtime image:
+
+```dockerfile
+# Ubuntu, with the compilers.
+FROM --source_ami=ami-0ubuntu0000000000 --ami_name=build plugin://amazon-ebs AS build
+CONNECT ssh --user=ubuntu
+USER root
+RUN apt-get install -y golang && go build -o /opt/app ./...
+
+# CentOS, the image to keep.
+FROM --source_ami=ami-0centos0000000000 --ami_name=app plugin://amazon-ebs AS app
+CONNECT ssh --user=ec2-user
+USER root
+COPY --from=build --chmod=0755 /opt/app /usr/local/bin/app
+RUN systemctl enable app
+```
+
+- The paths are those of the source stage's machine, from its root
+  (no patterns). A directory copies its contents, like `COPY`; `--chmod` and
+  `--chown` work the same way, and symbolic links stay links.
+- At the end of the source stage, while its machine runs, opendango fetches
+  the paths as root (`tar`, which the machine needs) to this machine; the
+  stage that copies them waits for it. `--target app` builds `build` too.
+- A stage that only feeds `COPY --from` needs no `OUTPUT`: its machine is
+  deleted once the files are fetched.
+- The fetched files are kept in a cache (`~/.cache/opendango/files`): when
+  `build` has not changed, the next build takes them from there and starts
+  no machine for it. When `build` is in the cache as a template but its
+  files are not (a `COPY --from` added later), a machine starts from the
+  template only to fetch them.
+
 ## Cache
 
 Each stage is a layer: when nothing that makes a stage has changed (its
@@ -383,7 +418,9 @@ opendango cache prune --older-than=168h  # delete the intermediate cache templat
 opendango cache prune --dry-run          # list them
 ```
 
-The cached templates are tagged `opendango-cache:<key>`. `cache prune` works
+The cached templates are tagged `opendango-cache:<key>`; the files of
+`COPY --from` are kept in `~/.cache/opendango/files/<key>`, which can be
+deleted at any time. `cache prune` works
 on Xen Orchestra (`XOA_*` variables) and never deletes the `OUTPUT`
 templates. Not cached: the stages of plugins opendango
 does not know, a stage with a `BREAKPOINT`, a stage with an `ADD` of a URL
