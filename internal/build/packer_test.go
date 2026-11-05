@@ -448,3 +448,46 @@ func TestPackerCacheKeySettings(t *testing.T) {
 		t.Error("a dango.yaml setting overridden by a FROM flag changed the key")
 	}
 }
+
+// TestPackerParentSettings checks dango.parent with a plugin that is not in
+// the table: the child starts from the parent's artifact through the
+// settings the user gave, and the parent's artifact is kept (its own flags
+// set it).
+func TestPackerParentSettings(t *testing.T) {
+	base, app, ctxDir := t.TempDir(), t.TempDir(), t.TempDir()
+	yaml := filepath.Join(ctxDir, "dango.yaml")
+	os.WriteFile(yaml, []byte("opendangotest-local:\n  dango:\n    connect: ssh --user=tester\n    parent:\n      template: ${DANGO_PARENT_FILE}\n      items: ['${DANGO_PARENT_ID}']\n"), 0o644)
+	settings, err := plan.LoadSettings(yaml)
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := fmt.Sprintf("FROM --root=%s plugin://opendangotest-local AS base\nRUN true\n\nFROM --root=%s base AS app\nRUN true\n", base, app)
+	res, err := parser.Parse(strings.NewReader(src))
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := plan.BuildSettings("Dangofile", res, nil, settings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var log syncBuffer
+	if err := Run(context.Background(), p, Options{ContextDir: ctxDir, Out: &log, FindPlugin: testPlugin(t)}); err != nil {
+		t.Fatalf("%v\n%s", err, log.String())
+	}
+	for _, want := range []string{
+		"==> app: source: template=" + filepath.Join(base, "image.qcow2") + "\n",
+		"items=" + base + " ",
+	} {
+		if !strings.Contains(log.String(), want) {
+			t.Errorf("log lacks %q:\n%s", want, log.String())
+		}
+	}
+	if _, err := os.Stat(filepath.Join(base, "artifact-destroyed")); err == nil || strings.Contains(log.String(), "Deleting") {
+		t.Errorf("the parent's artifact was deleted:\n%s", log.String())
+	}
+
+	// validate checks the child with placeholders.
+	if _, err := CheckPlugins(context.Background(), p, ctxDir, testPlugin(t)); err != nil {
+		t.Errorf("CheckPlugins: %v", err)
+	}
+}

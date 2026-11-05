@@ -67,16 +67,27 @@ func CheckPlugins(ctx context.Context, p *plan.Plan, contextDir string, find Fin
 			continue
 		}
 
-		// The parent's artifact does not exist yet: a placeholder, which
+		// The parent's artifact does not exist yet: placeholders, which
 		// Prepare does not look up.
-		parentID := ""
+		var parent *packerTemplate
+		tableSource := ""
 		if stage.Parent != nil {
-			parentID = "<template of stage " + stage.Parent.Name() + ">"
+			name := stage.Parent.Name()
+			parent = &packerTemplate{&packer.Artifact{ID: "<artifact of stage " + name + ">", Files: []string{"<file of stage " + name + ">"}}}
+			if stage.ParentFlags == nil {
+				tableSource = parent.ID()
+			}
 		}
-		settings, err := stageSettings(p.File, stage, cfg, parentID, contextDir)
+		settings, err := stageSettings(p.File, stage, cfg, tableSource, contextDir)
 		if err != nil {
 			errs = append(errs, err)
 			continue
+		}
+		if parent != nil {
+			if err := parentSettings(settings, parent, stage, cfg.Component); err != nil {
+				fail(err)
+				continue
+			}
 		}
 		pw, err := packer.Prepare(pl, builder, contextDir, settings, coreSettings(stage, cfg, Options{}))
 		for _, w := range pw {

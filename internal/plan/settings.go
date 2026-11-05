@@ -42,7 +42,23 @@ type DangoOptions struct {
 	// syntax of the instruction (ssh --user=debian); a CONNECT in the
 	// Dangofile takes precedence.
 	Connect string `yaml:"connect"`
+	// Parent are the settings of a stage that starts from another one (FROM
+	// <stage>), over the section: how the plugin starts from the parent's
+	// artifact, with ${DANGO_PARENT_ID} and ${DANGO_PARENT_FILE}. For a
+	// builder of the table, they replace its own way.
+	Parent map[string]string `yaml:"-"`
+	// ParentRaw is Parent as read.
+	ParentRaw map[string]any `yaml:"parent"`
 }
+
+// The variables of the parent's artifact in dango.parent, replaced at build
+// time: markers until then (plain text: they may sit in JSON values).
+const (
+	ParentIDVar      = "DANGO_PARENT_ID"
+	ParentFileVar    = "DANGO_PARENT_FILE"
+	ParentIDMarker   = "@@DANGO_PARENT_ID@@"
+	ParentFileMarker = "@@DANGO_PARENT_FILE@@"
+)
 
 // LoadSettings reads a dango.yaml file:
 //
@@ -75,6 +91,12 @@ func LoadSettings(path string) (*Settings, error) {
 		section := map[string]string{}
 		if v, ok := raw[source][DangoKey]; ok {
 			opts, err := dangoOptions(v)
+			if err == nil && opts.Parent != nil {
+				_, err = packer.ParseConfig(source, opts.Parent)
+				if err != nil {
+					err = fmt.Errorf("parent: %w", err)
+				}
+			}
 			if err != nil {
 				errs = append(errs, fmt.Errorf("%s: %s.%s: %w", path, source, DangoKey, err))
 			}
@@ -120,7 +142,20 @@ func dangoOptions(v any) (DangoOptions, error) {
 	dec := yaml.NewDecoder(bytes.NewReader(b))
 	dec.KnownFields(true)
 	if err := dec.Decode(&opts); err != nil && !errors.Is(err, io.EOF) {
-		return opts, fmt.Errorf("%w (options: connect)", err)
+		return opts, fmt.Errorf("%w (options: connect, parent)", err)
+	}
+	if opts.ParentRaw != nil {
+		opts.Parent = map[string]string{}
+		for name, v := range opts.ParentRaw {
+			if packer.Sensitive(name) {
+				return opts, fmt.Errorf("parent.%s: no secret in %s: use ARG and --build-arg in the FROM line", name, SettingsFile)
+			}
+			value, err := flagValue(v)
+			if err != nil {
+				return opts, fmt.Errorf("parent.%s: %w", name, err)
+			}
+			opts.Parent[name] = value
+		}
 	}
 	return opts, nil
 }

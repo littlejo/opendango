@@ -158,3 +158,96 @@ qemu:
 		}
 	}
 }
+
+// TestParentSettings checks dango.parent: a stage that starts from a stage
+// of a plugin that is not in the table gets the section, then
+// dango.parent (with the markers of the parent's artifact), then its FROM
+// flags; the variables are reserved.
+func TestParentSettings(t *testing.T) {
+	settings, err := LoadSettings(writeSettings(t, `
+qemu:
+  dango:
+    parent:
+      iso_url: ${DANGO_PARENT_FILE}
+      iso_checksum: none
+      tags: ['${DANGO_PARENT_ID}', '${REGION}']
+  iso_url: https://example.org/${REGION}.qcow2
+  iso_checksum: file:https://example.org/SHA256SUMS
+  memory: 2048
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	build := func(src string) (*Plan, error) {
+		res, err := parser.Parse(strings.NewReader(src))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return BuildSettings("Dangofile", res, nil, settings)
+	}
+	p, err := build("ARG REGION=eu\nFROM plugin://qemu AS base\nFROM --memory=4096 --iso_checksum=sha256:abc base AS app\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, want := range []map[string]string{
+		{"iso_url": "https://example.org/eu.qcow2", "iso_checksum": "file:https://example.org/SHA256SUMS", "memory": "2048"},
+		{"iso_url": ParentFileMarker, "iso_checksum": "sha256:abc", "memory": "4096", "tags": `["` + ParentIDMarker + `","eu"]`},
+	} {
+		got, err := p.Stages[i].PackerFlags()
+		if err != nil || !reflect.DeepEqual(got, want) {
+			t.Errorf("stage %d: %q, %v; want %q", i, got, err, want)
+		}
+	}
+
+	for _, tt := range []struct{ src, err string }{
+		{"ARG DANGO_PARENT_ID=x\nFROM plugin://qemu\n", "DANGO_PARENT_ID is reserved: dango.parent in dango.yaml sets it"},
+		{"FROM plugin://qemu\nENV DANGO_PARENT_FILE=x\n", "DANGO_PARENT_FILE is reserved"},
+		{"FROM plugin://other AS a\nFROM a\n", "opendango does not know how plugin://other starts from the artifact of a stage: set dango.parent in the other section"},
+	} {
+		if _, err := build(tt.src); err == nil || !strings.Contains(err.Error(), tt.err) {
+			t.Errorf("%q: err = %v, want %q", tt.src, err, tt.err)
+		}
+	}
+	if _, err := LoadSettings(writeSettings(t, "qemu:\n  dango:\n    parent:\n      ssh_password: x\n")); err == nil || !strings.Contains(err.Error(), "parent.ssh_password: no secret") {
+		t.Errorf("secret in parent: %v", err)
+	}
+}
+
+// TestExpandParent checks that dango.parent is expanded at build time with
+// the artifact, so that shell patterns apply to it (an AMI id without its
+// region), and that ${DANGO_PARENT_FILE} needs a file.
+func TestExpandParent(t *testing.T) {
+	settings, err := LoadSettings(writeSettings(t, `
+amazon-ebs:
+  dango:
+    parent:
+      source_ami: ${DANGO_PARENT_ID#*:}
+      ami_description: from ${DANGO_PARENT_ID} in ${REGION}
+  region: eu-west-3
+qemu:
+  dango:
+    parent:
+      iso_url: ${DANGO_PARENT_FILE}
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := parser.Parse(strings.NewReader("ARG REGION=eu-west-3\nFROM plugin://amazon-ebs AS base\nFROM base AS app\nFROM plugin://qemu AS q\nFROM q AS q2\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := BuildSettings("Dangofile", res, nil, settings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := p.Stages[1].ExpandParent("eu-west-3:ami-0abc", "")
+	if want := map[string]string{"source_ami": "ami-0abc", "ami_description": "from eu-west-3:ami-0abc in eu-west-3"}; err != nil || !reflect.DeepEqual(got, want) {
+		t.Errorf("amazon-ebs: %v, %v; want %v", got, err, want)
+	}
+	if _, err := p.Stages[3].ExpandParent("id", ""); err == nil || !strings.Contains(err.Error(), "qemu.dango.parent.iso_url: ${DANGO_PARENT_FILE}: the artifact of stage q has no file") {
+		t.Errorf("qemu without a file: %v", err)
+	}
+	if got, err := p.Stages[3].ExpandParent("id", "/out/q.qcow2"); err != nil || got["iso_url"] != "/out/q.qcow2" {
+		t.Errorf("qemu: %v, %v", got, err)
+	}
+}

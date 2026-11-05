@@ -255,7 +255,7 @@ func (c *comm) DownloadDir(string, string, []string) error { return errors.New("
 type artifact struct{ root string }
 
 func (a *artifact) BuilderId() string { return "opendango.test" }
-func (a *artifact) Files() []string   { return nil }
+func (a *artifact) Files() []string   { return []string{filepath.Join(a.root, "image.qcow2")} }
 func (a *artifact) Id() string        { return a.root }
 func (a *artifact) String() string    { return "local machine at " + a.root }
 func (a *artifact) State(string) any  { return nil }

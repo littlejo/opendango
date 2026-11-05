@@ -229,9 +229,12 @@ RUN apt-get update
 
 - Every stage of that source gets the section. Its `FROM` flags take
   precedence, and a `CONNECT` in the stage replaces `dango.connect`.
-- `dango` holds opendango's options: `connect`, the `CONNECT` of the stages
-  without one, with the syntax of the instruction. `SERVE` and `BOOT` may
-  still come first in the stage.
+- `dango` holds opendango's options:
+  - `connect`: the `CONNECT` of the stages without one, with the syntax of
+    the instruction. `SERVE` and `BOOT` may still come first in the stage.
+  - `parent`: the settings of a stage that starts from another one
+    (`FROM <stage>`), over the section: how the plugin starts from the
+    parent's artifact (see [Multi-stage builds](#multi-stage-builds)).
 - A stage that starts from another one inherits its parent's connection,
   and leaves out the settings of the source (`template`, `pool`, `iso` for
   xenorchestra).
@@ -305,34 +308,61 @@ These settings cannot be FROM flags. A stage without `OUTPUT --as=template`
 deletes the plugin's template once built (an XVA stays), or at the end of the
 build when other stages start from it.
 
-The other plugins: `OUTPUT` and `LABEL` are errors, no stage can start from
-theirs, and they are not cached.
+The other plugins: `OUTPUT` and `LABEL` are errors and they are not cached;
+a stage can start from theirs with `dango.parent` (see
+[Multi-stage builds](#multi-stage-builds)).
 
 ## Multi-stage builds
 
-A stage can start from the image of an earlier one, like in Docker (with
-`xo://` and the [builders opendango knows](#builders-opendango-knows)):
+A stage can start from the image of an earlier one, like in Docker:
 
 ```dockerfile
-FROM --template="Debian 13 Cloud-init (Hub)" --network=LAN plugin://xenorchestra AS golden
-CONNECT ssh --user=debian
+FROM plugin://qemu AS base
 USER root
 RUN apt-get update && apt-get -y upgrade
-OUTPUT --as=template golden-debian-13
 
-FROM --cpus=4 golden AS nginx
+FROM --vm_name=nginx.qcow2 --output_directory=dist/nginx base AS nginx
 RUN apt-get install -y nginx
-LABEL team=web
-OUTPUT --format=xva --compress=zstd nginx.xva
-OUTPUT --as=template debian-nginx
 ```
 
+The child stage builds with the plugin of its parent, from the parent's
+artifact. How the plugin starts from an artifact depends on the plugin: tell
+it in `dango.parent`, with `${DANGO_PARENT_ID}` (the id of the parent's
+artifact) and `${DANGO_PARENT_FILE}` (its first file):
+
+```yaml
+qemu:
+  dango:
+    connect: ssh --user=debian
+    parent:                           # over the section, for FROM <stage>
+      iso_url: ${DANGO_PARENT_FILE}   # the parent's image
+      iso_checksum: none
+  iso_url: https://cloud.debian.org/images/cloud/trixie/latest/debian-13-genericcloud-amd64.qcow2
+  iso_checksum: file:https://cloud.debian.org/images/cloud/trixie/latest/SHA512SUMS
+  disk_image: true
+  output_directory: dist/base
+  vm_name: base.qcow2
+
+amazon-ebs:
+  dango:
+    parent:
+      source_ami: ${DANGO_PARENT_ID#*:}   # eu-west-3:ami-0abc… → ami-0abc…
+```
+
+- The values are expanded when the child starts, with the global ARGs and
+  the parent's artifact: the shell patterns of Docker work
+  (`${DANGO_PARENT_ID#*:}`).
+- The [builders opendango knows](#builders-opendango-knows) need no
+  `dango.parent` (xenorchestra starts from the parent's template); with
+  one, it replaces their own way.
+- With another plugin, the parent's artifact is the plugin's own (a file, an
+  AMI): it is kept. With a known builder, a parent without
+  `OUTPUT --as=template` gets an intermediate template, deleted at the end of
+  the build or kept in the cache (see below).
 - A stage inherits `CONNECT`, `USER`, `SHELL`, `WORKDIR`, `ENV` and `LABEL`
   from its parent (not `ARG`).
 - All stages are built; `opendango build --target nginx` builds `nginx` and
   the stages it starts from.
-- A parent stage without `OUTPUT --as=template` gets an intermediate
-  template, kept in the cache (see below).
 - If a stage fails, the outputs and the cached templates of the stages
   already finished are kept: the next build resumes from them.
 - Stages are built one at a time. `opendango build -j 4` builds up to four

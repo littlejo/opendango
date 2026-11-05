@@ -5,6 +5,7 @@ package plan
 import (
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
 	"sort"
 	"strings"
@@ -32,6 +33,11 @@ type Stage struct {
 	// FileFlags are the settings of dango.yaml for a plugin:// stage
 	// (expanded); its FROM flags take precedence (PackerFlags).
 	FileFlags map[string]string
+	// ParentFlags are the dango.parent settings of a stage that starts from
+	// another one, over FileFlags, with markers for the parent's artifact
+	// (ExpandParent gives the values).
+	ParentFlags map[string]string
+	parent      *parentSettings
 	// Index is the position of the stage in the file, from 0.
 	Index int
 	// Parent is the stage this one starts from (FROM <stage>); nil for
@@ -103,18 +109,83 @@ func (s *Stage) PackerFlags() (map[string]string, error) {
 		return own, nil
 	}
 	k := s.known()
-	if k == nil || k.Source == "" {
-		return nil, fmt.Errorf("FROM %s: a stage cannot start from a plugin://%s stage: its artifact is the plugin's (opendango knows the artifacts of plugin://%s)", s.From.Stage, s.Root().From.Source, packer.KnownSources())
+	if s.ParentFlags == nil && (k == nil || k.Source == "") {
+		return nil, fmt.Errorf("FROM %s: opendango does not know how plugin://%s starts from the artifact of a stage: set dango.parent in the %s section of %s (with ${%s} or ${%s})", s.From.Stage, s.Root().From.Source, s.Root().From.Source, SettingsFile, ParentIDVar, ParentFileVar)
 	}
-	parent, err := s.Parent.PackerFlags()
-	if err != nil {
-		return nil, err
+	flags := own
+	if k != nil {
+		// The infrastructure flags of the parent; the source ones are an
+		// error.
+		parent, err := s.Parent.PackerFlags()
+		if err != nil {
+			return nil, err
+		}
+		if flags, err = k.StageFlags(parent, own); err != nil {
+			return nil, fmt.Errorf("FROM %s: %w", s.From.Stage, err)
+		}
 	}
-	flags, err := k.StageFlags(parent, own)
-	if err != nil {
-		return nil, fmt.Errorf("FROM %s: %w", s.From.Stage, err)
+	if s.ParentFlags != nil {
+		// dango.parent over the section, under the FROM flags.
+		merged := map[string]string{}
+		for name, v := range flags {
+			merged[name] = v
+		}
+		for name, v := range s.ParentFlags {
+			if _, ok := s.From.Flags[name]; !ok {
+				merged[name] = v
+			}
+		}
+		flags = merged
 	}
 	return flags, nil
+}
+
+// parentSettings are the dango.parent settings of a stage as read, with
+// what ExpandParent needs.
+type parentSettings struct {
+	file, source string
+	raw          map[string]string
+	global       map[string]string
+	escape       rune
+}
+
+// ExpandParent returns the dango.parent settings of a stage that starts
+// from another one, expanded with the global ARGs and the parent's
+// artifact: its id and its first file (file is empty when it has none). A
+// setting the stage sets with a FROM flag is left out. Shell patterns work
+// (${DANGO_PARENT_ID#*:}).
+func (s *Stage) ExpandParent(id, file string) (map[string]string, error) {
+	ps := s.parent
+	if ps == nil {
+		return nil, nil
+	}
+	env := envGetter{ParentIDVar: id}
+	if file != "" {
+		env[ParentFileVar] = file
+	}
+	for k, v := range ps.global {
+		env[k] = v
+	}
+	lex := shell.NewLex(ps.escape)
+	esc := string(ps.escape)
+	literal := strings.NewReplacer(esc, esc+esc, `"`, esc+`"`, "'", esc+"'")
+	out := map[string]string{}
+	for name, v := range ps.raw {
+		if _, ok := s.From.Flags[name]; ok {
+			continue
+		}
+		r, err := lex.ProcessWordWithMatches(literal.Replace(v), env)
+		if err == nil {
+			if _, ok := r.Unmatched[ParentFileVar]; ok {
+				err = fmt.Errorf("${%s}: the artifact of stage %s has no file", ParentFileVar, s.Parent.Name())
+			}
+		}
+		if err != nil {
+			return nil, fmt.Errorf("%s: %s.%s.parent.%s: %w", ps.file, ps.source, DangoKey, name, err)
+		}
+		out[name] = r.Result
+	}
+	return out, nil
 }
 
 // fileConnect reads the dango.connect option of a dango.yaml section, with
@@ -143,7 +214,7 @@ func sectionFlags(settings *Settings, source string, section map[string]string, 
 	esc := string(escape)
 	literal := strings.NewReplacer(esc, esc+esc, `"`, esc+`"`, "'", esc+"'")
 	var skip []string
-	if k := stage.known(); k != nil && stage.Parent != nil {
+	if k := stage.known(); stage != nil && k != nil && stage.Parent != nil {
 		skip = append([]string{k.Source}, k.RootOnly...)
 	}
 	flags := map[string]string{}
@@ -163,7 +234,7 @@ func sectionFlags(settings *Settings, source string, section map[string]string, 
 // known returns what opendango knows of the Packer builder of the stage,
 // nil for a native stage or a builder that is not in the table.
 func (s *Stage) known() *packer.Known {
-	if !s.IsPacker() {
+	if s == nil || !s.IsPacker() {
 		return nil
 	}
 	return packer.Lookup(s.Root().From.Source)
@@ -288,6 +359,9 @@ func BuildSettings(file string, res *parser.Result, buildArgs map[string]string,
 				if a.Name == instructions.ServeAddrVar {
 					return fail(line, reserved(a.Name))
 				}
+				if a.Name == ParentIDVar || a.Name == ParentFileVar {
+					return fail(line, fmt.Errorf("%s is reserved: dango.parent in %s sets it", a.Name, SettingsFile))
+				}
 				resolveArg(a, buildArgs, global, stage == nil)
 				usedArgs[a.Name] = true
 				if a.Set {
@@ -332,6 +406,24 @@ func BuildSettings(file string, res *parser.Result, buildArgs map[string]string,
 						return nil, err
 					}
 				}
+				// How a child starts from its parent's artifact: markers
+				// for ${DANGO_PARENT_ID} and ${DANGO_PARENT_FILE}, replaced
+				// at build time.
+				if parent := settings.Dango[source].Parent; parent != nil && stage.Parent != nil {
+					env := envGetter{ParentIDVar: ParentIDMarker, ParentFileVar: ParentFileMarker}
+					for k, v := range global {
+						env[k] = v
+					}
+					expandParent := func(word string) (string, error) {
+						r, err := lex.ProcessWordWithMatches(word, env)
+						return r.Result, err
+					}
+					if stage.ParentFlags, err = sectionFlags(settings, source, parent, nil, res.EscapeToken, expandParent); err != nil {
+						return nil, err
+					}
+					// Expanded again at build time, with the artifact.
+					stage.parent = &parentSettings{file: settings.File, source: source, raw: parent, global: maps.Clone(global), escape: res.EscapeToken}
+				}
 				// Its default CONNECT, unless the parent gives one; a
 				// CONNECT in the stage replaces it.
 				if c := settings.Dango[source].Connect; c != "" && stage.Connect == nil {
@@ -374,6 +466,9 @@ func BuildSettings(file string, res *parser.Result, buildArgs map[string]string,
 			for _, kv := range env.Vars {
 				if kv.Key == instructions.ServeAddrVar {
 					return fail(line, reserved(kv.Key))
+				}
+				if kv.Key == ParentIDVar || kv.Key == ParentFileVar {
+					return fail(line, fmt.Errorf("%s is reserved: dango.parent in %s sets it", kv.Key, SettingsFile))
 				}
 				scope[kv.Key] = kv.Value
 				stage.env[kv.Key] = kv.Value
