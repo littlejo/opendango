@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/littlejo/opendango/builders/packer"
 )
@@ -281,5 +282,23 @@ func TestPackerBreakpoint(t *testing.T) {
 	}
 	if _, err := os.Stat(m[1]); !os.IsNotExist(err) {
 		t.Errorf("key file %s left: %v", m[1], err)
+	}
+}
+
+// TestPackerReboot checks REBOOT through the plugin's communicator: reboot
+// as root, then the boot ID until it changes. The test plugin's reboot is
+// a stub that changes the boot ID.
+func TestPackerReboot(t *testing.T) {
+	root := t.TempDir()
+	src := fmt.Sprintf("FROM --root=%s plugin://opendangotest-local\nCONNECT ssh --user=tester\nRUN cat /proc/sys/kernel/random/boot_id > before\nREBOOT\nRUN cat /proc/sys/kernel/random/boot_id > after\n", root)
+	var log syncBuffer
+	if err := Run(context.Background(), mustPlan(t, src), Options{Out: &log, RetryDelay: time.Millisecond, FindPlugin: testPlugin(t)}); err != nil {
+		t.Fatalf("%v\n%s", err, log.String())
+	}
+	if before, after := readFile(t, filepath.Join(root, "before")), readFile(t, filepath.Join(root, "after")); before == after {
+		t.Errorf("boot ID %q before and after REBOOT", before)
+	}
+	if got := readFile(t, filepath.Join(root, ".stub-log")); got != "reboot \n" {
+		t.Errorf("stub log %q", got)
 	}
 }

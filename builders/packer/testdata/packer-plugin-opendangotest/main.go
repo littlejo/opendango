@@ -118,10 +118,37 @@ func (b *Builder) Run(ctx context.Context, ui packersdk.Ui, hook packersdk.Hook)
 // comm runs commands with /bin/sh in root.
 type comm struct{ root string }
 
+// stubs replace the commands a test must never run for real: sudo runs
+// its command as is, reboot and shutdown only log, and cat reads the boot
+// ID that reboot changes.
+var stubs = map[string]string{
+	"sudo":     "while [ $# -gt 0 ] && [ \"$1\" != -- ]; do shift; done\nshift\nexec \"$@\"\n",
+	"reboot":   "echo \"reboot $*\" >> \"$HOME/.stub-log\"\necho \"boot-$(date +%s%N)\" > \"$HOME/.boot_id\"\n",
+	"shutdown": "echo \"shutdown $*\" >> \"$HOME/.stub-log\"\n",
+	"cat":      "if [ \"$1\" = /proc/sys/kernel/random/boot_id ]; then [ -f \"$HOME/.boot_id\" ] || echo boot-0 > \"$HOME/.boot_id\"; exec /bin/cat \"$HOME/.boot_id\"; fi\nexec /bin/cat \"$@\"\n",
+}
+
+// writeStubs writes the stubs to <root>/.stubs, which comes first in PATH.
+func writeStubs(root string) error {
+	dir := filepath.Join(root, ".stubs")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	for name, body := range stubs {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("#!/bin/sh\n"+body), 0o755); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (c *comm) Start(ctx context.Context, rc *packersdk.RemoteCmd) error {
+	if err := writeStubs(c.root); err != nil {
+		return err
+	}
 	cmd := exec.CommandContext(ctx, "/bin/sh", "-c", rc.Command)
 	cmd.Dir = c.root
-	cmd.Env = append(os.Environ(), "HOME="+c.root)
+	cmd.Env = append(os.Environ(), "HOME="+c.root, "PATH="+filepath.Join(c.root, ".stubs")+":"+os.Getenv("PATH"))
 	cmd.Stdout, cmd.Stderr = rc.Stdout, rc.Stderr
 	if err := cmd.Start(); err != nil {
 		return err

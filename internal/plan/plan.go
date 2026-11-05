@@ -315,9 +315,6 @@ func Build(file string, res *parser.Result, buildArgs map[string]string) (*Plan,
 			if stage.Connect == nil {
 				return fail(line, needsConnect(cmd.Keyword))
 			}
-			if cmd.Keyword == "REBOOT" && stage.IsPacker() {
-				return fail(line, fmt.Errorf("REBOOT is not supported in a plugin:// stage yet: the plugin owns the connection"))
-			}
 			var (
 				step instructions.Instruction
 				err  error
