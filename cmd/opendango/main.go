@@ -596,7 +596,8 @@ func cmdInit(args []string, stdout, stderr io.Writer) int {
 	b.WriteString("# Settings of the plugin:// builders, by source type: the FROM flags of\n")
 	b.WriteString("# their stages, which take precedence over this file. Uncomment what you\n")
 	b.WriteString("# need: a setting left out keeps the plugin's default. ${VAR} is replaced\n")
-	b.WriteString("# with the global ARGs. No secrets here: use ARG and --build-arg.\n")
+	b.WriteString("# with the global ARGs. No secrets here: use ARG and --build-arg. The dango\n")
+	b.WriteString("# key holds opendango's options.\n")
 	for _, source := range sources {
 		source = strings.TrimPrefix(source, "plugin://")
 		pl, builder, err := build.FindPlugin(ctx, source)
@@ -610,8 +611,10 @@ func cmdInit(args []string, stdout, stderr io.Writer) int {
 			return 1
 		}
 		fmt.Fprintf(&b, "\n%s:\n", source)
+		b.WriteString("  # dango:                    # opendango's options, not the plugin's\n")
+		b.WriteString("  #   connect: ssh --user=debian --timeout=10m   # CONNECT of the stages without one\n")
 		if url := packer.DocURL(pl); url != "" {
-			fmt.Fprintf(&b, "  # What they do: %s\n", url)
+			fmt.Fprintf(&b, "  # What the settings do: %s\n", url)
 		}
 		width := 0
 		var lines [][2]string

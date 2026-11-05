@@ -103,3 +103,58 @@ qemu:
 		t.Errorf("warnings %q lack %q", p.Warnings, want)
 	}
 }
+
+// TestFileConnect checks the dango.connect option: the CONNECT of the
+// plugin:// stages without one (BOOT may still come after FROM), replaced by
+// a CONNECT in the stage, inherited by the children, and the errors.
+func TestFileConnect(t *testing.T) {
+	settings, err := LoadSettings(writeSettings(t, `
+qemu:
+  dango:
+    connect: ssh --user=${USER_NAME} --timeout=20m
+  memory: 2048
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	build := func(src string) (*Plan, error) {
+		res, err := parser.Parse(strings.NewReader(src))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return BuildSettings("Dangofile", res, nil, settings)
+	}
+	p, err := build("ARG USER_NAME=debian\nFROM plugin://qemu AS a\nBOOT <enter>\nRUN true\n\nFROM plugin://qemu AS b\nCONNECT ssh --user=root\nRUN true\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c := p.Stages[0].Connect; c == nil || c.User != "debian" || c.Timeout.String() != "20m0s" {
+		t.Errorf("stage a: connect %+v", c)
+	}
+	if c := p.Stages[1].Connect; c == nil || c.User != "root" {
+		t.Errorf("stage b: connect %+v", c)
+	}
+	// The option is not a plugin setting.
+	if flags, _ := p.Stages[0].PackerFlags(); flags["dango"] != "" || flags["memory"] != "2048" {
+		t.Errorf("flags %v", flags)
+	}
+	// Without the option, RUN needs a CONNECT.
+	if _, err := build("FROM plugin://other\nRUN true\n"); err == nil || !strings.Contains(err.Error(), "RUN needs a connection") {
+		t.Errorf("no connect: %v", err)
+	}
+
+	for _, tt := range []struct{ content, err string }{
+		{"qemu:\n  dango:\n    connect: ssh\n", "qemu.dango.connect: CONNECT requires --user=<user>"},
+		{"qemu:\n  dango:\n    user: root\n", "qemu.dango: yaml: unmarshal errors"},
+		{"qemu:\n  dango: x\n", "qemu.dango: yaml: unmarshal errors"},
+	} {
+		s, err := LoadSettings(writeSettings(t, tt.content))
+		if err == nil {
+			res, _ := parser.Parse(strings.NewReader("FROM plugin://qemu\n"))
+			_, err = BuildSettings("Dangofile", res, nil, s)
+		}
+		if err == nil || !strings.Contains(err.Error(), tt.err) {
+			t.Errorf("%q: err = %v, want %q", tt.content, err, tt.err)
+		}
+	}
+}

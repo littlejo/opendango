@@ -1,9 +1,11 @@
 package plan
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"sort"
 	"strconv"
@@ -25,11 +27,28 @@ type Settings struct {
 	// File is the path of the file, for the messages.
 	File     string
 	Sections map[string]map[string]string
+	// Dango are the options of opendango by source type: the "dango" key
+	// of a section, apart from the plugin settings.
+	Dango map[string]DangoOptions
+}
+
+// DangoKey is the key of a section that holds opendango's options rather
+// than plugin settings.
+const DangoKey = "dango"
+
+// DangoOptions are the options of opendango in a dango.yaml section.
+type DangoOptions struct {
+	// Connect is the default CONNECT of the stages of the source, with the
+	// syntax of the instruction (ssh --user=debian); a CONNECT in the
+	// Dangofile takes precedence.
+	Connect string `yaml:"connect"`
 }
 
 // LoadSettings reads a dango.yaml file:
 //
 //	qemu:
+//	  dango:
+//	    connect: ssh --user=debian
 //	  disk_size: 10G
 //	  memory: 2048
 //	  cd_files: [cidata/user-data, cidata/meta-data]
@@ -45,7 +64,7 @@ func LoadSettings(path string) (*Settings, error) {
 	if err := yaml.Unmarshal(data, &raw); err != nil {
 		return nil, fmt.Errorf("%s: %w", path, err)
 	}
-	s := &Settings{File: path, Sections: map[string]map[string]string{}}
+	s := &Settings{File: path, Sections: map[string]map[string]string{}, Dango: map[string]DangoOptions{}}
 	var sources []string
 	for source := range raw {
 		sources = append(sources, source)
@@ -54,7 +73,17 @@ func LoadSettings(path string) (*Settings, error) {
 	var errs []error
 	for _, source := range sources {
 		section := map[string]string{}
+		if v, ok := raw[source][DangoKey]; ok {
+			opts, err := dangoOptions(v)
+			if err != nil {
+				errs = append(errs, fmt.Errorf("%s: %s.%s: %w", path, source, DangoKey, err))
+			}
+			s.Dango[source] = opts
+		}
 		for name, v := range raw[source] {
+			if name == DangoKey {
+				continue
+			}
 			if packer.Sensitive(name) {
 				errs = append(errs, fmt.Errorf("%s: %s.%s: no secret in %s: use ARG and --build-arg in the FROM line", path, source, name, SettingsFile))
 				continue
@@ -78,6 +107,22 @@ func LoadSettings(path string) (*Settings, error) {
 		return nil, err
 	}
 	return s, nil
+}
+
+// dangoOptions reads the "dango" key of a section; an unknown option is an
+// error.
+func dangoOptions(v any) (DangoOptions, error) {
+	var opts DangoOptions
+	b, err := yaml.Marshal(v)
+	if err != nil {
+		return opts, err
+	}
+	dec := yaml.NewDecoder(bytes.NewReader(b))
+	dec.KnownFields(true)
+	if err := dec.Decode(&opts); err != nil && !errors.Is(err, io.EOF) {
+		return opts, fmt.Errorf("%w (options: connect)", err)
+	}
+	return opts, nil
 }
 
 // flagValue writes a YAML value as a FROM flag would give it.

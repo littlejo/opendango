@@ -6,19 +6,34 @@ any of the builders Packer users already have (QEMU, Proxmox, vSphere, AWS,
 Azure, Xen Orchestra…).
 
 ```dockerfile
-FROM --iso_url=https://cloud.debian.org/images/cloud/trixie/latest/debian-13-genericcloud-amd64.qcow2 \
-     --iso_checksum=file:https://cloud.debian.org/images/cloud/trixie/latest/SHA512SUMS \
-     --disk_image=true --format=qcow2 --disk_size=10G --memory=2048 --headless=true \
-     --cd_files='["cidata/user-data", "cidata/meta-data"]' --cd_label=cidata \
-     --ssh_private_key_file=key --shutdown_command="sudo shutdown -P now" \
-     --output_directory=dist --vm_name=nginx.qcow2 plugin://qemu AS nginx
-CONNECT ssh --user=debian
-
+FROM plugin://qemu AS nginx
 USER root
 RUN apt-get update && apt-get install -y nginx
 COPY --chmod=0644 site/ /var/www/html/
 REBOOT
 RUN systemctl is-active nginx
+```
+
+The machine is described next to it, in `dango.yaml`: the settings of the
+plugin, by their Packer names, and how opendango connects to the machine.
+
+```yaml
+qemu:
+  dango:
+    connect: ssh --user=debian
+  iso_url: https://cloud.debian.org/images/cloud/trixie/latest/debian-13-genericcloud-amd64.qcow2
+  iso_checksum: file:https://cloud.debian.org/images/cloud/trixie/latest/SHA512SUMS
+  disk_image: true
+  disk_size: 10G
+  memory: 2048
+  headless: true
+  cd_files: [cidata/user-data, cidata/meta-data]
+  cd_label: cidata
+  ssh_private_key_file: key
+  shutdown_command: sudo shutdown -P now
+  format: qcow2
+  output_directory: dist
+  vm_name: nginx.qcow2
 ```
 
 > Status: early.
@@ -28,9 +43,10 @@ RUN systemctl is-active nginx
 opendango follows the model of Packer, with the Dangofile instead of HCL and
 its instructions instead of provisioners:
 
-1. `FROM plugin://<plugin>-<builder>` starts the builder of a Packer plugin,
-   with the `FROM` flags as its settings. The plugin creates and boots the
-   machine and connects to it (`CONNECT`).
+1. `FROM plugin://<plugin>-<builder>` starts the builder of a Packer plugin.
+   Its settings come from `dango.yaml` and from the `FROM` flags
+   (`FROM --memory=4096 plugin://qemu`), which take precedence. The plugin
+   creates and boots the machine and connects to it.
 2. opendango runs the instructions (`RUN`, `COPY`, `USER`, `REBOOT`…)
    through the plugin's connection.
 3. The plugin shuts the machine down and produces its artifact: an image
@@ -50,13 +66,18 @@ or:
 go install github.com/littlejo/opendango/cmd/opendango@latest
 ```
 
-Install the plugin of the builder, then build:
+Then, next to the Dangofile:
 
 ```sh
-opendango plugin pull qemu    # the official QEMU plugin
-opendango validate            # check the Dangofile without building
+opendango plugin pull qemu    # install the official QEMU plugin
+opendango init                # write dango.yaml with every setting of its plugins, commented out
+$EDITOR dango.yaml            # uncomment and fill what you need
+opendango validate            # the plugin checks the settings, without building
 opendango build
 ```
+
+`opendango plugin describe qemu --search disk` lists the settings, and links
+to the plugin's documentation, which tells what they do.
 
 For the example above, `key` is an SSH key pair (`ssh-keygen -t ed25519 -f
 key`) and `cidata/` a cloud-init seed: `meta-data` with an `instance-id`,
@@ -69,7 +90,7 @@ plugin attaches it as a CD, and the image is written to `dist/`.
 |---|---|
 | `ARG` | `ARG DEBIAN=13` (before `FROM`: only usable in `FROM`, as in Docker) |
 | `FROM` | `FROM --memory=2048 plugin://qemu AS golden`, `FROM golden AS app` (see [Multi-stage builds](#multi-stage-builds)) |
-| `CONNECT` | `CONNECT ssh --user=debian --port=22 --timeout=10m` |
+| `CONNECT` | `CONNECT ssh --user=debian --port=22 --timeout=10m` (or `dango.connect` in [`dango.yaml`](#plugin-settings-file-dangoyaml)) |
 | `RUN` | `RUN apt-get update`, `RUN ["systemctl", "enable", "nginx"]`, `RUN <<EOF ... EOF` |
 | `SHELL` | `SHELL ["/bin/bash", "-o", "pipefail", "-c"]` |
 | `COPY` | `COPY --chmod=0644 --chown=www-data site/ /var/www/html/` |
@@ -85,7 +106,8 @@ plugin attaches it as a CD, and the image is written to `dist/`.
 | `OUTPUT` | `OUTPUT --as=template "name"`, `OUTPUT --format=xva --compress=zstd ./out.xva` |
 
 `CONNECT` is required before the instructions that need the machine (`RUN`,
-`COPY`, `ADD`, `WORKDIR`, `REBOOT`, `BREAKPOINT`, `ENV --persist`).
+`COPY`, `ADD`, `WORKDIR`, `REBOOT`, `BREAKPOINT`, `ENV --persist`), unless
+`dango.yaml` gives it (`dango.connect`) or the parent stage has one.
 
 `ENV` values only exist during the build; add `--persist` to write them to
 `/etc/environment`. `COPY` sources and `OUTPUT` paths are relative to the
@@ -143,8 +165,8 @@ plugin. The source is the Packer source type: `qemu`, `proxmox-iso`,
 - The flags are the builder's settings, by their Packer names. Lists and maps
   are JSON (`--network_names='["LAN"]'`). Paths are relative to the Dangofile
   directory.
-- Settings that rarely change can go to a `dango.yaml` file next to the
-  Dangofile (see [Plugin settings file](#plugin-settings-file-dangoyaml)).
+- They can also go to a `dango.yaml` file next to the Dangofile, which
+  the `FROM` flags override (see [Plugin settings file](#plugin-settings-file-dangoyaml)).
 - `opendango plugin describe <source>` lists them, with their types
   (`--search disk` filters them) and a link to the plugin's documentation,
   which tells what they do. `opendango validate` checks them with the
@@ -152,7 +174,8 @@ plugin. The source is the Packer source type: `qemu`, `proxmox-iso`,
   (`plugin://qemu has no setting "disk_sise", did you mean disk_size?`),
   and the plugin reports what is missing or invalid, without creating
   anything (`--offline` skips this).
-- `CONNECT` sets `communicator`, `ssh_username`, `ssh_port` and `ssh_timeout`.
+- `CONNECT` (or `dango.connect`) sets `communicator`, `ssh_username`,
+  `ssh_port` and `ssh_timeout`.
   The credentials (`ssh_password`, `ssh_private_key_file`…) are flags, or the
   plugin's own temporary key when it makes one.
 - Secrets come from the environment: pass them with `ARG` and
@@ -185,34 +208,33 @@ opendango build --build-arg XAPI_PASSWORD="$XAPI_PASSWORD"
 
 ### Plugin settings file (`dango.yaml`)
 
-`dango.yaml`, next to the Dangofile (or `--config=<file>`), holds plugin
-settings by source type, so that the `FROM` line keeps what matters:
+`dango.yaml`, next to the Dangofile (or `--config=<file>`), holds the
+settings by source type, so that the Dangofile keeps the build steps:
 
 ```yaml
 qemu:
+  dango:                       # opendango's options, not the plugin's
+    connect: ssh --user=debian --timeout=15m
   iso_url: https://cloud.debian.org/images/cloud/${DEBIAN}/latest/debian-13-genericcloud-amd64.qcow2
-  iso_checksum: file:https://cloud.debian.org/images/cloud/${DEBIAN}/latest/SHA512SUMS
-  disk_image: true
-  format: qcow2
   disk_size: 10G
-  headless: true
   cd_files: [cidata/user-data, cidata/meta-data]
-  cd_label: cidata
-  ssh_private_key_file: key
-  shutdown_command: sudo shutdown -P now
-  output_directory: dist
 ```
 
 ```dockerfile
 ARG DEBIAN=trixie
 
-FROM --memory=2048 --vm_name=nginx.qcow2 plugin://qemu AS nginx
-CONNECT ssh --user=debian
+FROM --memory=4096 --vm_name=nginx.qcow2 plugin://qemu AS nginx
+RUN apt-get update
 ```
 
-- Every stage of that source gets the section; its `FROM` flags take
-  precedence. A stage that starts from another one leaves out the settings
-  of the source (`template`, `pool`, `iso` for xenorchestra).
+- Every stage of that source gets the section. Its `FROM` flags take
+  precedence, and a `CONNECT` in the stage replaces `dango.connect`.
+- `dango` holds opendango's options: `connect`, the `CONNECT` of the stages
+  without one, with the syntax of the instruction. `SERVE` and `BOOT` may
+  still come first in the stage.
+- A stage that starts from another one inherits its parent's connection,
+  and leaves out the settings of the source (`template`, `pool`, `iso` for
+  xenorchestra).
 - `${VAR}` is replaced with the global ARGs, like in `FROM`. Lists and maps
   are YAML.
 - No secrets: settings named `*password*`, `*secret*` or `*token*` are
@@ -227,7 +249,9 @@ existing file.
 
 ```yaml
 qemu:
-  # What they do: https://developer.hashicorp.com/packer/integrations/hashicorp/qemu
+  # dango:                    # opendango's options, not the plugin's
+  #   connect: ssh --user=debian --timeout=10m   # CONNECT of the stages without one
+  # What the settings do: https://developer.hashicorp.com/packer/integrations/hashicorp/qemu
   # accelerator: ""                      # string
   # cd_files: []                         # list of string
   # cpus: 0                              # number

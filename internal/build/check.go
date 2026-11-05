@@ -57,6 +57,9 @@ func CheckPlugins(ctx context.Context, p *plan.Plan, contextDir string, find Fin
 			}
 			specs[cfg.Component] = names
 		}
+		if names[plan.DangoKey] {
+			warnings = append(warnings, fmt.Sprintf("stage %s: plugin://%s has a setting %q, which %s keeps for opendango's options: set it as a FROM flag", stage.Name(), cfg.Component, plan.DangoKey, plan.SettingsFile))
+		}
 		if unknown := unknownFlags(cfg.Component, flags, stage, names); len(unknown) > 0 {
 			for _, err := range unknown {
 				fail(err)

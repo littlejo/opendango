@@ -3,6 +3,7 @@
 package plan
 
 import (
+	"errors"
 	"fmt"
 	"slices"
 	"sort"
@@ -114,6 +115,23 @@ func (s *Stage) PackerFlags() (map[string]string, error) {
 		return nil, fmt.Errorf("FROM %s: %w", s.From.Stage, err)
 	}
 	return flags, nil
+}
+
+// fileConnect reads the dango.connect option of a dango.yaml section, with
+// the syntax of the CONNECT instruction.
+func fileConnect(settings *Settings, source, value string, expand func(string) (string, error)) (*instructions.Connect, error) {
+	res, err := parser.Parse(strings.NewReader("CONNECT " + value + "\n"))
+	if err == nil && len(res.Commands) != 1 {
+		err = errors.New("expected one line")
+	}
+	var c *instructions.Connect
+	if err == nil {
+		c, err = instructions.ParseConnect(res.Commands[0], expand)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("%s: %s.%s.connect: %w", settings.File, source, DangoKey, err)
+	}
+	return c, nil
 }
 
 // sectionFlags returns the dango.yaml settings of a plugin:// stage, with
@@ -314,6 +332,13 @@ func BuildSettings(file string, res *parser.Result, buildArgs map[string]string,
 						return nil, err
 					}
 				}
+				// Its default CONNECT, unless the parent gives one; a
+				// CONNECT in the stage replaces it.
+				if c := settings.Dango[source].Connect; c != "" && stage.Connect == nil {
+					if stage.Connect, err = fileConnect(settings, source, c, expand); err != nil {
+						return nil, err
+					}
+				}
 			}
 			if err := checkBuilder(stage); err != nil {
 				return fail(line, err)
@@ -343,7 +368,7 @@ func BuildSettings(file string, res *parser.Result, buildArgs map[string]string,
 				return fail(line, err)
 			}
 			if env.Persist && stage.Connect == nil {
-				return fail(line, needsConnect("ENV --persist"))
+				return fail(line, needsConnect("ENV --persist", stage))
 			}
 			stage.usesVM = stage.usesVM || env.Persist
 			for _, kv := range env.Vars {
@@ -371,7 +396,7 @@ func BuildSettings(file string, res *parser.Result, buildArgs map[string]string,
 
 		case "WORKDIR", "RUN", "COPY", "ADD", "REBOOT", "BREAKPOINT":
 			if stage.Connect == nil {
-				return fail(line, needsConnect(cmd.Keyword))
+				return fail(line, needsConnect(cmd.Keyword, stage))
 			}
 			var (
 				step instructions.Instruction
@@ -586,7 +611,10 @@ func reserved(name string) error {
 	return fmt.Errorf("%s is reserved: SERVE sets it", name)
 }
 
-func needsConnect(what string) error {
+func needsConnect(what string, stage *Stage) error {
+	if stage.IsPacker() {
+		return fmt.Errorf("%s needs a connection to the VM: add `CONNECT ssh --user=<user>` before it, or set dango.connect in the %s section of %s", what, stage.Root().From.Source, SettingsFile)
+	}
 	return fmt.Errorf("%s needs a connection to the VM: add `CONNECT ssh --user=<user>` before it", what)
 }
 
