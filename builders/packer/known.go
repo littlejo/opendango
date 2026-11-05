@@ -21,6 +21,15 @@ type Known struct {
 	// The builder exports one XVA at most.
 	XVAOutput, XVACompress string
 
+	// HTTPIP is the setting that SERVE --addr sets: the address the
+	// machine reaches the plugin's HTTP server at. Empty when the builder
+	// has none (SERVE --addr is then an error).
+	HTTPIP string
+	// BootWait is the setting of the wait before boot_command: with BOOT,
+	// opendango sets it to none, as a native stage types the keys once the
+	// VM has started (a <waitX> in the keys waits).
+	BootWait string
+
 	// Source is the setting that FROM <stage> sets to the id of the parent
 	// stage's artifact, empty when a stage cannot start from this builder's
 	// artifact.
@@ -42,6 +51,8 @@ var known = map[string]*Known{
 		Tags:         "tags",
 		XVAOutput:    "xva_output",
 		XVACompress:  "xva_compress",
+		HTTPIP:       "http_ip",
+		BootWait:     "boot_wait",
 		Source:       "template",
 		RootOnly:     []string{"template", "pool", "iso"},
 		Inherited:    []string{"endpoint", "token", "insecure"},
@@ -77,6 +88,12 @@ func (k *Known) settings() map[string]string {
 	}
 	if k.XVACompress != "" {
 		m[k.XVACompress] = "OUTPUT --format=xva --compress=<algorithm>"
+	}
+	if k.HTTPIP != "" {
+		m[k.HTTPIP] = "SERVE --addr=<ip>"
+	}
+	if k.BootWait != "" {
+		m[k.BootWait] = "BOOT (a <waitX> in the keys)"
 	}
 	return m
 }

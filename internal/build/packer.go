@@ -119,6 +119,12 @@ func runPackerStage(ctx context.Context, p *plan.Plan, stage *plan.Stage, parent
 		if parent != nil {
 			settings[k.Source] = parent.artifact.ID()
 		}
+		if sv := stage.Serve; sv != nil && sv.Addr != "" {
+			settings[k.HTTPIP] = sv.Addr
+		}
+		if len(stage.Boot) > 0 && k.BootWait != "" {
+			settings[k.BootWait] = "-1s"
+		}
 		if stage.TemplateOutput() == nil {
 			if needed {
 				intermediate = true
@@ -160,10 +166,25 @@ func runPackerStage(ctx context.Context, p *plan.Plan, stage *plan.Stage, parent
 		Ui:              ui,
 		DestroyArtifact: destroy,
 		KeepPlugin:      intermediate,
-		Provision: func(ctx context.Context, comm *packer.Comm) error {
+		Provision: func(ctx context.Context, comm *packer.Comm, data packer.HookData) error {
 			e.say("Running the instructions")
 			e.comm = comm
 			defer func() { e.comm = nil }()
+			// BREAKPOINT and --on-error=ask print the ssh command of the
+			// plugin's connection while it runs the instructions; the
+			// plugin removes its key afterwards.
+			if data.Host != "" {
+				e.host, e.plugin = data.Host, &data
+				defer func() { e.host, e.plugin = "", nil }()
+			}
+			// DANGO_HTTP_ADDR is the address of the plugin's server, when
+			// the plugin tells it.
+			if stage.Serve != nil {
+				if data.HTTPAddr == "" {
+					e.say("Warning: the plugin does not tell the address of its HTTP server: DANGO_HTTP_ADDR is not set in RUN")
+				}
+				e.serveAddr = data.HTTPAddr
+			}
 			return e.steps(ctx, p, stage, opts)
 		},
 	}

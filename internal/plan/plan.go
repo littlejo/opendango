@@ -353,8 +353,8 @@ func Build(file string, res *parser.Result, buildArgs map[string]string) (*Plan,
 			if err != nil {
 				return fail(line, err)
 			}
-			if sv.Addr != "" && stage.IsPacker() {
-				return fail(line, fmt.Errorf("SERVE --addr is not supported in a plugin:// stage: the plugin serves the directory and chooses its address"))
+			if k := stage.known(); sv.Addr != "" && stage.IsPacker() && (k == nil || k.HTTPIP == "") {
+				return fail(line, fmt.Errorf("SERVE --addr is not supported in a plugin://%s stage: the plugin serves the directory and chooses its address", stage.Root().From.Source))
 			}
 			stage.Serve = sv
 

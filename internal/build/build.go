@@ -27,6 +27,7 @@ import (
 
 	gossh "golang.org/x/crypto/ssh"
 
+	"github.com/littlejo/opendango/builders/packer"
 	"github.com/littlejo/opendango/builders/xo"
 	sshcomm "github.com/littlejo/opendango/internal/communicator/ssh"
 	"github.com/littlejo/opendango/internal/instructions"
@@ -624,7 +625,10 @@ type executor struct {
 	out  io.Writer
 	b    Builder
 	// artifact is the artifact of a plugin:// stage (b is nil).
-	artifact   *packerTemplate
+	artifact *packerTemplate
+	// plugin is the connection the plugin told while it runs the
+	// instructions of a plugin:// stage (its host is in host).
+	plugin     *packer.HookData
 	comm       Communicator
 	connect    *instructions.Connect
 	dial       DialFunc
@@ -1115,8 +1119,8 @@ func (e *executor) breakpoint(ctx context.Context, s *instructions.Breakpoint) e
 	e.console.mu.Lock()
 	defer e.console.mu.Unlock()
 	e.say("%s", title)
-	if e.key == nil {
-		// plugin://: no ephemeral key, the FROM flags hold the credentials.
+	if e.host == "" {
+		// plugin://, when the plugin does not tell its connection.
 		e.say("Build paused. The plugin owns the connection: log in with the credentials of the FROM flags")
 	} else {
 		e.say("Build paused. Connect to the VM with:")
@@ -1134,19 +1138,45 @@ func (e *executor) breakpoint(ctx context.Context, s *instructions.Breakpoint) e
 	return nil
 }
 
-// printSSH writes the ephemeral key to a temporary file and prints the ssh
-// command that uses it. The returned function removes the file.
+// printSSH writes the private key of the connection (the ephemeral key, or
+// the plugin's) to a temporary file and prints the ssh command that uses
+// it. The returned function removes the file. Without a key (a plugin
+// connecting with a password), the command has no -i.
 func (e *executor) printSSH() (remove func(), err error) {
-	block, err := gossh.MarshalPrivateKey(e.key, e.keyComment)
-	if err != nil {
-		return nil, err
+	port, user := e.connect.Port, e.connect.User
+	if e.plugin != nil {
+		if e.plugin.Port != 0 {
+			port = e.plugin.Port
+		}
+		if e.plugin.User != "" {
+			user = e.plugin.User
+		}
+	}
+	var keyPEM []byte
+	switch {
+	case e.key != nil:
+		block, err := gossh.MarshalPrivateKey(e.key, e.keyComment)
+		if err != nil {
+			return nil, err
+		}
+		keyPEM = pem.EncodeToMemory(block)
+	case e.plugin != nil && e.plugin.SSHPrivateKey != "":
+		keyPEM = []byte(e.plugin.SSHPrivateKey)
+	default:
+		fmt.Fprintf(e.out, "    ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -p %d %s@%s\n", port, user, e.host)
+		return func() {}, nil
 	}
 	f, err := os.CreateTemp("", "opendango-key-")
 	if err != nil {
 		return nil, err
 	}
 	remove = func() { os.Remove(f.Name()) }
-	if _, err := f.Write(pem.EncodeToMemory(block)); err != nil {
+	if err := f.Chmod(0o600); err != nil {
+		f.Close()
+		remove()
+		return nil, err
+	}
+	if _, err := f.Write(keyPEM); err != nil {
 		f.Close()
 		remove()
 		return nil, err
@@ -1156,7 +1186,7 @@ func (e *executor) printSSH() (remove func(), err error) {
 		return nil, err
 	}
 	fmt.Fprintf(e.out, "    ssh -i %s -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -p %d %s@%s\n",
-		f.Name(), e.connect.Port, e.connect.User, e.host)
+		f.Name(), port, user, e.host)
 	return remove, nil
 }
 

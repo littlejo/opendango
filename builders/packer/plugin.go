@@ -37,8 +37,9 @@ type Build struct {
 	Configs []map[string]any
 	// Ui receives the plugin messages and answers its questions.
 	Ui packersdk.Ui
-	// Provision runs the instructions with the plugin's communicator.
-	Provision func(ctx context.Context, comm *Comm) error
+	// Provision runs the instructions with the plugin's communicator and
+	// what the plugin told about the machine.
+	Provision func(ctx context.Context, comm *Comm, data HookData) error
 	// DestroyArtifact deletes the artifact once built (the stage has no
 	// OUTPUT --as=template): only its files, such as an XVA, stay.
 	DestroyArtifact bool
@@ -254,13 +255,63 @@ func (t *tail) String() string {
 	return "\nlast lines of the plugin log:\n  " + strings.Join(t.lines, "\n  ")
 }
 
+// HookData is what the plugin passes to the provision hook (the generated
+// data of Packer), as far as opendango uses it. A field is empty when the
+// plugin does not set it.
+type HookData struct {
+	// HTTPAddr is the address of the plugin's HTTP server (ip:port), which
+	// the machine reaches (PackerHTTPAddr).
+	HTTPAddr string
+	// Host, Port and User are those of the SSH connection.
+	Host string
+	Port int
+	User string
+	// SSHPrivateKey is the private key of the connection (PEM), the
+	// temporary one or the one of ssh_private_key_file.
+	SSHPrivateKey string
+}
+
+// hookData reads the map the plugin passes. The SDK puts placeholders
+// starting with ERR_ for what the builder does not implement.
+func hookData(raw any) HookData {
+	// The RPC (msgpack) turns map[string]any into map[any]any.
+	m, _ := raw.(map[string]any)
+	if mm, ok := raw.(map[any]any); ok {
+		m = map[string]any{}
+		for k, v := range mm {
+			if ks, ok := k.(string); ok {
+				m[ks] = v
+			}
+		}
+	}
+	str := func(k string) string {
+		s, _ := m[k].(string)
+		if strings.HasPrefix(s, "ERR_") {
+			return ""
+		}
+		return s
+	}
+	d := HookData{HTTPAddr: str("PackerHTTPAddr"), Host: str("Host"), User: str("User"), SSHPrivateKey: str("SSHPrivateKey")}
+	switch p := m["Port"].(type) {
+	case int:
+		d.Port = p
+	case int64:
+		d.Port = int(p)
+	case uint64:
+		d.Port = int(p)
+	case float64:
+		d.Port = int(p)
+	}
+	return d
+}
+
 // hook runs Provision on the provision hook and ignores the others.
 type hook struct {
-	provision func(ctx context.Context, comm *Comm) error
+	provision func(ctx context.Context, comm *Comm, data HookData) error
 	err       error
 }
 
-func (h *hook) Run(ctx context.Context, name string, _ packersdk.Ui, comm packersdk.Communicator, _ any) error {
+func (h *hook) Run(ctx context.Context, name string, _ packersdk.Ui, comm packersdk.Communicator, data any) error {
 	if name != packersdk.HookProvision {
 		return nil
 	}
@@ -268,7 +319,7 @@ func (h *hook) Run(ctx context.Context, name string, _ packersdk.Ui, comm packer
 		h.err = errors.New("plugin: no communicator: CONNECT is required to run instructions")
 		return h.err
 	}
-	h.err = h.provision(ctx, &Comm{c: comm})
+	h.err = h.provision(ctx, &Comm{c: comm}, hookData(data))
 	return h.err
 }
 

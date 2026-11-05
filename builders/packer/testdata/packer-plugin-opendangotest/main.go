@@ -53,7 +53,9 @@ type Config struct {
 	XVACompress  string   `mapstructure:"xva_compress"`
 	// Source is the parent's artifact of a stage that starts from another
 	// one (FROM <stage>).
-	Source string `mapstructure:"template"`
+	Source   string `mapstructure:"template"`
+	HTTPIP   string `mapstructure:"http_ip"`
+	BootWait string `mapstructure:"boot_wait"`
 }
 
 type Builder struct{ config Config }
@@ -78,6 +80,9 @@ func (b *Builder) Run(ctx context.Context, ui packersdk.Ui, hook packersdk.Hook)
 	for _, keys := range c.BootCommand {
 		ui.Say("boot_command: " + keys)
 	}
+	if c.BootWait != "" {
+		ui.Say("boot_wait: " + c.BootWait)
+	}
 	if c.Source != "" {
 		ui.Say("source: template=" + c.Source)
 	}
@@ -87,7 +92,17 @@ func (b *Builder) Run(ctx context.Context, ui packersdk.Ui, hook packersdk.Hook)
 	if c.HTTPDir != "" {
 		ui.Say(fmt.Sprintf("http: dir=%s ports=%d-%d", c.HTTPDir, c.HTTPPortMin, c.HTTPPortMax))
 	}
-	if err := hook.Run(ctx, packersdk.HookProvision, ui, &comm{root: c.Root}, nil); err != nil {
+	// The generated data of a real builder; PackerHTTPAddr only with an
+	// HTTP server, like the SDK's.
+	data := map[string]any{"Host": "127.0.0.1", "Port": c.SSHPort, "User": c.SSHUsername, "SSHPrivateKey": "PRIVATE KEY", "PackerHTTPAddr": "ERR_HTTP_ADDR_NOT_IMPLEMENTED_BY_BUILDER"}
+	if c.HTTPDir != "" {
+		ip := "192.0.2.9"
+		if c.HTTPIP != "" {
+			ip = c.HTTPIP
+		}
+		data["PackerHTTPAddr"] = ip + ":8080"
+	}
+	if err := hook.Run(ctx, packersdk.HookProvision, ui, &comm{root: c.Root}, data); err != nil {
 		if c.PackerOnError == "ask" {
 			answer, _ := ui.Ask("[c] Clean up and exit, [a] abort without cleanup, or [r] retry step?")
 			ui.Say("cleanup answer: " + answer)
