@@ -96,6 +96,9 @@ type Options struct {
 	// FindPostProcessor finds the plugin of the post-processors
 	// (OUTPUT plugin://...); FindPostProcessor when nil.
 	FindPostProcessor FindPluginFunc
+	// FindProvisioner finds the plugin of the provisioners (PROVISION);
+	// FindProvisioner when nil.
+	FindProvisioner FindPluginFunc
 	// filesDir holds the files fetched for COPY --from during the build
 	// (set by Run).
 	filesDir string
@@ -182,6 +185,9 @@ func Run(ctx context.Context, p *plan.Plan, opts Options) (err error) {
 	}
 	if opts.FindPostProcessor == nil {
 		opts.FindPostProcessor = FindPostProcessor
+	}
+	if opts.FindProvisioner == nil {
+		opts.FindProvisioner = FindProvisioner
 	}
 	opts.manifests = newManifests()
 	if opts.NewBuilder == nil {
@@ -415,6 +421,9 @@ func runStage(ctx context.Context, p *plan.Plan, stage *plan.Stage, parent *exec
 		fetchRoot:  filepath.Join(opts.filesDir, fmt.Sprint(stage.Index)),
 		fetched:    from,
 		files:      filesCache(opts.FilesCache),
+
+		findProvisioner: opts.FindProvisioner,
+		builderType:     stage.Root().From.Builder,
 	}
 	if key != "" && len(stage.Fetch) > 0 {
 		e.filesKey = key
@@ -763,6 +772,13 @@ type executor struct {
 	// they are not kept.
 	filesKey string
 	files    filesCache
+	// findProvisioner finds the plugins of PROVISION; builderType is the
+	// stage's (xo, or the plugin's source type), for them.
+	findProvisioner FindPluginFunc
+	builderType     string
+	// pluginData is the plugin's data on the connection (plugin:// stage),
+	// for PROVISION.
+	pluginData map[string]any
 	// answer is the answer to --on-error=ask that ended the stage, when
 	// answered is true.
 	answer   choice
@@ -895,6 +911,12 @@ func (e *executor) step(ctx context.Context, step instructions.Instruction) erro
 		e.say("REBOOT")
 		if err := e.reboot(ctx); err != nil {
 			return fmt.Errorf("REBOOT: %w", err)
+		}
+		return nil
+	case *instructions.Provision:
+		e.say("PROVISION plugin://%s", s.Source)
+		if err := e.provision(ctx, s); err != nil {
+			return fmt.Errorf("PROVISION: %w", err)
 		}
 		return nil
 	case *instructions.Breakpoint:

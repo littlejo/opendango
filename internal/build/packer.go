@@ -60,6 +60,9 @@ func runPackerStage(ctx context.Context, p *plan.Plan, stage *plan.Stage, parent
 		fetchRoot:  filepath.Join(opts.filesDir, fmt.Sprint(stage.Index)),
 		fetched:    from,
 		files:      filesCache(opts.FilesCache),
+
+		findProvisioner: opts.FindProvisioner,
+		builderType:     cfg.Component,
 	}
 	if key != "" && len(stage.Fetch) > 0 {
 		e.filesKey = key
@@ -215,6 +218,9 @@ func runPackerStage(ctx context.Context, p *plan.Plan, stage *plan.Stage, parent
 			e.say("Running the instructions")
 			e.comm = comm
 			defer func() { e.comm = nil }()
+			// PROVISION passes the plugin's data on the connection.
+			e.pluginData = data.Raw
+			defer func() { e.pluginData = nil }()
 			// BREAKPOINT and --on-error=ask print the ssh command of the
 			// plugin's connection while it runs the instructions; the
 			// plugin removes its key afterwards.

@@ -165,6 +165,7 @@ type Description struct {
 	APIVersion     string   `json:"api_version"`
 	Builders       []string `json:"builders"`
 	PostProcessors []string `json:"post_processors"`
+	Provisioners   []string `json:"provisioners"`
 }
 
 // Describe runs the plugin's describe command.

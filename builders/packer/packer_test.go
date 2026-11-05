@@ -257,19 +257,22 @@ func TestBuildErrors(t *testing.T) {
 }
 
 func TestHookData(t *testing.T) {
-	got := hookData(map[string]any{"PackerHTTPAddr": "10.0.0.1:8000", "Host": "10.0.0.2", "Port": int64(22), "User": "debian", "SSHPrivateKey": "KEY"})
-	if want := (HookData{HTTPAddr: "10.0.0.1:8000", Host: "10.0.0.2", Port: 22, User: "debian", SSHPrivateKey: "KEY"}); got != want {
+	// Raw is all the data, for the provisioners: compared apart.
+	plain := func(d HookData) HookData { d.Raw = nil; return d }
+	raw := map[string]any{"PackerHTTPAddr": "10.0.0.1:8000", "Host": "10.0.0.2", "Port": int64(22), "User": "debian", "SSHPrivateKey": "KEY"}
+	got := hookData(raw)
+	if want := (HookData{HTTPAddr: "10.0.0.1:8000", Host: "10.0.0.2", Port: 22, User: "debian", SSHPrivateKey: "KEY"}); !reflect.DeepEqual(plain(got), want) || got.Raw["User"] != "debian" {
 		t.Errorf("got %+v, want %+v", got, want)
 	}
 	// The SDK's placeholders, and no data at all.
-	if got := hookData(map[string]any{"PackerHTTPAddr": "ERR_HTTP_ADDR_NOT_IMPLEMENTED_BY_BUILDER"}); got != (HookData{}) {
+	if got := hookData(map[string]any{"PackerHTTPAddr": "ERR_HTTP_ADDR_NOT_IMPLEMENTED_BY_BUILDER"}); !reflect.DeepEqual(plain(got), (HookData{})) {
 		t.Errorf("placeholders: %+v", got)
 	}
 	// As the RPC delivers it.
-	if got := hookData(map[any]any{"PackerHTTPAddr": "10.0.0.1:8000", "Port": uint64(2222)}); got != (HookData{HTTPAddr: "10.0.0.1:8000", Port: 2222}) {
+	if got := hookData(map[any]any{"PackerHTTPAddr": "10.0.0.1:8000", "Port": uint64(2222)}); !reflect.DeepEqual(plain(got), (HookData{HTTPAddr: "10.0.0.1:8000", Port: 2222})) || got.Raw["Port"] != uint64(2222) {
 		t.Errorf("map[any]any: %+v", got)
 	}
-	if got := hookData(nil); got != (HookData{}) {
+	if got := hookData(nil); !reflect.DeepEqual(plain(got), (HookData{})) {
 		t.Errorf("nil: %+v", got)
 	}
 }

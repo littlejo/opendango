@@ -272,6 +272,8 @@ type HookData struct {
 	// SSHPrivateKey is the private key of the connection (PEM), the
 	// temporary one or the one of ssh_private_key_file.
 	SSHPrivateKey string
+	// Raw is all the data, for the provisioners (PROVISION).
+	Raw map[string]any
 }
 
 // hookData reads the map the plugin passes. The SDK puts placeholders
@@ -294,7 +296,7 @@ func hookData(raw any) HookData {
 		}
 		return s
 	}
-	d := HookData{HTTPAddr: str("PackerHTTPAddr"), Host: str("Host"), User: str("User"), SSHPrivateKey: str("SSHPrivateKey")}
+	d := HookData{HTTPAddr: str("PackerHTTPAddr"), Host: str("Host"), User: str("User"), SSHPrivateKey: str("SSHPrivateKey"), Raw: m}
 	switch p := m["Port"].(type) {
 	case int:
 		d.Port = p
@@ -386,5 +388,8 @@ func (c *Comm) Upload(ctx context.Context, src, dst string) error {
 
 // Close does nothing: the plugin owns the connection.
 func (c *Comm) Close() error { return nil }
+
+// Raw returns the plugin's communicator, for a provisioner (PROVISION).
+func (c *Comm) Raw() packersdk.Communicator { return c.c }
 
 func quote(s string) string { return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'" }

@@ -44,6 +44,26 @@ func CheckPlugins(ctx context.Context, p *plan.Plan, contextDir string, find Fin
 				errs = append(errs, &plan.Error{File: p.File, Line: out.Line(), Err: fmt.Errorf("plugin://%s: %w", out.Source, err)})
 			}
 		}
+		// The provisioners check their settings (Prepare).
+		for _, step := range stage.Steps {
+			pr, ok := step.(*instructions.Provision)
+			if !ok {
+				continue
+			}
+			cfg, err := packer.ParseConfig(pr.Source, pr.Settings)
+			if err == nil {
+				pl, name, ferr := FindProvisioner(ctx, cfg.Component)
+				if ferr != nil {
+					warnings = append(warnings, fmt.Sprintf("stage %s: plugin://%s is not checked: %v", stage.Name(), cfg.Component, ferr))
+					continue
+				}
+				core := map[string]any{"packer_build_name": stage.Name(), "packer_builder_type": stage.Root().From.Builder}
+				err = packer.PrepareProvisioner(pl, name, contextDir, cfg.Settings, core)
+			}
+			if err != nil {
+				errs = append(errs, &plan.Error{File: p.File, Line: pr.Line(), Err: fmt.Errorf("plugin://%s: %w", pr.Source, err)})
+			}
+		}
 		if !stage.IsPacker() {
 			continue
 		}

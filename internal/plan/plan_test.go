@@ -417,6 +417,30 @@ func TestPostProcessors(t *testing.T) {
 	}
 }
 
+// TestProvision checks the planning of PROVISION: a step that needs the
+// connection, with its dango.yaml section under its flags.
+func TestProvision(t *testing.T) {
+	settings, err := LoadSettings(writeSettings(t, "ansible:\n  user: root\n  playbook_file: default.yml\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := parser.Parse(strings.NewReader("FROM xo://t\nCONNECT ssh --user=u\nPROVISION --playbook_file=site.yml plugin://ansible\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := BuildSettings("Dangofile", res, nil, settings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pr, ok := p.Stages[0].Steps[0].(*instructions.Provision)
+	if !ok || !reflect.DeepEqual(pr.Settings, map[string]string{"user": "root", "playbook_file": "site.yml"}) {
+		t.Errorf("steps %+v", p.Stages[0].Steps)
+	}
+	if _, err := build(t, "FROM plugin://qemu\nPROVISION plugin://ansible\n", nil); err == nil || !strings.Contains(err.Error(), "PROVISION needs a connection") {
+		t.Errorf("no connection: %v", err)
+	}
+}
+
 func TestServe(t *testing.T) {
 	src := "ARG DIR=http\nFROM xo://t AS a\nARG DIR\nUSER root\nSERVE --port=8080 ${DIR}\nCONNECT ssh --user=u\nRUN curl http://$DANGO_HTTP_ADDR/ks.cfg\n" +
 		"FROM a AS b\nOUTPUT --as=template\n"

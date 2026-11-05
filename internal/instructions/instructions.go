@@ -141,6 +141,16 @@ type Add struct {
 	Checksum string
 }
 
+// Provision runs a plugin's provisioner (Ansible, Chef…) with the
+// connection to the machine: PROVISION [--settings] plugin://<provisioner>.
+type Provision struct {
+	Pos
+	// Source is the provisioner type, such as ansible or ansible-local;
+	// Settings are its flags.
+	Source   string
+	Settings map[string]string
+}
+
 // Reboot reboots the VM and waits for the connection to come back.
 type Reboot struct {
 	Pos
@@ -743,25 +753,49 @@ func ParseOutput(cmd *parser.Command, expand Expander) (*Output, error) {
 
 // parsePluginOutput parses OUTPUT [--settings] plugin://<post-processor>.
 func parsePluginOutput(cmd *parser.Command, source string, expand Expander) (*Output, error) {
-	out := &Output{Pos: pos(cmd), Kind: OutputPlugin, Source: strings.TrimPrefix(source, "plugin://"), Settings: map[string]string{}}
+	out := &Output{Pos: pos(cmd), Kind: OutputPlugin, Source: strings.TrimPrefix(source, "plugin://")}
 	if out.Source == "" {
 		return nil, fmt.Errorf("OUTPUT: missing post-processor after plugin://")
 	}
+	var err error
+	out.Settings, err = pluginSettings(cmd, expand)
+	return out, err
+}
+
+// ParseProvision parses PROVISION [--settings] plugin://<provisioner>: the
+// flags are the provisioner's settings, by their Packer names.
+func ParseProvision(cmd *parser.Command, expand Expander) (*Provision, error) {
+	args, err := expandAll(cmd.Args, expand)
+	if err != nil {
+		return nil, fmt.Errorf("PROVISION: %w", err)
+	}
+	if len(args) != 1 || !strings.HasPrefix(args[0], "plugin://") || args[0] == "plugin://" {
+		return nil, fmt.Errorf("PROVISION requires one plugin://<provisioner>, such as plugin://ansible")
+	}
+	p := &Provision{Pos: pos(cmd), Source: strings.TrimPrefix(args[0], "plugin://")}
+	p.Settings, err = pluginSettings(cmd, expand)
+	return p, err
+}
+
+// pluginSettings reads the flags of a plugin component as its settings:
+// every flag has a value.
+func pluginSettings(cmd *parser.Command, expand Expander) (map[string]string, error) {
+	settings := map[string]string{}
 	for _, f := range cmd.Flags {
 		name, value, hasValue := strings.Cut(strings.TrimPrefix(f, "--"), "=")
 		if !hasValue {
-			return nil, fmt.Errorf("OUTPUT: flag --%s requires a value", name)
+			return nil, fmt.Errorf("%s: flag --%s requires a value", cmd.Keyword, name)
 		}
-		if _, dup := out.Settings[name]; dup {
-			return nil, fmt.Errorf("OUTPUT: flag --%s set twice", name)
+		if _, dup := settings[name]; dup {
+			return nil, fmt.Errorf("%s: flag --%s set twice", cmd.Keyword, name)
 		}
 		v, err := expand(value)
 		if err != nil {
-			return nil, fmt.Errorf("OUTPUT: flag --%s: %w", name, err)
+			return nil, fmt.Errorf("%s: flag --%s: %w", cmd.Keyword, name, err)
 		}
-		out.Settings[name] = v
+		settings[name] = v
 	}
-	return out, nil
+	return settings, nil
 }
 
 // ShellQuote quotes s for a POSIX shell.
