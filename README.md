@@ -143,11 +143,13 @@ plugin. The source is the Packer source type: `qemu`, `proxmox-iso`,
 - The flags are the builder's settings, by their Packer names. Lists and maps
   are JSON (`--network_names='["LAN"]'`). Paths are relative to the Dangofile
   directory.
+- Settings that rarely change can go to a `dango.yaml` file next to the
+  Dangofile (see [Plugin settings file](#plugin-settings-file-dangoyaml)).
 - `opendango plugin describe <source>` lists them, with their types
   (`--search disk` filters them) and a link to the plugin's documentation,
   which tells what they do. `opendango validate` checks them with the
   plugin: a misspelled flag gets the closest setting
-  (`plugin://qemu has no setting "disk_sise", did you mean --disk_size?`),
+  (`plugin://qemu has no setting "disk_sise", did you mean disk_size?`),
   and the plugin reports what is missing or invalid, without creating
   anything (`--offline` skips this).
 - `CONNECT` sets `communicator`, `ssh_username`, `ssh_port` and `ssh_timeout`.
@@ -179,6 +181,58 @@ RUN apt-get update && apt-get -y upgrade
 
 ```sh
 opendango build --build-arg XAPI_PASSWORD="$XAPI_PASSWORD"
+```
+
+### Plugin settings file (`dango.yaml`)
+
+`dango.yaml`, next to the Dangofile (or `--config=<file>`), holds plugin
+settings by source type, so that the `FROM` line keeps what matters:
+
+```yaml
+qemu:
+  iso_url: https://cloud.debian.org/images/cloud/${DEBIAN}/latest/debian-13-genericcloud-amd64.qcow2
+  iso_checksum: file:https://cloud.debian.org/images/cloud/${DEBIAN}/latest/SHA512SUMS
+  disk_image: true
+  format: qcow2
+  disk_size: 10G
+  headless: true
+  cd_files: [cidata/user-data, cidata/meta-data]
+  cd_label: cidata
+  ssh_private_key_file: key
+  shutdown_command: sudo shutdown -P now
+  output_directory: dist
+```
+
+```dockerfile
+ARG DEBIAN=trixie
+
+FROM --memory=2048 --vm_name=nginx.qcow2 plugin://qemu AS nginx
+CONNECT ssh --user=debian
+```
+
+- Every stage of that source gets the section; its `FROM` flags take
+  precedence. A stage that starts from another one leaves out the settings
+  of the source (`template`, `pool`, `iso` for xenorchestra).
+- `${VAR}` is replaced with the global ARGs, like in `FROM`. Lists and maps
+  are YAML.
+- No secrets: settings named `*password*`, `*secret*` or `*token*` are
+  refused (use `ARG` and `--build-arg` in the `FROM` line).
+- The settings are part of the cache key.
+
+`opendango init` writes a `dango.yaml` with every setting of the plugins of
+the Dangofile (or of the sources given: `opendango init qemu
+xenorchestra`), commented out with its type: uncomment what you need, a
+setting left out keeps the plugin's default. `--force` overwrites an
+existing file.
+
+```yaml
+qemu:
+  # What they do: https://developer.hashicorp.com/packer/integrations/hashicorp/qemu
+  # accelerator: ""                      # string
+  # cd_files: []                         # list of string
+  # cpus: 0                              # number
+  # disk_image: false                    # bool
+  ...
 ```
 
 ### Managing plugins
@@ -313,6 +367,7 @@ from the cloud-config drive) and the guest tools (the IP address).
 ## Commands
 
 ```sh
+opendango init [qemu ...]       # write a dango.yaml with the settings of the plugins
 opendango validate -f Dangofile --build-arg K=V   # check without building (plugins check their flags)
 opendango validate --offline    # without asking the plugins
 opendango build -f Dangofile --build-arg K=V

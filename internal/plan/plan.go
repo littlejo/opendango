@@ -4,6 +4,7 @@ package plan
 
 import (
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 
@@ -27,6 +28,9 @@ type Plan struct {
 // file).
 type Stage struct {
 	From *instructions.From
+	// FileFlags are the settings of dango.yaml for a plugin:// stage
+	// (expanded); its FROM flags take precedence (PackerFlags).
+	FileFlags map[string]string
 	// Index is the position of the stage in the file, from 0.
 	Index int
 	// Parent is the stage this one starts from (FROM <stage>); nil for
@@ -83,8 +87,19 @@ func (s *Stage) Root() *Stage {
 // root stage; for a stage that starts from another one, also the flags it
 // inherits (packer.Known.StageFlags).
 func (s *Stage) PackerFlags() (map[string]string, error) {
+	own := s.From.Flags
+	if len(s.FileFlags) > 0 {
+		// The FROM flags take precedence over dango.yaml.
+		own = map[string]string{}
+		for k, v := range s.FileFlags {
+			own[k] = v
+		}
+		for k, v := range s.From.Flags {
+			own[k] = v
+		}
+	}
 	if s.Parent == nil {
-		return s.From.Flags, nil
+		return own, nil
 	}
 	k := s.known()
 	if k == nil || k.Source == "" {
@@ -94,9 +109,35 @@ func (s *Stage) PackerFlags() (map[string]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	flags, err := k.StageFlags(parent, s.From.Flags)
+	flags, err := k.StageFlags(parent, own)
 	if err != nil {
 		return nil, fmt.Errorf("FROM %s: %w", s.From.Stage, err)
+	}
+	return flags, nil
+}
+
+// sectionFlags returns the dango.yaml settings of a plugin:// stage, with
+// the variables expanded: quotes and escape characters are part of the
+// value, as in the FROM flags (literalFlags). A stage that starts from
+// another one leaves out the settings that only a root stage sets (its
+// source is the parent).
+func sectionFlags(settings *Settings, source string, section map[string]string, stage *Stage, escape rune, expand func(string) (string, error)) (map[string]string, error) {
+	esc := string(escape)
+	literal := strings.NewReplacer(esc, esc+esc, `"`, esc+`"`, "'", esc+"'")
+	var skip []string
+	if k := stage.known(); k != nil && stage.Parent != nil {
+		skip = append([]string{k.Source}, k.RootOnly...)
+	}
+	flags := map[string]string{}
+	for name, v := range section {
+		if slices.Contains(skip, name) {
+			continue
+		}
+		value, err := expand(literal.Replace(v))
+		if err != nil {
+			return nil, fmt.Errorf("%s: %s.%s: %w", settings.File, source, name, err)
+		}
+		flags[name] = value
 	}
 	return flags, nil
 }
@@ -160,7 +201,14 @@ func (e *Error) Unwrap() error { return e.Err }
 // Build validates res and returns its plan. buildArgs are the --build-arg
 // values.
 func Build(file string, res *parser.Result, buildArgs map[string]string) (*Plan, error) {
+	return BuildSettings(file, res, buildArgs, nil)
+}
+
+// BuildSettings is Build with the plugin settings of a dango.yaml file
+// (nil for none).
+func BuildSettings(file string, res *parser.Result, buildArgs map[string]string, settings *Settings) (*Plan, error) {
 	p := &Plan{File: file}
+	usedSections := map[string]bool{}
 	lex := shell.NewLex(res.EscapeToken)
 	usedArgs := map[string]bool{}
 	fail := func(line int, err error) (*Plan, error) {
@@ -255,6 +303,16 @@ func Build(file string, res *parser.Result, buildArgs map[string]string) (*Plan,
 				stage.Labels = append([]instructions.KeyValue{}, parent.Labels...)
 				for k, v := range parent.env {
 					stage.env[k] = v
+				}
+			}
+			// The dango.yaml section of the source, with the global ARGs.
+			if settings != nil && stage.IsPacker() {
+				source := stage.Root().From.Source
+				if section, ok := settings.Sections[source]; ok {
+					usedSections[source] = true
+					if stage.FileFlags, err = sectionFlags(settings, source, section, stage, res.EscapeToken, expand); err != nil {
+						return nil, err
+					}
 				}
 			}
 			if err := checkBuilder(stage); err != nil {
@@ -422,6 +480,18 @@ func Build(file string, res *parser.Result, buildArgs map[string]string) (*Plan,
 			p.Warnings = append(p.Warnings, fmt.Sprintf("stage %s has no OUTPUT and no stage starts from it: its VM will be destroyed at the end of the build", s.Name()))
 		case s.known() != nil:
 			p.Warnings = append(p.Warnings, fmt.Sprintf("stage %s has no OUTPUT and no stage starts from it: the plugin's artifact will be deleted at the end of the stage", s.Name()))
+		}
+	}
+	if settings != nil {
+		var sources []string
+		for source := range settings.Sections {
+			if !usedSections[source] {
+				sources = append(sources, source)
+			}
+		}
+		sort.Strings(sources)
+		for _, source := range sources {
+			p.Warnings = append(p.Warnings, fmt.Sprintf("%s: no stage uses plugin://%s", settings.File, source))
 		}
 	}
 	var unused []string

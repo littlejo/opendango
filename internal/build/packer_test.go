@@ -14,6 +14,8 @@ import (
 	"time"
 
 	"github.com/littlejo/opendango/builders/packer"
+	"github.com/littlejo/opendango/internal/parser"
+	"github.com/littlejo/opendango/internal/plan"
 )
 
 var (
@@ -390,7 +392,7 @@ func TestCheckPlugins(t *testing.T) {
 		name, src, err, warning string
 	}{
 		{"valid", "FROM --root=" + root + " --count=2 plugin://opendangotest-local\n", "", "this is a test plugin"},
-		{"typo", "FROM --root=" + root + " --cuont=2 plugin://opendangotest-local\n", `Dangofile:1: plugin://opendangotest-local has no setting "cuont", did you mean --count?`, ""},
+		{"typo", "FROM --root=" + root + " --cuont=2 plugin://opendangotest-local\n", `Dangofile:1: plugin://opendangotest-local has no setting "cuont", did you mean count?`, ""},
 		{"unknown", "FROM --root=" + root + " --zzzzzz=2 plugin://opendangotest-local\n", `Dangofile:1: plugin://opendangotest-local has no setting "zzzzzz" (opendango plugin describe opendangotest-local lists them)`, ""},
 		{"prepare", "FROM --count=2 plugin://opendangotest-local\n", "Dangofile:1: plugin://opendangotest-local: root is required", ""},
 		{"not installed", "FROM --x=1 plugin://nothing-here\n", "", "stage stage-0: plugin://nothing-here is not checked: unexpected source"},
@@ -406,5 +408,43 @@ func TestCheckPlugins(t *testing.T) {
 				t.Errorf("warnings %q lack %q", warnings, tt.warning)
 			}
 		})
+	}
+}
+
+// TestPackerCacheKeySettings checks that the dango.yaml settings of a
+// plugin:// stage are part of its cache key.
+func TestPackerCacheKeySettings(t *testing.T) {
+	key := func(yaml string) string {
+		t.Helper()
+		var settings *plan.Settings
+		if yaml != "" {
+			f := filepath.Join(t.TempDir(), "dango.yaml")
+			os.WriteFile(f, []byte(yaml), 0o644)
+			var err error
+			if settings, err = plan.LoadSettings(f); err != nil {
+				t.Fatal(err)
+			}
+		}
+		res, err := parser.Parse(strings.NewReader("FROM --cpus=2 plugin://xenorchestra\nCONNECT ssh --user=u\nRUN true\nOUTPUT --as=template x\n"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		p, err := plan.BuildSettings("Dangofile", res, nil, settings)
+		if err != nil {
+			t.Fatal(err)
+		}
+		k, err := cacheKey(p.File, p.Stages[0], "", t.TempDir())
+		if err != nil {
+			t.Fatal(err)
+		}
+		return k
+	}
+	none, small, big := key(""), key("xenorchestra:\n  memory: 2G\n"), key("xenorchestra:\n  memory: 4G\n")
+	if none == small || small == big {
+		t.Errorf("keys: none %s, 2G %s, 4G %s", none, small, big)
+	}
+	// The FROM flags win: the same settings, the same key.
+	if key("xenorchestra:\n  cpus: 8\n") != none {
+		t.Error("a dango.yaml setting overridden by a FROM flag changed the key")
 	}
 }

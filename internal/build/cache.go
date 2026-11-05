@@ -33,13 +33,21 @@ func cacheKey(file string, s *plan.Stage, parentKey, contextDir string) (string,
 	h := sha256.New()
 	fmt.Fprintf(h, "%s\nparent %q\n", cacheVersion, parentKey)
 	fmt.Fprintf(h, "FROM %q %q %q\n", s.From.Builder, s.From.Source, s.From.Stage)
-	flags := make([]string, 0, len(s.From.Flags))
-	for k := range s.From.Flags {
+	// A plugin:// stage: with its dango.yaml settings and inherited flags.
+	values := s.From.Flags
+	if s.IsPacker() {
+		var err error
+		if values, err = s.PackerFlags(); err != nil {
+			return "", err
+		}
+	}
+	flags := make([]string, 0, len(values))
+	for k := range values {
 		flags = append(flags, k)
 	}
 	sort.Strings(flags)
 	for _, k := range flags {
-		fmt.Fprintf(h, "  --%s=%q\n", k, s.From.Flags[k])
+		fmt.Fprintf(h, "  --%s=%q\n", k, values[k])
 	}
 	if c := s.Connect; c != nil {
 		fmt.Fprintf(h, "CONNECT %q %q %d\n", c.Protocol, c.User, c.Port)

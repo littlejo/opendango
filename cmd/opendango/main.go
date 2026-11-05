@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"slices"
 	"strings"
 	"syscall"
 	"text/tabwriter"
@@ -36,7 +37,8 @@ Commands:
   validate   Check a Dangofile without building it
   fmt        Rewrite a Dangofile in its canonical layout
   cache      Manage the cache of stage templates (cache prune)
-  plugin     Manage the Packer plugins (pull, search, list, rm)
+  plugin     Manage the Packer plugins (pull, search, list, describe, rm)
+  init       Write a dango.yaml with the settings of the plugins
   version    Print the version
 
 Run 'opendango <command> -h' for the flags of a command.
@@ -65,6 +67,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return cmdCache(args[1:], stdout, stderr)
 	case "plugin":
 		return cmdPlugin(args[1:], stdout, stderr)
+	case "init":
+		return cmdInit(args[1:], stdout, stderr)
 	case "version":
 		fmt.Fprintln(stdout, "opendango", version)
 		return 0
@@ -93,6 +97,7 @@ func (b buildArgs) Set(s string) error {
 
 type commonFlags struct {
 	file      string
+	config    string
 	buildArgs buildArgs
 }
 
@@ -102,7 +107,21 @@ func newFlagSet(name string, stderr io.Writer) (*flag.FlagSet, *commonFlags) {
 	c := &commonFlags{buildArgs: buildArgs{}}
 	fs.StringVar(&c.file, "f", "Dangofile", "path to the Dangofile")
 	fs.Var(c.buildArgs, "build-arg", "set a build variable, KEY=VALUE (repeatable)")
+	fs.StringVar(&c.config, "config", "", "plugin settings file (default: "+plan.SettingsFile+" next to the Dangofile, when it exists)")
 	return fs, c
+}
+
+// loadSettings reads --config, or dango.yaml next to the Dangofile when it
+// exists (nil otherwise).
+func loadSettings(c *commonFlags) (*plan.Settings, error) {
+	path := c.config
+	if path == "" {
+		path = filepath.Join(filepath.Dir(c.file), plan.SettingsFile)
+		if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
+			return nil, nil
+		}
+	}
+	return plan.LoadSettings(path)
 }
 
 func loadPlan(c *commonFlags) (*plan.Plan, error) {
@@ -115,7 +134,11 @@ func loadPlan(c *commonFlags) (*plan.Plan, error) {
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", c.file, err)
 	}
-	return plan.Build(c.file, res, c.buildArgs)
+	settings, err := loadSettings(c)
+	if err != nil {
+		return nil, err
+	}
+	return plan.BuildSettings(c.file, res, c.buildArgs, settings)
 }
 
 func cmdValidate(args []string, stdout, stderr io.Writer) int {
@@ -524,4 +547,107 @@ func pluginDescribe(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stdout, "What they do: %s\n", url)
 	}
 	return 0
+}
+
+// cmdInit writes a dango.yaml with every setting of the given plugin://
+// sources (or of the Dangofile's), commented out with its type: an unset
+// setting keeps the plugin's default, an empty one would not.
+func cmdInit(args []string, stdout, stderr io.Writer) int {
+	fs, c := newFlagSet("init", stderr)
+	force := fs.Bool("force", false, "overwrite an existing file")
+	// The sources may come before the flags.
+	var sources []string
+	for len(args) > 0 && !strings.HasPrefix(args[0], "-") {
+		sources, args = append(sources, args[0]), args[1:]
+	}
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	sources = append(sources, fs.Args()...)
+	path := c.config
+	if path == "" {
+		path = filepath.Join(filepath.Dir(c.file), plan.SettingsFile)
+	}
+	if _, err := os.Stat(path); err == nil && !*force {
+		fmt.Fprintf(stderr, "opendango init: %s exists (--force overwrites it)\n", path)
+		return 1
+	}
+	if len(sources) == 0 {
+		// The plugin:// sources of the Dangofile.
+		p, err := loadPlan(c)
+		if err != nil {
+			fmt.Fprintln(stderr, err)
+			return 1
+		}
+		for _, st := range p.Stages {
+			if src := st.From.Source; st.Parent == nil && st.IsPacker() && !slices.Contains(sources, src) {
+				sources = append(sources, src)
+			}
+		}
+		if len(sources) == 0 {
+			fmt.Fprintf(stderr, "opendango init: %s has no plugin:// stage: give the sources (opendango init qemu)\n", c.file)
+			return 1
+		}
+	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	var b strings.Builder
+	b.WriteString("# Settings of the plugin:// builders, by source type: the FROM flags of\n")
+	b.WriteString("# their stages, which take precedence over this file. Uncomment what you\n")
+	b.WriteString("# need: a setting left out keeps the plugin's default. ${VAR} is replaced\n")
+	b.WriteString("# with the global ARGs. No secrets here: use ARG and --build-arg.\n")
+	for _, source := range sources {
+		source = strings.TrimPrefix(source, "plugin://")
+		pl, builder, err := build.FindPlugin(ctx, source)
+		if err != nil {
+			fmt.Fprintln(stderr, err)
+			return 1
+		}
+		settings, err := packer.Settings(pl, builder)
+		if err != nil {
+			fmt.Fprintln(stderr, err)
+			return 1
+		}
+		fmt.Fprintf(&b, "\n%s:\n", source)
+		if url := packer.DocURL(pl); url != "" {
+			fmt.Fprintf(&b, "  # What they do: %s\n", url)
+		}
+		width := 0
+		var lines [][2]string
+		for _, s := range settings {
+			// Set by opendango or an instruction, or a secret.
+			if strings.HasPrefix(s.Name, "packer_") || packer.Reserved(source, s.Name) != "" || packer.Sensitive(s.Name) {
+				continue
+			}
+			line := fmt.Sprintf("# %s: %s", s.Name, placeholder(s.Type))
+			width = max(width, len(line))
+			lines = append(lines, [2]string{line, s.Type})
+		}
+		for _, l := range lines {
+			fmt.Fprintf(&b, "  %-*s  # %s\n", width, l[0], l[1])
+		}
+	}
+	if err := os.WriteFile(path, []byte(b.String()), 0o644); err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
+	}
+	fmt.Fprintf(stdout, "Wrote %s (%s)\n", path, strings.Join(sources, ", "))
+	return 0
+}
+
+// placeholder is an empty value of a setting type, in YAML.
+func placeholder(typ string) string {
+	switch {
+	case typ == "string":
+		return `""`
+	case typ == "number":
+		return "0"
+	case typ == "bool":
+		return "false"
+	case strings.HasPrefix(typ, "list"), strings.HasPrefix(typ, "set"):
+		return "[]"
+	default:
+		return "{}"
+	}
 }

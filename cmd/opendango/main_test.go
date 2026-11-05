@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -145,4 +146,66 @@ func TestValidatePlugins(t *testing.T) {
 	if code := run([]string{"validate", "--offline", "-f", f}, &stdout, &stderr); code != 0 || strings.Contains(stderr.String(), "not checked") {
 		t.Errorf("--offline: exit %d, stderr %q", code, stderr.String())
 	}
+}
+
+// TestInit checks opendango init with the test plugin: every setting,
+// commented out with its type, but those opendango sets; an existing file
+// needs --force; validate then reads it.
+func TestInit(t *testing.T) {
+	bin := t.TempDir()
+	cmd := exec.Command("go", "build", "-o", filepath.Join(bin, "packer-plugin-opendangotest"), "./testdata/packer-plugin-opendangotest")
+	cmd.Dir = "../../builders/packer"
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("building the test plugin: %v\n%s", err, out)
+	}
+	t.Setenv("PACKER_CONFIG_DIR", t.TempDir())
+	t.Setenv("PACKER_PLUGIN_PATH", bin)
+	dir := t.TempDir()
+	dangofile := filepath.Join(dir, "Dangofile")
+	os.WriteFile(dangofile, []byte("FROM plugin://opendangotest-local\nCONNECT ssh --user=tester\nRUN true\n"), 0o644)
+
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"init", "-f", dangofile}, &stdout, &stderr); code != 0 {
+		t.Fatalf("exit %d: %s", code, stderr.String())
+	}
+	yaml := readTestFile(t, filepath.Join(dir, "dango.yaml"))
+	for _, want := range []string{"\nopendangotest-local:\n", `  # root: ""`, "# string\n", "  # count: 0", "# number\n", "  # items: []", "# list of string\n"} {
+		if !strings.Contains(yaml, want) {
+			t.Errorf("dango.yaml lacks %q:\n%s", want, yaml)
+		}
+	}
+	// Set by CONNECT, by opendango, or a secret.
+	for _, unwanted := range []string{"ssh_username", "packer_build_name", "password"} {
+		if strings.Contains(yaml, unwanted) {
+			t.Errorf("dango.yaml has %q:\n%s", unwanted, yaml)
+		}
+	}
+	if code := run([]string{"init", "-f", dangofile}, &stdout, &stderr); code != 1 || !strings.Contains(stderr.String(), "exists (--force overwrites it)") {
+		t.Errorf("second init: exit %d, %s", code, stderr.String())
+	}
+
+	// Commented out: the plugin misses root. Set in dango.yaml: valid.
+	stderr.Reset()
+	if code := run([]string{"validate", "-f", dangofile}, &stdout, &stderr); code != 1 || !strings.Contains(stderr.String(), "root is required") {
+		t.Errorf("validate: exit %d, %s", code, stderr.String())
+	}
+	os.WriteFile(filepath.Join(dir, "dango.yaml"), []byte("opendangotest-local:\n  root: "+dir+"\n"), 0o644)
+	stderr.Reset()
+	if code := run([]string{"validate", "-f", dangofile}, &stdout, &stderr); code != 0 {
+		t.Errorf("validate with root: exit %d, %s", code, stderr.String())
+	}
+	// Given sources, another file.
+	other := filepath.Join(dir, "other.yaml")
+	if code := run([]string{"init", "--config", other, "plugin://opendangotest-local"}, &stdout, &stderr); code != 0 || !strings.Contains(readTestFile(t, other), "opendangotest-local:") {
+		t.Errorf("init --config: exit %d, %s", code, stderr.String())
+	}
+}
+
+func readTestFile(t *testing.T, p string) string {
+	t.Helper()
+	b, err := os.ReadFile(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
 }

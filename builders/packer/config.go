@@ -47,6 +47,10 @@ var reserved = map[string]string{
 	"boot_command":   "BOOT <keys>",
 }
 
+// Sensitive tells whether a setting holds a secret by its name (password,
+// secret, token).
+func Sensitive(name string) bool { return sensitive.MatchString(name) }
+
 // ParseConfig reads FROM [--flags] plugin://<source>. Flag names are the
 // plugin's configuration keys, unchanged (--vm_name=golden).
 func ParseConfig(source string, flags map[string]string) (*Config, error) {
