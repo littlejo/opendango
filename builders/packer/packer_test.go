@@ -189,8 +189,25 @@ func TestBuild(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if artifact != "local machine at "+root {
-		t.Errorf("artifact = %q", artifact)
+	if artifact.Desc != "local machine at "+root || artifact.ID != root {
+		t.Errorf("artifact = %+v", artifact)
+	}
+	// The plugin is gone: no later Destroy.
+	if err := artifact.Destroy(); err == nil || !strings.Contains(err.Error(), "is not running anymore") {
+		t.Errorf("Destroy: %v", err)
+	}
+
+	// With KeepPlugin, Destroy goes through the plugin, then stops it.
+	b.KeepPlugin = true
+	b.Provision = func(context.Context, *Comm) error { return nil }
+	if artifact, err = b.Run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := artifact.Destroy(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "artifact-destroyed")); err != nil {
+		t.Errorf("not destroyed: %v", err)
 	}
 	log := strings.Join(said, "\n")
 	for _, want := range []string{

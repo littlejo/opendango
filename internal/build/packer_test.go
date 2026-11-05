@@ -192,3 +192,57 @@ func TestPackerKnownBuilder(t *testing.T) {
 		})
 	}
 }
+
+// TestPackerMultiStage checks FROM <packer stage> with a builder of the
+// table: the child starts from the parent's artifact and inherits USER,
+// WORKDIR and ENV; a parent without OUTPUT --as=template is an intermediate
+// template, deleted at the end of the build through its plugin.
+func TestPackerMultiStage(t *testing.T) {
+	base, app, out := t.TempDir(), t.TempDir(), t.TempDir()
+	src := fmt.Sprintf(`FROM --root=%[1]s packer://xenorchestra AS base
+CONNECT ssh --user=tester
+ENV GREETING=hello
+WORKDIR %[1]s
+RUN true
+
+FROM --root=%[2]s base AS app
+RUN test "$GREETING" = hello && pwd > %[3]s/pwd
+OUTPUT --as=template app
+`, base, app, out)
+	var log syncBuffer
+	if err := Run(context.Background(), mustPlan(t, src), Options{ContextDir: t.TempDir(), Out: &log, FindPlugin: testPlugin(t)}); err != nil {
+		t.Fatalf("%v\n%s", err, log.String())
+	}
+	for _, want := range []string{
+		"==> base: artifact: template_name=opendango-tmp-base-",
+		// The test plugin's artifact id is its root.
+		"==> app: source: template=" + base + "\n",
+		"==> app: artifact: template_name=app ",
+		"==> base: Deleting intermediate template " + base + "\n",
+	} {
+		if !strings.Contains(log.String(), want) {
+			t.Errorf("log lacks %q:\n%s", want, log.String())
+		}
+	}
+	if got := readFile(t, filepath.Join(out, "pwd")); got != base+"\n" {
+		t.Errorf("WORKDIR in app: %q", got)
+	}
+	// The intermediate template is deleted at the end, the OUTPUT one stays.
+	if _, err := os.Stat(filepath.Join(base, "artifact-destroyed")); err != nil {
+		t.Errorf("base: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(app, "artifact-destroyed")); err == nil {
+		t.Error("app: its OUTPUT template was deleted")
+	}
+
+	// --target base: nobody starts from base, its artifact goes at once.
+	base = t.TempDir()
+	src = fmt.Sprintf("FROM --root=%s packer://xenorchestra AS base\nCONNECT ssh --user=tester\nRUN true\nFROM --root=%s base AS app\nRUN true\n", base, app)
+	var log2 syncBuffer
+	if err := Run(context.Background(), mustPlan(t, src), Options{ContextDir: t.TempDir(), Out: &log2, Target: "base", FindPlugin: testPlugin(t)}); err != nil {
+		t.Fatalf("%v\n%s", err, log2.String())
+	}
+	if !strings.Contains(log2.String(), "==> base: Deleting the artifact: no OUTPUT --as=template") || strings.Contains(log2.String(), "intermediate") {
+		t.Errorf("log:\n%s", log2.String())
+	}
+}

@@ -143,8 +143,8 @@ opendango build --build-arg XAPI_PASSWORD="$XAPI_PASSWORD"
   `{{ .HTTPIP }}:{{ .HTTPPort }}`: the same Dangofile lines work with
   `packer://xenserver-iso`. `SERVE --addr` is not available, nor
   `$DANGO_HTTP_ADDR` in `RUN`.
-- Only builders are supported. A packer:// stage cannot be a parent stage,
-  and `REBOOT` is not available in it.
+- Only builders are supported. `REBOOT` is not available in a packer://
+  stage.
 - `OUTPUT` and `LABEL` work with the builders opendango knows, and only with
   them (the others set their artifact with their own flags):
 
@@ -155,6 +155,22 @@ opendango build --build-arg XAPI_PASSWORD="$XAPI_PASSWORD"
   Like a native stage, a stage without `OUTPUT --as=template` deletes the
   plugin's artifact once built (an XVA stays). These settings cannot be FROM
   flags.
+- Multi-stage builds work with these builders too: `FROM [--flags] <stage>`
+  starts from the template of the stage (`template` for xenorchestra), takes
+  its `endpoint`, `token` and `insecure` flags unless it sets them, and
+  cannot set `template`, `pool` nor `iso`. A parent without
+  `OUTPUT --as=template` is an intermediate template
+  (`opendango-tmp-<stage>-<time>`), deleted at the end of the build.
+
+  ```dockerfile
+  FROM --template="Debian 13 Cloud-init (Hub)" --network=LAN packer://xenorchestra AS base
+  CONNECT ssh --user=debian
+  RUN apt-get update && apt-get -y upgrade
+
+  FROM --cpus=4 base AS app
+  RUN apt-get install -y nginx
+  OUTPUT --as=template nginx
+  ```
 
 ### Installing plugins
 

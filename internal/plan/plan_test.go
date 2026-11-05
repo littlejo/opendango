@@ -150,7 +150,10 @@ func TestErrors(t *testing.T) {
 		{"FROM --network_names=[x packer://xenserver-iso", "Dangofile:1: packer: --network_names: invalid JSON"},
 		{"FROM packer://xenserver-iso\nCONNECT ssh --user=u\nREBOOT", "Dangofile:3: REBOOT is not supported in a packer:// stage yet"},
 		{"FROM packer://xenserver-iso\nOUTPUT --as=template", "Dangofile:2: OUTPUT has no meaning in a packer://xenserver-iso stage"},
-		{"FROM packer://xenserver-iso AS p\nFROM p", "Dangofile:2: FROM p: a stage cannot start from a packer:// stage"},
+		{"FROM packer://xenserver-iso AS p\nFROM p", "Dangofile:2: FROM p: a stage cannot start from a packer://xenserver-iso stage: its artifact is the plugin's (opendango knows the artifacts of packer://xenorchestra)"},
+		{"FROM packer://xenorchestra AS p\nFROM --template=t p", "Dangofile:2: FROM p: packer: --template cannot be set when starting from another stage"},
+		{"FROM packer://xenorchestra AS p\nFROM --iso=x p", "Dangofile:2: FROM p: packer: --iso cannot be set when starting from another stage"},
+		{"FROM packer://xenorchestra AS p\nFROM --tags=[] p", "Dangofile:2: packer: --tags is set by LABEL"},
 		{"FROM xo://t\nCONNECT ssh --user=u\nBREAKPOINT --x", "Dangofile:3: BREAKPOINT: unknown flag --x"},
 		{"FROM xo://t\nENV --persist A=1", "Dangofile:2: ENV --persist needs a connection"},
 		{"FROM xo://t\nCONNECT ssh --user=a\nCONNECT ssh --user=b", "Dangofile:3: CONNECT already set at line 2"},
@@ -313,6 +316,30 @@ func TestPackerKnownBuilder(t *testing.T) {
 		t.Fatal(err)
 	}
 	if want := "stage golden has no OUTPUT and no stage starts from it: the plugin's artifact will be deleted at the end of the stage"; len(p.Warnings) != 1 || p.Warnings[0] != want {
+		t.Errorf("warnings = %q", p.Warnings)
+	}
+}
+
+// TestPackerStageFlags checks the flags of a stage that starts from a
+// packer:// stage: its own, plus the inherited ones of its ancestors.
+func TestPackerStageFlags(t *testing.T) {
+	src := "FROM --endpoint=https://xo --insecure=true --template=t --pool=p --cpus=2 packer://xenorchestra AS a\nFROM --cpus=4 a AS b\nFROM --insecure=false b AS c\n"
+	p, err := build(t, src, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, want := range []map[string]string{
+		{"endpoint": "https://xo", "insecure": "true", "template": "t", "pool": "p", "cpus": "2"},
+		{"endpoint": "https://xo", "insecure": "true", "cpus": "4"},
+		{"endpoint": "https://xo", "insecure": "false"},
+	} {
+		got, err := p.Stages[i].PackerFlags()
+		if err != nil || !reflect.DeepEqual(got, want) {
+			t.Errorf("stage %s: flags %v, %v; want %v", p.Stages[i].Name(), got, err, want)
+		}
+	}
+	// a and b are parents: no warning about a missing OUTPUT for them.
+	if want := []string{"stage c has no OUTPUT and no stage starts from it: the plugin's artifact will be deleted at the end of the stage"}; !reflect.DeepEqual(p.Warnings, want) {
 		t.Errorf("warnings = %q", p.Warnings)
 	}
 }
