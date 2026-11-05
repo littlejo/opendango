@@ -43,7 +43,7 @@ type Registry struct {
 func NewRegistry() (*Registry, error) {
 	dir := PluginDir()
 	if dir == "" {
-		return nil, errors.New("packer: no plugin directory: set PACKER_CONFIG_DIR or HOME")
+		return nil, errors.New("plugin: no plugin directory: set PACKER_CONFIG_DIR or HOME")
 	}
 	return &Registry{
 		HashiCorpAPI: "https://api.releases.hashicorp.com",

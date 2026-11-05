@@ -1,5 +1,5 @@
 // Package packer runs the builders of Packer plugins (packer-plugin-*
-// binaries) through packer-plugin-sdk: FROM packer://<plugin>-<builder>.
+// binaries) through packer-plugin-sdk: FROM plugin://<plugin>-<builder>.
 //
 // The plugin drives the build: it creates the machine, connects to it, and
 // calls the provision hook with its communicator; that is when opendango
@@ -16,7 +16,7 @@ import (
 	"strings"
 )
 
-// Config is the configuration of a packer:// stage.
+// Config is the configuration of a plugin:// stage.
 type Config struct {
 	// Component is the Packer source type, such as xenserver-iso.
 	Component string
@@ -47,11 +47,11 @@ var reserved = map[string]string{
 	"boot_command":   "BOOT <keys>",
 }
 
-// ParseConfig reads FROM [--flags] packer://<source>. Flag names are the
+// ParseConfig reads FROM [--flags] plugin://<source>. Flag names are the
 // plugin's configuration keys, unchanged (--vm_name=golden).
 func ParseConfig(source string, flags map[string]string) (*Config, error) {
 	if !component.MatchString(source) {
-		return nil, fmt.Errorf("packer: invalid source %q: expected <plugin>-<builder>, such as xenserver-iso", source)
+		return nil, fmt.Errorf("plugin: invalid source %q: expected <plugin>-<builder>, such as xenserver-iso", source)
 	}
 	if k := Lookup(source); k != nil {
 		if err := k.checkFlags(flags); err != nil {
@@ -61,10 +61,10 @@ func ParseConfig(source string, flags map[string]string) (*Config, error) {
 	cfg := &Config{Component: source, Settings: map[string]any{}}
 	for k, v := range flags {
 		if instead, ok := reserved[k]; ok {
-			return nil, fmt.Errorf("packer: --%s is set by %s", k, instead)
+			return nil, fmt.Errorf("plugin: --%s is set by %s", k, instead)
 		}
 		if strings.HasPrefix(k, "packer_") {
-			return nil, fmt.Errorf("packer: --%s is reserved to opendango", k)
+			return nil, fmt.Errorf("plugin: --%s is reserved to opendango", k)
 		}
 		if sensitive.MatchString(k) && v != "" {
 			cfg.Secrets = append(cfg.Secrets, v)
@@ -72,7 +72,7 @@ func ParseConfig(source string, flags map[string]string) (*Config, error) {
 		if strings.HasPrefix(v, "[") || strings.HasPrefix(v, "{") {
 			var value any
 			if err := json.Unmarshal([]byte(v), &value); err != nil {
-				return nil, fmt.Errorf("packer: --%s: invalid JSON: %w", k, err)
+				return nil, fmt.Errorf("plugin: --%s: invalid JSON: %w", k, err)
 			}
 			cfg.Settings[k] = value
 			continue

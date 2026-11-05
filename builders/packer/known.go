@@ -8,7 +8,7 @@ import (
 )
 
 // Known is what opendango knows of a Packer builder: the settings that
-// OUTPUT and LABEL become, as they do with a native builder. A packer://
+// OUTPUT and LABEL become, as they do with a native builder. A plugin://
 // stage of a builder that is not in the table cannot use them: its plugin
 // configuration (FROM flags) sets its artifact.
 type Known struct {
@@ -85,7 +85,7 @@ func (k *Known) settings() map[string]string {
 func (k *Known) checkFlags(flags map[string]string) error {
 	for name, instead := range k.settings() {
 		if _, ok := flags[name]; ok {
-			return fmt.Errorf("packer: --%s is set by %s", name, instead)
+			return fmt.Errorf("plugin: --%s is set by %s", name, instead)
 		}
 	}
 	return nil
@@ -101,7 +101,7 @@ func (k *Known) StageFlags(parent, own map[string]string) (map[string]string, er
 	}
 	for _, name := range append([]string{k.Source}, k.RootOnly...) {
 		if _, ok := own[name]; ok {
-			return nil, fmt.Errorf("packer: --%s cannot be set when starting from another stage", name)
+			return nil, fmt.Errorf("plugin: --%s cannot be set when starting from another stage", name)
 		}
 	}
 	flags := map[string]string{}

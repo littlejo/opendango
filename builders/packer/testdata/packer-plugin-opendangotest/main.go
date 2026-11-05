@@ -45,7 +45,7 @@ type Config struct {
 
 	BootCommand []string `mapstructure:"boot_command"`
 
-	// The settings opendango maps for packer://xenorchestra (OUTPUT,
+	// The settings opendango maps for plugin://xenorchestra (OUTPUT,
 	// LABEL), which the tests point to this plugin.
 	TemplateName string   `mapstructure:"template_name"`
 	Tags         []string `mapstructure:"tags"`

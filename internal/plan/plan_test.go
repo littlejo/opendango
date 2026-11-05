@@ -144,16 +144,16 @@ func TestErrors(t *testing.T) {
 		{"FROM xo://t\nWORKDIR /a", "Dangofile:2: WORKDIR needs a connection"},
 		{"FROM xo://t\nREBOOT", "Dangofile:2: REBOOT needs a connection"},
 		{"FROM xo://t\nBREAKPOINT", "Dangofile:2: BREAKPOINT needs a connection"},
-		{"FROM packer://Bad Name", "Dangofile:1: FROM requires exactly one source"},
-		{"FROM packer://xenserver_ISO", "Dangofile:1: packer: invalid source"},
-		{"FROM --ssh_username=root packer://xenserver-iso", "Dangofile:1: packer: --ssh_username is set by CONNECT ssh --user=<user>"},
-		{"FROM --network_names=[x packer://xenserver-iso", "Dangofile:1: packer: --network_names: invalid JSON"},
-		{"FROM packer://xenserver-iso\nCONNECT ssh --user=u\nREBOOT", "Dangofile:3: REBOOT is not supported in a packer:// stage yet"},
-		{"FROM packer://xenserver-iso\nOUTPUT --as=template", "Dangofile:2: OUTPUT has no meaning in a packer://xenserver-iso stage"},
-		{"FROM packer://xenserver-iso AS p\nFROM p", "Dangofile:2: FROM p: a stage cannot start from a packer://xenserver-iso stage: its artifact is the plugin's (opendango knows the artifacts of packer://xenorchestra)"},
-		{"FROM packer://xenorchestra AS p\nFROM --template=t p", "Dangofile:2: FROM p: packer: --template cannot be set when starting from another stage"},
-		{"FROM packer://xenorchestra AS p\nFROM --iso=x p", "Dangofile:2: FROM p: packer: --iso cannot be set when starting from another stage"},
-		{"FROM packer://xenorchestra AS p\nFROM --tags=[] p", "Dangofile:2: packer: --tags is set by LABEL"},
+		{"FROM plugin://Bad Name", "Dangofile:1: FROM requires exactly one source"},
+		{"FROM plugin://xenserver_ISO", "Dangofile:1: plugin: invalid source"},
+		{"FROM --ssh_username=root plugin://xenserver-iso", "Dangofile:1: plugin: --ssh_username is set by CONNECT ssh --user=<user>"},
+		{"FROM --network_names=[x plugin://xenserver-iso", "Dangofile:1: plugin: --network_names: invalid JSON"},
+		{"FROM plugin://xenserver-iso\nCONNECT ssh --user=u\nREBOOT", "Dangofile:3: REBOOT is not supported in a plugin:// stage yet"},
+		{"FROM plugin://xenserver-iso\nOUTPUT --as=template", "Dangofile:2: OUTPUT has no meaning in a plugin://xenserver-iso stage"},
+		{"FROM plugin://xenserver-iso AS p\nFROM p", "Dangofile:2: FROM p: a stage cannot start from a plugin://xenserver-iso stage: its artifact is the plugin's (opendango knows the artifacts of plugin://xenorchestra)"},
+		{"FROM plugin://xenorchestra AS p\nFROM --template=t p", "Dangofile:2: FROM p: plugin: --template cannot be set when starting from another stage"},
+		{"FROM plugin://xenorchestra AS p\nFROM --iso=x p", "Dangofile:2: FROM p: plugin: --iso cannot be set when starting from another stage"},
+		{"FROM plugin://xenorchestra AS p\nFROM --tags=[] p", "Dangofile:2: plugin: --tags is set by LABEL"},
 		{"FROM xo://t\nCONNECT ssh --user=u\nBREAKPOINT --x", "Dangofile:3: BREAKPOINT: unknown flag --x"},
 		{"FROM xo://t\nENV --persist A=1", "Dangofile:2: ENV --persist needs a connection"},
 		{"FROM xo://t\nCONNECT ssh --user=a\nCONNECT ssh --user=b", "Dangofile:3: CONNECT already set at line 2"},
@@ -164,14 +164,14 @@ func TestErrors(t *testing.T) {
 		{"FROM xo://t\nLABEL a=b\nLABEL c=d\nOUTPUT --format=xva x.xva", "Dangofile:2: LABEL needs OUTPUT --as=template"},
 		{"FROM xo://t AS a\nLABEL a=b\nFROM a\nOUTPUT --as=template", "Dangofile:2: LABEL needs OUTPUT --as=template"},
 		{"FROM xo://t\nLABEL opendango-cache:x=1\nOUTPUT --as=template", "Dangofile:2: LABEL opendango-cache:x: keys starting with opendango-cache are reserved"},
-		{"FROM packer://p-b\nLABEL a=b", "Dangofile:2: LABEL is not supported in a packer://p-b stage"},
-		// packer://xenorchestra is in the table: OUTPUT and LABEL map to
+		{"FROM plugin://p-b\nLABEL a=b", "Dangofile:2: LABEL is not supported in a plugin://p-b stage"},
+		// plugin://xenorchestra is in the table: OUTPUT and LABEL map to
 		// its settings, which are not FROM flags.
-		{"FROM packer://xenorchestra\nLABEL a=b", "Dangofile:2: LABEL needs OUTPUT --as=template"},
-		{"FROM packer://xenorchestra\nOUTPUT --format=xva a.xva\nOUTPUT --format=xva b.xva", "Dangofile:3: packer://xenorchestra exports one XVA at most (already at line 2)"},
-		{"FROM --template_name=x packer://xenorchestra", "Dangofile:1: packer: --template_name is set by OUTPUT --as=template <name>"},
-		{"FROM --tags=[] packer://xenorchestra", "Dangofile:1: packer: --tags is set by LABEL"},
-		{"FROM --xva_output=a packer://xenorchestra", "Dangofile:1: packer: --xva_output is set by OUTPUT --format=xva <path>"},
+		{"FROM plugin://xenorchestra\nLABEL a=b", "Dangofile:2: LABEL needs OUTPUT --as=template"},
+		{"FROM plugin://xenorchestra\nOUTPUT --format=xva a.xva\nOUTPUT --format=xva b.xva", "Dangofile:3: plugin://xenorchestra exports one XVA at most (already at line 2)"},
+		{"FROM --template_name=x plugin://xenorchestra", "Dangofile:1: plugin: --template_name is set by OUTPUT --as=template <name>"},
+		{"FROM --tags=[] plugin://xenorchestra", "Dangofile:1: plugin: --tags is set by LABEL"},
+		{"FROM --xva_output=a plugin://xenorchestra", "Dangofile:1: plugin: --xva_output is set by OUTPUT --format=xva <path>"},
 		{"FROM xo://t\nADD a b", "Dangofile:2: ADD needs a connection"},
 		{"FROM xo://t\nFOO", "Dangofile:2: unknown instruction FOO"},
 		{"FROM xo://t\nUSER a:b", "Dangofile:2: USER: groups are not supported"},
@@ -180,7 +180,7 @@ func TestErrors(t *testing.T) {
 		{"FROM xo://t AS a\nCONNECT ssh --user=u\nFROM a\nRUN x\nSERVE http", "Dangofile:5: SERVE must come before BOOT, CONNECT"},
 		{"FROM xo://t\nCONNECT ssh --user=u\nFROM xo://t\nENV --persist A=1\nSERVE http", "Dangofile:4: ENV --persist needs a connection"},
 		{"FROM xo://t\nSERVE ../http", "Dangofile:2: SERVE: \"../http\" is outside the Dangofile directory"},
-		{"FROM --remote_host=h packer://xenserver-iso\nSERVE --addr=10.0.0.1 http", "Dangofile:2: SERVE --addr is not supported in a packer:// stage"},
+		{"FROM --remote_host=h plugin://xenserver-iso\nSERVE --addr=10.0.0.1 http", "Dangofile:2: SERVE --addr is not supported in a plugin:// stage"},
 		{"FROM xo://t\nSERVE http\nENV URL=http://${DANGO_HTTP_ADDR}/ks.cfg", "Dangofile:3: ENV URL: ${DANGO_HTTP_ADDR} is only set after SERVE"},
 		{"FROM xo://t\nBOOT <enter>\nSERVE http", "Dangofile:3: SERVE must come before BOOT"},
 		{"FROM xo://t\nCONNECT ssh --user=u\nBOOT <enter>", "Dangofile:3: BOOT must come before CONNECT"},
@@ -285,7 +285,7 @@ func TestSelect(t *testing.T) {
 }
 
 func TestPackerStage(t *testing.T) {
-	src := "ARG HOST=10.0.0.1\nFROM --remote_host=${HOST} --network_names='[\"LAN\"]' packer://xenserver-iso AS golden\nCONNECT ssh --user=debian\nRUN true\n"
+	src := "ARG HOST=10.0.0.1\nFROM --remote_host=${HOST} --network_names='[\"LAN\"]' plugin://xenserver-iso AS golden\nCONNECT ssh --user=debian\nRUN true\n"
 	p, err := build(t, src, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -301,17 +301,17 @@ func TestPackerStage(t *testing.T) {
 }
 
 // TestPackerKnownBuilder checks the stages of a builder of the table
-// (packer://xenorchestra): OUTPUT and LABEL are accepted, and a stage
+// (plugin://xenorchestra): OUTPUT and LABEL are accepted, and a stage
 // without OUTPUT gets the warning of the native stages.
 func TestPackerKnownBuilder(t *testing.T) {
-	p, err := build(t, "FROM packer://xenorchestra AS golden\nLABEL team=web\nOUTPUT --format=xva --compress=zstd golden.xva\nOUTPUT --as=template golden\n", nil)
+	p, err := build(t, "FROM plugin://xenorchestra AS golden\nLABEL team=web\nOUTPUT --format=xva --compress=zstd golden.xva\nOUTPUT --as=template golden\n", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if s := p.Stages[0]; len(s.Outputs) != 2 || len(s.Labels) != 1 || len(p.Warnings) != 0 {
 		t.Errorf("outputs %v, labels %v, warnings %v", s.Outputs, s.Labels, p.Warnings)
 	}
-	p, err = build(t, "FROM packer://xenorchestra AS golden\n", nil)
+	p, err = build(t, "FROM plugin://xenorchestra AS golden\n", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -321,9 +321,9 @@ func TestPackerKnownBuilder(t *testing.T) {
 }
 
 // TestPackerStageFlags checks the flags of a stage that starts from a
-// packer:// stage: its own, plus the inherited ones of its ancestors.
+// plugin:// stage: its own, plus the inherited ones of its ancestors.
 func TestPackerStageFlags(t *testing.T) {
-	src := "FROM --endpoint=https://xo --insecure=true --template=t --pool=p --cpus=2 packer://xenorchestra AS a\nFROM --cpus=4 a AS b\nFROM --insecure=false b AS c\n"
+	src := "FROM --endpoint=https://xo --insecure=true --template=t --pool=p --cpus=2 plugin://xenorchestra AS a\nFROM --cpus=4 a AS b\nFROM --insecure=false b AS c\n"
 	p, err := build(t, src, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -430,7 +430,7 @@ func TestBoot(t *testing.T) {
 // survive the expansion, whatever the escape character.
 func TestFromFlagQuotes(t *testing.T) {
 	const from = `ARG N=LAN
-FROM --network_names='["${N}", "it'"'"'s"]' --vm_name="Debian 13" packer://xenserver-iso
+FROM --network_names='["${N}", "it'"'"'s"]' --vm_name="Debian 13" plugin://xenserver-iso
 `
 	for _, src := range []string{from, "# escape=`\n" + from} {
 		p, err := build(t, src, nil)

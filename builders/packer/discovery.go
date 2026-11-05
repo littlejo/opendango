@@ -128,7 +128,7 @@ func Find(plugins []Plugin, source string) (*Plugin, string, error) {
 		}
 	}
 	if best == nil {
-		return nil, "", fmt.Errorf("packer: no plugin for %q: install it with `packer plugins install`, or put packer-plugin-<name> in PATH or PACKER_PLUGIN_PATH", source)
+		return nil, "", fmt.Errorf("plugin: no plugin for %q: install it with `opendango plugin pull` (or `packer plugins install`), or put packer-plugin-<name> in PATH or PACKER_PLUGIN_PATH", source)
 	}
 	builder := strings.TrimPrefix(strings.TrimPrefix(source, best.Name), "-")
 	if builder == "" {
@@ -172,14 +172,14 @@ func (p *Plugin) Describe(ctx context.Context) (*Description, error) {
 	defer cancel()
 	out, err := exec.CommandContext(ctx, p.Path, "describe").Output()
 	if err != nil {
-		return nil, fmt.Errorf("packer: %s describe: %w", p.Path, err)
+		return nil, fmt.Errorf("plugin: %s describe: %w", p.Path, err)
 	}
 	var d Description
 	if err := json.Unmarshal(out, &d); err != nil {
-		return nil, fmt.Errorf("packer: %s describe: %w", p.Path, err)
+		return nil, fmt.Errorf("plugin: %s describe: %w", p.Path, err)
 	}
 	if !strings.HasPrefix(d.APIVersion, "x"+apiMajor+".") {
-		return nil, fmt.Errorf("packer: %s speaks plugin API %s, opendango speaks x%s.x", p.Path, d.APIVersion, apiMajor)
+		return nil, fmt.Errorf("plugin: %s speaks plugin API %s, opendango speaks x%s.x", p.Path, d.APIVersion, apiMajor)
 	}
 	return &d, nil
 }

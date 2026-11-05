@@ -68,11 +68,11 @@ type Artifact struct {
 // (KeepPlugin), then stops the plugin.
 func (a *Artifact) Destroy() error {
 	if a.p == nil {
-		return fmt.Errorf("packer: %s: the plugin of the artifact %s is not running anymore", a.plugin, a.ID)
+		return fmt.Errorf("plugin: %s: the plugin of the artifact %s is not running anymore", a.plugin, a.ID)
 	}
 	err := a.art.Destroy()
 	if err != nil {
-		err = fmt.Errorf("packer: %s: deleting the artifact %s: %w%s", a.plugin, a.ID, err, a.p.logTail())
+		err = fmt.Errorf("plugin: %s: deleting the artifact %s: %w%s", a.plugin, a.ID, err, a.p.logTail())
 	}
 	a.Close()
 	return err
@@ -112,7 +112,7 @@ func (b *Build) Run(ctx context.Context) (_ *Artifact, err error) {
 		b.Ui.Say("Warning: " + w)
 	}
 	if err != nil {
-		return nil, fmt.Errorf("packer: %s: invalid configuration: %w%s", b.Plugin.Name, err, p.logTail())
+		return nil, fmt.Errorf("plugin: %s: invalid configuration: %w%s", b.Plugin.Name, err, p.logTail())
 	}
 
 	h := &hook{provision: b.Provision}
@@ -121,7 +121,7 @@ func (b *Build) Run(ctx context.Context) (_ *Artifact, err error) {
 		return nil, h.err
 	}
 	if err != nil {
-		return nil, fmt.Errorf("packer: %s: %w%s", b.Plugin.Name, err, p.logTail())
+		return nil, fmt.Errorf("plugin: %s: %w%s", b.Plugin.Name, err, p.logTail())
 	}
 	if art == nil {
 		return nil, nil
@@ -130,7 +130,7 @@ func (b *Build) Run(ctx context.Context) (_ *Artifact, err error) {
 	if b.DestroyArtifact {
 		b.Ui.Say("Deleting the artifact: no OUTPUT --as=template")
 		if err := art.Destroy(); err != nil {
-			return a, fmt.Errorf("packer: %s: deleting the artifact %s: %w%s", b.Plugin.Name, a.ID, err, p.logTail())
+			return a, fmt.Errorf("plugin: %s: deleting the artifact %s: %w%s", b.Plugin.Name, a.ID, err, p.logTail())
 		}
 	}
 	if b.KeepPlugin {
@@ -161,7 +161,7 @@ func start(pl *Plugin, builder, dir string) (*process, error) {
 		return nil, err
 	}
 	if err := cmd.Start(); err != nil {
-		return nil, fmt.Errorf("packer: starting %s: %w", pl.Path, err)
+		return nil, fmt.Errorf("plugin: starting %s: %w", pl.Path, err)
 	}
 	p := &process{cmd: cmd, log: log}
 
@@ -178,22 +178,22 @@ func start(pl *Plugin, builder, dir string) (*process, error) {
 	case handshake = <-line:
 	case <-time.After(time.Minute):
 		p.stop()
-		return nil, fmt.Errorf("packer: %s did not start within a minute%s", pl.Path, log.String())
+		return nil, fmt.Errorf("plugin: %s did not start within a minute%s", pl.Path, log.String())
 	}
 	parts := strings.Split(strings.TrimSpace(handshake), "|")
 	if len(parts) != 4 || parts[0] != apiMajor {
 		p.stop()
-		return nil, fmt.Errorf("packer: %s: unexpected handshake %q%s", pl.Path, handshake, log.String())
+		return nil, fmt.Errorf("plugin: %s: unexpected handshake %q%s", pl.Path, handshake, log.String())
 	}
 	conn, err := net.Dial(parts[2], parts[3])
 	if err != nil {
 		p.stop()
-		return nil, fmt.Errorf("packer: connecting to %s: %w", pl.Path, err)
+		return nil, fmt.Errorf("plugin: connecting to %s: %w", pl.Path, err)
 	}
 	if p.client, err = packerrpc.NewClient(conn); err != nil {
 		conn.Close()
 		p.stop()
-		return nil, fmt.Errorf("packer: connecting to %s: %w", pl.Path, err)
+		return nil, fmt.Errorf("plugin: connecting to %s: %w", pl.Path, err)
 	}
 	return p, nil
 }
@@ -265,7 +265,7 @@ func (h *hook) Run(ctx context.Context, name string, _ packersdk.Ui, comm packer
 		return nil
 	}
 	if comm == nil {
-		h.err = errors.New("packer: the plugin gave no communicator: CONNECT is required to run instructions")
+		h.err = errors.New("plugin: no communicator: CONNECT is required to run instructions")
 		return h.err
 	}
 	h.err = h.provision(ctx, &Comm{c: comm})

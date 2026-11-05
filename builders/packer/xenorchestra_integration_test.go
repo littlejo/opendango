@@ -2,7 +2,7 @@
 
 package packer_test
 
-// End-to-end test of packer://xenorchestra (github.com/littlejo/packer-plugin-xenorchestra),
+// End-to-end test of plugin://xenorchestra (github.com/littlejo/packer-plugin-xenorchestra),
 // the builder of the table of known builders: OUTPUT and LABEL become its
 // settings, and its template is deleted without OUTPUT --as=template.
 //
@@ -47,7 +47,7 @@ func TestXenorchestraEndToEnd(t *testing.T) {
 	scratch := fmt.Sprintf("opendango-it-xoplugin-scratch-%d", stamp)
 
 	// OUTPUT --as=template with a name, LABEL, and an XVA.
-	src := fmt.Sprintf(`FROM %s --vm_name=%s-vm packer://xenorchestra AS golden
+	src := fmt.Sprintf(`FROM %s --vm_name=%s-vm plugin://xenorchestra AS golden
 CONNECT ssh --user=%s --timeout=10m
 USER root
 RUN test "$(id -u)" = 0
@@ -55,7 +55,7 @@ LABEL team=web stage=golden
 OUTPUT --format=xva --compress=zstd out/golden.xva
 OUTPUT --as=template %s
 
-FROM %s --vm_name=%s packer://xenorchestra AS scratch
+FROM %s --vm_name=%s plugin://xenorchestra AS scratch
 CONNECT ssh --user=%s --timeout=10m
 RUN true
 `, from, golden, user, golden, from, scratch, user)
@@ -93,7 +93,7 @@ RUN true
 }
 
 // TestXenorchestraMultiStageEndToEnd builds base (an intermediate
-// template) then app from it, with packer://xenorchestra: the file written
+// template) then app from it, with plugin://xenorchestra: the file written
 // in base is in app, ENV and USER carry over, the intermediate template is
 // deleted at the end and app keeps its labels.
 func TestXenorchestraMultiStageEndToEnd(t *testing.T) {
@@ -107,7 +107,7 @@ func TestXenorchestraMultiStageEndToEnd(t *testing.T) {
 		t.Skipf("packer-plugin-xenorchestra: %v", err)
 	}
 	app := fmt.Sprintf("opendango-it-xoplugin-app-%d", time.Now().Unix())
-	src := fmt.Sprintf(`FROM %s packer://xenorchestra AS base
+	src := fmt.Sprintf(`FROM %s plugin://xenorchestra AS base
 CONNECT ssh --user=%s --timeout=10m
 USER root
 ENV STAGE_ENV=from-base
