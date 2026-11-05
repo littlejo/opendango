@@ -53,6 +53,11 @@ func ParseConfig(source string, flags map[string]string) (*Config, error) {
 	if !component.MatchString(source) {
 		return nil, fmt.Errorf("packer: invalid source %q: expected <plugin>-<builder>, such as xenserver-iso", source)
 	}
+	if k := Lookup(source); k != nil {
+		if err := k.checkFlags(flags); err != nil {
+			return nil, err
+		}
+	}
 	cfg := &Config{Component: source, Settings: map[string]any{}}
 	for k, v := range flags {
 		if instead, ok := reserved[k]; ok {

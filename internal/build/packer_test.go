@@ -42,7 +42,9 @@ func testPlugin(t *testing.T) FindPluginFunc {
 		t.Fatalf("building the test plugin: %v", pluginErr)
 	}
 	return func(_ context.Context, source string) (*packer.Plugin, string, error) {
-		if source != "opendangotest-local" {
+		// The tests of the table of known builders use the test plugin
+		// as packer://xenorchestra.
+		if source != "opendangotest-local" && source != "xenorchestra" {
 			return nil, "", fmt.Errorf("unexpected source %q", source)
 		}
 		return &packer.Plugin{Name: "opendangotest", Path: pluginPath}, "local", nil
@@ -153,4 +155,40 @@ func TestPackerStageFailure(t *testing.T) {
 			t.Errorf("log:\n%s", log.String())
 		}
 	})
+}
+
+// TestPackerKnownBuilder checks that OUTPUT and LABEL become the settings of
+// a builder of the table, and that the artifact is deleted without OUTPUT
+// --as=template.
+func TestPackerKnownBuilder(t *testing.T) {
+	for _, tt := range []struct {
+		name, lines, want string
+		destroyed         bool
+	}{
+		{"template", "LABEL team=web stage=golden\nOUTPUT --as=template golden\n", "artifact: template_name=golden tags=team=web,stage=golden xva= compress=", false},
+		{"unnamed template", "OUTPUT --as=template\n", "", false},
+		{"xva only", "OUTPUT --format=xva --compress=zstd out/golden.xva\n", "artifact: template_name= tags= xva=CTX/out/golden.xva compress=zstd", true},
+		{"no output", "", "", true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			root := t.TempDir()
+			ctxDir := t.TempDir()
+			src := fmt.Sprintf("FROM --root=%s packer://xenorchestra\nCONNECT ssh --user=tester\nRUN true\n%s", root, tt.lines)
+			var log syncBuffer
+			if err := Run(context.Background(), mustPlan(t, src), Options{ContextDir: ctxDir, Out: &log, FindPlugin: testPlugin(t)}); err != nil {
+				t.Fatalf("%v\n%s", err, log.String())
+			}
+			want := strings.ReplaceAll(tt.want, "CTX", ctxDir)
+			if got := strings.Contains(log.String(), "==> stage-0: artifact: "); (want != "") != got || (want != "" && !strings.Contains(log.String(), want)) {
+				t.Errorf("want %q in:\n%s", want, log.String())
+			}
+			_, err := os.Stat(filepath.Join(root, "artifact-destroyed"))
+			if destroyed := err == nil; destroyed != tt.destroyed {
+				t.Errorf("artifact destroyed %v, want %v\n%s", destroyed, tt.destroyed, log.String())
+			}
+			if tt.destroyed && !strings.Contains(log.String(), "Deleting the artifact: no OUTPUT --as=template") {
+				t.Errorf("log:\n%s", log.String())
+			}
+		})
+	}
 }

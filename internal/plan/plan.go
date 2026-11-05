@@ -79,6 +79,15 @@ func (s *Stage) Root() *Stage {
 	return s
 }
 
+// known returns what opendango knows of the Packer builder of the stage,
+// nil for a native stage or a builder that is not in the table.
+func (s *Stage) known() *packer.Known {
+	if !s.IsPacker() {
+		return nil
+	}
+	return packer.Lookup(s.Root().From.Source)
+}
+
 // IsPacker tells whether a Packer plugin builds the stage
 // (FROM packer://...).
 func (s *Stage) IsPacker() bool { return s.Root().From.Builder == "packer" }
@@ -338,8 +347,8 @@ func Build(file string, res *parser.Result, buildArgs map[string]string) (*Plan,
 			stage.Boot = append(stage.Boot, b)
 
 		case "LABEL":
-			if stage.IsPacker() {
-				return fail(line, fmt.Errorf("LABEL is not supported in a packer:// stage: the plugin configuration (FROM flags) sets its artifact"))
+			if k := stage.known(); stage.IsPacker() && (k == nil || k.Tags == "") {
+				return fail(line, fmt.Errorf("LABEL is not supported in a packer://%s stage: the plugin configuration (FROM flags) sets its artifact (opendango maps LABEL for packer://%s)", stage.Root().From.Source, packer.KnownSources()))
 			}
 			l, err := instructions.ParseLabel(cmd, expand)
 			if err != nil {
@@ -353,12 +362,23 @@ func Build(file string, res *parser.Result, buildArgs map[string]string) (*Plan,
 			}
 
 		case "OUTPUT":
-			if stage.IsPacker() {
-				return fail(line, fmt.Errorf("OUTPUT has no meaning in a packer:// stage: the plugin configuration (FROM flags) sets its artifact"))
+			k := stage.known()
+			if stage.IsPacker() && k == nil {
+				return fail(line, fmt.Errorf("OUTPUT has no meaning in a packer://%s stage: the plugin configuration (FROM flags) sets its artifact (opendango maps OUTPUT for packer://%s)", stage.Root().From.Source, packer.KnownSources()))
 			}
 			out, err := instructions.ParseOutput(cmd, expand)
 			if err != nil {
 				return fail(line, err)
+			}
+			if k != nil && out.Kind == instructions.OutputXVA {
+				if k.XVAOutput == "" {
+					return fail(line, fmt.Errorf("OUTPUT --format=xva is not supported by packer://%s", stage.Root().From.Source))
+				}
+				for _, prev := range stage.Outputs {
+					if prev.Kind == instructions.OutputXVA {
+						return fail(line, fmt.Errorf("packer://%s exports one XVA at most (already at line %d)", stage.Root().From.Source, prev.Line()))
+					}
+				}
 			}
 			for _, prev := range stage.Outputs {
 				if out.Kind == instructions.OutputTemplate && prev.Kind == instructions.OutputTemplate {
@@ -384,8 +404,12 @@ func Build(file string, res *parser.Result, buildArgs map[string]string) (*Plan,
 		}
 	}
 	for _, s := range p.Stages {
-		if len(s.Outputs) == 0 && len(s.Children) == 0 && !s.IsPacker() {
+		switch {
+		case len(s.Outputs) > 0 || len(s.Children) > 0:
+		case !s.IsPacker():
 			p.Warnings = append(p.Warnings, fmt.Sprintf("stage %s has no OUTPUT and no stage starts from it: its VM will be destroyed at the end of the build", s.Name()))
+		case s.known() != nil:
+			p.Warnings = append(p.Warnings, fmt.Sprintf("stage %s has no OUTPUT and no stage starts from it: the plugin's artifact will be deleted at the end of the stage", s.Name()))
 		}
 	}
 	var unused []string

@@ -149,7 +149,7 @@ func TestErrors(t *testing.T) {
 		{"FROM --ssh_username=root packer://xenserver-iso", "Dangofile:1: packer: --ssh_username is set by CONNECT ssh --user=<user>"},
 		{"FROM --network_names=[x packer://xenserver-iso", "Dangofile:1: packer: --network_names: invalid JSON"},
 		{"FROM packer://xenserver-iso\nCONNECT ssh --user=u\nREBOOT", "Dangofile:3: REBOOT is not supported in a packer:// stage yet"},
-		{"FROM packer://xenserver-iso\nOUTPUT --as=template", "Dangofile:2: OUTPUT has no meaning in a packer:// stage"},
+		{"FROM packer://xenserver-iso\nOUTPUT --as=template", "Dangofile:2: OUTPUT has no meaning in a packer://xenserver-iso stage"},
 		{"FROM packer://xenserver-iso AS p\nFROM p", "Dangofile:2: FROM p: a stage cannot start from a packer:// stage"},
 		{"FROM xo://t\nCONNECT ssh --user=u\nBREAKPOINT --x", "Dangofile:3: BREAKPOINT: unknown flag --x"},
 		{"FROM xo://t\nENV --persist A=1", "Dangofile:2: ENV --persist needs a connection"},
@@ -161,7 +161,14 @@ func TestErrors(t *testing.T) {
 		{"FROM xo://t\nLABEL a=b\nLABEL c=d\nOUTPUT --format=xva x.xva", "Dangofile:2: LABEL needs OUTPUT --as=template"},
 		{"FROM xo://t AS a\nLABEL a=b\nFROM a\nOUTPUT --as=template", "Dangofile:2: LABEL needs OUTPUT --as=template"},
 		{"FROM xo://t\nLABEL opendango-cache:x=1\nOUTPUT --as=template", "Dangofile:2: LABEL opendango-cache:x: keys starting with opendango-cache are reserved"},
-		{"FROM packer://p-b\nLABEL a=b", "Dangofile:2: LABEL is not supported in a packer:// stage"},
+		{"FROM packer://p-b\nLABEL a=b", "Dangofile:2: LABEL is not supported in a packer://p-b stage"},
+		// packer://xenorchestra is in the table: OUTPUT and LABEL map to
+		// its settings, which are not FROM flags.
+		{"FROM packer://xenorchestra\nLABEL a=b", "Dangofile:2: LABEL needs OUTPUT --as=template"},
+		{"FROM packer://xenorchestra\nOUTPUT --format=xva a.xva\nOUTPUT --format=xva b.xva", "Dangofile:3: packer://xenorchestra exports one XVA at most (already at line 2)"},
+		{"FROM --template_name=x packer://xenorchestra", "Dangofile:1: packer: --template_name is set by OUTPUT --as=template <name>"},
+		{"FROM --tags=[] packer://xenorchestra", "Dangofile:1: packer: --tags is set by LABEL"},
+		{"FROM --xva_output=a packer://xenorchestra", "Dangofile:1: packer: --xva_output is set by OUTPUT --format=xva <path>"},
 		{"FROM xo://t\nADD a b", "Dangofile:2: ADD needs a connection"},
 		{"FROM xo://t\nFOO", "Dangofile:2: unknown instruction FOO"},
 		{"FROM xo://t\nUSER a:b", "Dangofile:2: USER: groups are not supported"},
@@ -287,6 +294,26 @@ func TestPackerStage(t *testing.T) {
 	// The plugin produces the artifact: no warning about a missing OUTPUT.
 	if len(p.Warnings) != 0 {
 		t.Errorf("warnings = %v", p.Warnings)
+	}
+}
+
+// TestPackerKnownBuilder checks the stages of a builder of the table
+// (packer://xenorchestra): OUTPUT and LABEL are accepted, and a stage
+// without OUTPUT gets the warning of the native stages.
+func TestPackerKnownBuilder(t *testing.T) {
+	p, err := build(t, "FROM packer://xenorchestra AS golden\nLABEL team=web\nOUTPUT --format=xva --compress=zstd golden.xva\nOUTPUT --as=template golden\n", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s := p.Stages[0]; len(s.Outputs) != 2 || len(s.Labels) != 1 || len(p.Warnings) != 0 {
+		t.Errorf("outputs %v, labels %v, warnings %v", s.Outputs, s.Labels, p.Warnings)
+	}
+	p, err = build(t, "FROM packer://xenorchestra AS golden\n", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "stage golden has no OUTPUT and no stage starts from it: the plugin's artifact will be deleted at the end of the stage"; len(p.Warnings) != 1 || p.Warnings[0] != want {
+		t.Errorf("warnings = %q", p.Warnings)
 	}
 }
 
