@@ -141,36 +141,51 @@ opendango build --build-arg XAPI_PASSWORD="$XAPI_PASSWORD"
   `http_port_min` and `http_port_max`), and the `BOOT` lines its
   `boot_command`, with `${DANGO_HTTP_ADDR}` turned into
   `{{ .HTTPIP }}:{{ .HTTPPort }}`: the same Dangofile lines work with
-  `plugin://xenserver-iso`. `SERVE --addr` is not available, nor
-  `$DANGO_HTTP_ADDR` in `RUN`.
-- Only builders are supported. `REBOOT` is not available in a plugin://
-  stage.
-- `OUTPUT` and `LABEL` work with the builders opendango knows, and only with
-  them (the others set their artifact with their own flags):
+  `plugin://xenserver-iso`. `RUN` gets `$DANGO_HTTP_ADDR` when the plugin
+  tells the address of its server.
+- `REBOOT` works through the plugin's connection, and `BREAKPOINT` and
+  `--on-error=ask` print the `ssh` command of that connection.
 
-  | Builder | `OUTPUT --as=template <name>` | `LABEL` | `OUTPUT --format=xva [--compress] <path>` |
-  |---|---|---|---|
-  | `plugin://xenorchestra` ([packer-plugin-xenorchestra](https://github.com/littlejo/packer-plugin-xenorchestra)) | `template_name` | `tags` | `xva_output`, `xva_compress` (one XVA) |
+### Builders opendango knows
 
-  Like a native stage, a stage without `OUTPUT --as=template` deletes the
-  plugin's artifact once built (an XVA stays). These settings cannot be FROM
-  flags.
-- Multi-stage builds work with these builders too: `FROM [--flags] <stage>`
-  starts from the template of the stage (`template` for xenorchestra), takes
-  its `endpoint`, `token` and `insecure` flags unless it sets them, and
-  cannot set `template`, `pool` nor `iso`. A parent without
-  `OUTPUT --as=template` is an intermediate template
-  (`opendango-tmp-<stage>-<time>`), deleted at the end of the build.
+With `plugin://xenorchestra`
+([packer-plugin-xenorchestra](https://github.com/littlejo/packer-plugin-xenorchestra)),
+a stage behaves like an `xo://` one: `OUTPUT`, `LABEL`, `SERVE --addr`,
+multi-stage builds and the cache work the same way. The other plugins set
+their artifact with their own flags: `OUTPUT` and `LABEL` are errors, a stage
+cannot start from theirs, and they are not cached.
 
-  ```dockerfile
-  FROM --template="Debian 13 Cloud-init (Hub)" --network=LAN plugin://xenorchestra AS base
-  CONNECT ssh --user=debian
-  RUN apt-get update && apt-get -y upgrade
+| Instruction | `plugin://xenorchestra` |
+|---|---|
+| `OUTPUT --as=template <name>` | `template_name` |
+| `LABEL` | `tags` (`key=value`) |
+| `OUTPUT --format=xva [--compress] <path>` | the plugin's `xenorchestra-xva` post-processor, once per OUTPUT |
+| `SERVE --addr` | `http_ip` |
+| `FROM <stage>` | `template` = the parent's template |
+| cache | the plugin's `xenorchestra-template` data source finds the template tagged with the key |
 
-  FROM --cpus=4 base AS app
-  RUN apt-get install -y nginx
-  OUTPUT --as=template nginx
-  ```
+These settings cannot be FROM flags. Like a native stage, a stage without
+`OUTPUT --as=template` deletes the plugin's template once built (or at the
+end of the build when other stages start from it). A stage that starts from
+another one takes its `endpoint`, `token` and `insecure` flags unless it sets
+them, and cannot set `template`, `pool` nor `iso`.
+
+```dockerfile
+FROM --template="Debian 13 Cloud-init (Hub)" --network=LAN plugin://xenorchestra AS base
+CONNECT ssh --user=debian
+RUN apt-get update && apt-get -y upgrade
+
+FROM --cpus=4 base AS app
+RUN apt-get install -y nginx
+LABEL team=web
+OUTPUT --format=xva --compress=zstd nginx.xva
+OUTPUT --as=template nginx
+```
+
+In a cached plugin stage, `--on-error=ask` does not offer to retry an
+instruction (the plugin tags the template for the cache at the end): use
+`--no-cache` to fix a build by hand. The plugin serves `SERVE` without
+logging the requests.
 
 ### Installing plugins
 

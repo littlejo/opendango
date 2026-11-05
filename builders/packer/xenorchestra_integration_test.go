@@ -184,6 +184,7 @@ RUN echo %d > /opt/opendango-cache-it
 FROM base AS app
 RUN %s
 LABEL team=web
+OUTPUT --format=xva --compress=zstd app.xva
 OUTPUT --as=template %s
 `, from, user, stamp, run, app)
 	}
@@ -195,8 +196,11 @@ OUTPUT --as=template %s
 			deleteXOTemplateID(t, id)
 		}
 	}()
+	ctxDir := t.TempDir()
+	xva := filepath.Join(ctxDir, "app.xva")
 	buildCached := func(src string) string {
 		t.Helper()
+		os.Remove(xva)
 		var log bytes.Buffer
 		res, err := parser.Parse(strings.NewReader(src))
 		if err != nil {
@@ -206,7 +210,7 @@ OUTPUT --as=template %s
 		if err != nil {
 			t.Fatal(err)
 		}
-		err = build.Run(ctx, p, build.Options{ContextDir: t.TempDir(), Out: io.MultiWriter(os.Stdout, &log)})
+		err = build.Run(ctx, p, build.Options{ContextDir: ctxDir, Out: io.MultiWriter(os.Stdout, &log)})
 		for _, m := range artifact.FindAllStringSubmatch(log.String(), -1) {
 			made[m[1]] = true
 		}
@@ -231,6 +235,10 @@ OUTPUT --as=template %s
 	}
 	if strings.Contains(log, "Running the instructions") {
 		t.Error("second build ran instructions")
+	}
+	// The XVA comes from the cached template.
+	if info, err := os.Stat(xva); err != nil || info.Size() < 1<<20 {
+		t.Errorf("XVA of the cached template: %v %v", info, err)
 	}
 	t.Log("third build: app changes, base comes from the cache")
 	log = buildCached(src(run + " && true"))

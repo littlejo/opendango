@@ -389,15 +389,8 @@ func Build(file string, res *parser.Result, buildArgs map[string]string) (*Plan,
 			if err != nil {
 				return fail(line, err)
 			}
-			if k != nil && out.Kind == instructions.OutputXVA {
-				if k.XVAOutput == "" {
-					return fail(line, fmt.Errorf("OUTPUT --format=xva is not supported by plugin://%s", stage.Root().From.Source))
-				}
-				for _, prev := range stage.Outputs {
-					if prev.Kind == instructions.OutputXVA {
-						return fail(line, fmt.Errorf("plugin://%s exports one XVA at most (already at line %d)", stage.Root().From.Source, prev.Line()))
-					}
-				}
+			if k != nil && out.Kind == instructions.OutputXVA && k.XVA == nil {
+				return fail(line, fmt.Errorf("OUTPUT --format=xva is not supported by plugin://%s", stage.Root().From.Source))
 			}
 			for _, prev := range stage.Outputs {
 				if out.Kind == instructions.OutputTemplate && prev.Kind == instructions.OutputTemplate {
