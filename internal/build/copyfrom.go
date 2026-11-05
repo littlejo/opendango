@@ -9,7 +9,9 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"slices"
 	"strings"
+	"time"
 
 	"github.com/littlejo/opendango/internal/instructions"
 	"github.com/littlejo/opendango/internal/plan"
@@ -195,4 +197,126 @@ func (e *executor) uploadTar(ctx context.Context, srcs []string, dir string) err
 	}
 	q := instructions.ShellQuote
 	return e.run(ctx, "tar -C "+q(dir)+" -xf "+q(remote)+" && rm -f "+q(remote))
+}
+
+// filesCache keeps the files fetched for COPY --from by cache key, so that
+// a later build need not start the source stage's machine:
+// <dir>/<key>/paths lists the fetched paths, <dir>/<key>/root holds them.
+// The zero value keeps nothing.
+type filesCache string
+
+func (c filesCache) root(key string) string { return filepath.Join(string(c), key, "root") }
+
+// has tells whether every path was fetched for key.
+func (c filesCache) has(key string, paths []string) bool {
+	if c == "" {
+		return false
+	}
+	b, err := os.ReadFile(filepath.Join(string(c), key, "paths"))
+	if err != nil {
+		return false
+	}
+	have := strings.Split(strings.TrimSpace(string(b)), "\n")
+	for _, p := range paths {
+		if !slices.Contains(have, p) {
+			return false
+		}
+	}
+	return true
+}
+
+// tmp returns a new directory to fetch into, next to the entries (commit
+// renames it).
+func (c filesCache) tmp(key string) (string, error) {
+	if err := os.MkdirAll(string(c), 0o700); err != nil {
+		return "", err
+	}
+	return os.MkdirTemp(string(c), key+".tmp-")
+}
+
+// commit makes the fetched directory tmp the entry of key, replacing the
+// previous one, and returns its root.
+func (c filesCache) commit(key, tmp string, paths []string) (string, error) {
+	if err := os.WriteFile(filepath.Join(tmp, "paths"), []byte(strings.Join(paths, "\n")+"\n"), 0o600); err != nil {
+		return "", err
+	}
+	entry := filepath.Join(string(c), key)
+	if err := os.RemoveAll(entry); err != nil {
+		return "", err
+	}
+	if err := os.Rename(tmp, entry); err != nil {
+		return "", err
+	}
+	return c.root(key), nil
+}
+
+// fetchFiles fetches the files later stages COPY --from this one: into the
+// files cache when the stage has a key (and no instruction was retried by
+// hand), otherwise into the build's directory.
+func (e *executor) fetchFiles(ctx context.Context, stage *plan.Stage) error {
+	if len(stage.Fetch) == 0 {
+		return nil
+	}
+	if e.filesKey == "" || e.retried || e.files == "" {
+		return e.fetch(ctx, stage, e.fetchRoot)
+	}
+	tmp, err := e.files.tmp(e.filesKey)
+	if err != nil {
+		return err
+	}
+	if err := e.fetch(ctx, stage, filepath.Join(tmp, "root")); err != nil {
+		os.RemoveAll(tmp)
+		return err
+	}
+	root, err := e.files.commit(e.filesKey, tmp, stage.Fetch)
+	if err != nil {
+		os.RemoveAll(tmp)
+		return err
+	}
+	e.fetchRoot = root
+	return nil
+}
+
+// fetchStage is a stage that starts from stage, without instructions: the
+// machine that fetches the files of a stage found in the cache.
+func fetchStage(stage *plan.Stage) *plan.Stage {
+	return &plan.Stage{From: &instructions.From{Stage: stage.Name()}, Parent: stage, Connect: stage.Connect, Index: stage.Index}
+}
+
+// fetchFromTemplate fetches the files of a stage found in the cache as a
+// template, without its files: a temporary VM starts from the template, the
+// files are fetched, the VM is deleted.
+func fetchFromTemplate(ctx context.Context, stage *plan.Stage, templateID string, e *executor, opts Options) (err error) {
+	e.say("The files of COPY --from are not in the cache: fetching them from the cached template %s", templateID)
+	b, err := opts.NewBuilder(fetchStage(stage), templateID)
+	if err != nil {
+		return err
+	}
+	fe := &executor{file: e.file, name: e.name, out: e.out, b: b, connect: stage.Connect, dial: e.dial, retryDelay: e.retryDelay,
+		contextDir: e.contextDir, console: e.console, filesKey: e.filesKey, files: e.files, fetchRoot: e.fetchRoot}
+	authorizedKey, err := fe.generateKey()
+	if err != nil {
+		return err
+	}
+	defer func() {
+		cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Minute)
+		defer cancel()
+		fe.say("Destroying VM %s", b.ID())
+		if derr := b.Destroy(cctx); derr != nil {
+			err = errors.Join(err, fmt.Errorf("destroying VM %s: %w", b.ID(), derr))
+		}
+	}()
+	fe.say("Starting VM")
+	if err := b.Start(ctx, CloudConfig(stage.Connect.User, authorizedKey)); err != nil {
+		return fmt.Errorf("starting VM: %w", err)
+	}
+	if err := fe.open(ctx); err != nil {
+		return err
+	}
+	defer fe.comm.Close()
+	if err := fe.fetchFiles(ctx, stage); err != nil {
+		return err
+	}
+	e.fetchRoot = fe.fetchRoot
+	return nil
 }

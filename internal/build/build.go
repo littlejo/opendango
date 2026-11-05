@@ -90,6 +90,9 @@ type Options struct {
 	// ContextDir is the directory COPY sources and OUTPUT paths are
 	// relative to: the Dangofile's directory.
 	ContextDir string
+	// FilesCache is the directory of the files cache of COPY --from;
+	// empty: ~/.cache/opendango/files (unless NoCache).
+	FilesCache string
 	// filesDir holds the files fetched for COPY --from during the build
 	// (set by Run).
 	filesDir string
@@ -195,7 +198,7 @@ func Run(ctx context.Context, p *plan.Plan, opts Options) (err error) {
 	keys := map[*plan.Stage]string{}
 	if !opts.NoCache {
 		for _, s := range stages {
-			if keys[s], err = cacheKey(p.File, s, keys[s.Parent], opts.ContextDir); err != nil {
+			if keys[s], err = stageKey(p.File, s, keys, opts.ContextDir); err != nil {
 				return err
 			}
 		}
@@ -208,6 +211,11 @@ func Run(ctx context.Context, p *plan.Plan, opts Options) (err error) {
 	}
 	defer os.RemoveAll(filesDir)
 	opts.filesDir = filesDir
+	if opts.FilesCache == "" && !opts.NoCache {
+		if dir, err := os.UserCacheDir(); err == nil {
+			opts.FilesCache = filepath.Join(dir, "opendango", "files")
+		}
+	}
 
 	done := map[*plan.Stage]*executor{}
 	var temporary []*executor
@@ -264,9 +272,10 @@ func Run(ctx context.Context, p *plan.Plan, opts Options) (err error) {
 			}
 			pending = append(pending[:i:i], pending[i+1:]...)
 			needed := needsTemplate(s, selected)
-			// Only a stage that ends as a template can be cached.
+			// Only a stage that ends as a template, or whose files a later
+			// stage copies (the files cache), can be cached.
 			key := keys[s]
-			if !needed && s.TemplateOutput() == nil {
+			if !needed && s.TemplateOutput() == nil && len(s.Fetch) == 0 {
 				key = ""
 			}
 			running++
@@ -274,10 +283,6 @@ func Run(ctx context.Context, p *plan.Plan, opts Options) (err error) {
 			from := map[string]string{}
 			for _, src := range s.CopyFrom {
 				from[src.Name()] = done[src].fetchRoot
-			}
-			// A stage that feeds COPY --from runs, for its files.
-			if len(s.Fetch) > 0 {
-				key = ""
 			}
 			go func(parent *executor) {
 				e, err := runStage(ctx, p, s, parent, needed, key, from, con, opts)
@@ -314,6 +319,12 @@ func Run(ctx context.Context, p *plan.Plan, opts Options) (err error) {
 	}
 	fmt.Fprintln(opts.Out, "==> Build finished")
 	return nil
+}
+
+// filesOnly tells whether a stage only feeds COPY --from: it ends neither
+// as a template nor with an output, so the files cache is its cache.
+func filesOnly(s *plan.Stage, needed bool) bool {
+	return !needed && len(s.Outputs) == 0 && len(s.Fetch) > 0
 }
 
 // ready tells whether the stages s needs are built: its parent and the
@@ -388,6 +399,10 @@ func runStage(ctx context.Context, p *plan.Plan, stage *plan.Stage, parent *exec
 		console:    con,
 		fetchRoot:  filepath.Join(opts.filesDir, fmt.Sprint(stage.Index)),
 		fetched:    from,
+		files:      filesCache(opts.FilesCache),
+	}
+	if key != "" && len(stage.Fetch) > 0 {
+		e.filesKey = key
 	}
 	if parent != nil {
 		// Like a Docker image: USER, SHELL, WORKDIR and ENV carry over, ARG
@@ -400,10 +415,26 @@ func runStage(ctx context.Context, p *plan.Plan, stage *plan.Stage, parent *exec
 		e.user = e.connect.User
 	}
 
-	if key != "" {
+	// A stage that only feeds COPY --from, with its files in the cache:
+	// nothing to build.
+	if e.filesKey != "" && filesOnly(stage, needed) && e.files.has(key, stage.Fetch) {
+		e.say("Using the cached files of COPY --from (key %s)", key[:12])
+		e.fetchRoot = e.files.root(key)
+		e.replay(stage.Steps)
+		e.say("Stage finished (cached)")
+		return e, nil
+	}
+	if key != "" && !filesOnly(stage, needed) {
 		found, err := b.FindCache(ctx, key)
 		if err != nil {
 			return nil, fmt.Errorf("looking up the cache: %w", err)
+		}
+		if found && e.filesKey != "" {
+			if e.files.has(key, stage.Fetch) {
+				e.fetchRoot = e.files.root(key)
+			} else if err := fetchFromTemplate(ctx, stage, b.ID(), e, opts); err != nil {
+				return nil, err
+			}
 		}
 		if found {
 			e.say("Using the cached template %s (key %s)", b.ID(), key[:12])
@@ -487,7 +518,7 @@ func runStage(ctx context.Context, p *plan.Plan, stage *plan.Stage, parent *exec
 		return nil, err
 	}
 	// The files later stages COPY --from, while the VM runs.
-	if err := e.fetch(ctx, stage, e.fetchRoot); err != nil {
+	if err := e.fetchFiles(ctx, stage); err != nil {
 		return nil, err
 	}
 
@@ -707,6 +738,10 @@ type executor struct {
 	// fetched are the fetchRoot of the stages this one COPY --from, by
 	// stage name.
 	fetched map[string]string
+	// filesKey is the key of the stage's files in the files cache, "" when
+	// they are not kept.
+	filesKey string
+	files    filesCache
 	// answer is the answer to --on-error=ask that ended the stage, when
 	// answered is true.
 	answer   choice

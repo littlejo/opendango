@@ -27,8 +27,26 @@ const cacheVersion = "opendango-cache-v1"
 // pause is not reproducible) or an ADD of a URL without --checksum (the
 // content is unknown until downloaded).
 func cacheKey(file string, s *plan.Stage, parentKey, contextDir string) (string, error) {
+	return stageKey(file, s, map[*plan.Stage]string{s.Parent: parentKey}, contextDir)
+}
+
+// stageKey is cacheKey with the keys of the stages built before (the
+// parent, and the stages of COPY --from): a COPY --from is keyed by its
+// source stage's key and its paths, the files being what that stage
+// builds. A stage that copies from a stage without a key has none.
+func stageKey(file string, s *plan.Stage, keys map[*plan.Stage]string, contextDir string) (string, error) {
+	parentKey := keys[s.Parent]
 	if s.Parent != nil && parentKey == "" {
 		return "", nil
+	}
+	for _, src := range s.CopyFrom {
+		if keys[src] == "" {
+			return "", nil
+		}
+	}
+	byName := map[string]string{}
+	for _, src := range s.CopyFrom {
+		byName[src.Name()] = keys[src]
 	}
 	h := sha256.New()
 	fmt.Fprintf(h, "%s\nparent %q\n", cacheVersion, parentKey)
@@ -87,6 +105,10 @@ func cacheKey(file string, s *plan.Stage, parentKey, contextDir string) (string,
 		case *instructions.Run:
 			fmt.Fprintf(h, "RUN %q\n", st.Script)
 		case *instructions.Copy:
+			if st.From != "" {
+				fmt.Fprintf(h, "COPY --from=%q %q %q %q %q\n", byName[st.From], st.Sources, st.Dest, st.Chmod, st.Chown)
+				continue
+			}
 			fmt.Fprintf(h, "COPY %q %q %q %q\n", st.Sources, st.Dest, st.Chmod, st.Chown)
 			if err := hashSources(h, contextDir, st.Sources); err != nil {
 				return "", &plan.Error{File: file, Line: st.Line(), Err: fmt.Errorf("COPY: %w", err)}

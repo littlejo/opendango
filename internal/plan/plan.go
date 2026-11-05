@@ -741,6 +741,9 @@ func copyFrom(stage *Stage, c *instructions.Copy, byName map[string]*Stage) erro
 	if src == stage {
 		return fmt.Errorf("COPY --from=%s: a stage cannot copy from itself", c.From)
 	}
+	if src.Connect == nil {
+		return fmt.Errorf("COPY --from=%s: stage %s has no connection to fetch the files through", c.From, c.From)
+	}
 	if !slices.Contains(stage.CopyFrom, src) {
 		stage.CopyFrom = append(stage.CopyFrom, src)
 	}
