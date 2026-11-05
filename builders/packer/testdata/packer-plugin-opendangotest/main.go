@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 
 	"github.com/hashicorp/hcl/v2/hcldec"
@@ -64,7 +65,42 @@ type Config struct {
 
 type Builder struct{ config Config }
 
-func (b *Builder) ConfigSpec() hcldec.ObjectSpec { return hcldec.ObjectSpec{} }
+func (b *Builder) ConfigSpec() hcldec.ObjectSpec { return specOf(reflect.TypeOf(Config{})) }
+
+// specOf describes the settings of a configuration struct by its
+// mapstructure tags, like the code packer-sdc generates for real plugins.
+func specOf(t reflect.Type) hcldec.ObjectSpec {
+	spec := hcldec.ObjectSpec{}
+	for i := 0; i < t.NumField(); i++ {
+		f := t.Field(i)
+		tag := f.Tag.Get("mapstructure")
+		if tag == ",squash" {
+			for k, v := range specOf(f.Type) {
+				spec[k] = v
+			}
+			continue
+		}
+		if tag == "" {
+			continue
+		}
+		var ty cty.Type
+		switch f.Type.Kind() {
+		case reflect.String:
+			ty = cty.String
+		case reflect.Int, reflect.Int64:
+			ty = cty.Number
+		case reflect.Bool:
+			ty = cty.Bool
+		case reflect.Slice:
+			ty = cty.List(cty.String)
+		default:
+			// cty's dynamic type does not go through the RPC (gob).
+			ty = cty.String
+		}
+		spec[tag] = &hcldec.AttrSpec{Name: tag, Type: ty}
+	}
+	return spec
+}
 
 func (b *Builder) Prepare(raws ...any) ([]string, []string, error) {
 	if err := config.Decode(&b.config, &config.DecodeOpts{}, raws...); err != nil {

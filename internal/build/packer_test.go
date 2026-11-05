@@ -379,3 +379,32 @@ func TestPackerCacheNoRetry(t *testing.T) {
 		t.Errorf("err = %v, log:\n%s", err, log.String())
 	}
 }
+
+// TestCheckPlugins checks the FROM flags with the test plugin: a typo with
+// its suggestion, the plugin's Prepare errors and warnings, a plugin that is
+// not installed, and a stage that starts from another one.
+func TestCheckPlugins(t *testing.T) {
+	root := t.TempDir()
+	find := testPlugin(t)
+	for _, tt := range []struct {
+		name, src, err, warning string
+	}{
+		{"valid", "FROM --root=" + root + " --count=2 plugin://opendangotest-local\n", "", "this is a test plugin"},
+		{"typo", "FROM --root=" + root + " --cuont=2 plugin://opendangotest-local\n", `Dangofile:1: plugin://opendangotest-local has no setting "cuont", did you mean --count?`, ""},
+		{"unknown", "FROM --root=" + root + " --zzzzzz=2 plugin://opendangotest-local\n", `Dangofile:1: plugin://opendangotest-local has no setting "zzzzzz" (opendango plugin describe opendangotest-local lists them)`, ""},
+		{"prepare", "FROM --count=2 plugin://opendangotest-local\n", "Dangofile:1: plugin://opendangotest-local: root is required", ""},
+		{"not installed", "FROM --x=1 plugin://nothing-here\n", "", "stage stage-0: plugin://nothing-here is not checked: unexpected source"},
+		// The child gets a placeholder for its parent's template.
+		{"child", "FROM --root=" + root + " plugin://xenorchestra AS base\nFROM --root=" + root + " base AS app\n", "", ""},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			warnings, err := CheckPlugins(context.Background(), mustPlan(t, tt.src), t.TempDir(), find)
+			if (tt.err == "") != (err == nil) || (err != nil && !strings.Contains(err.Error(), tt.err)) {
+				t.Errorf("err = %v, want %q", err, tt.err)
+			}
+			if tt.warning != "" && !strings.Contains(strings.Join(warnings, "\n"), tt.warning) {
+				t.Errorf("warnings %q lack %q", warnings, tt.warning)
+			}
+		})
+	}
+}
