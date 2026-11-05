@@ -206,7 +206,7 @@ func (c *comm) Start(ctx context.Context, rc *packersdk.RemoteCmd) error {
 	cmd := exec.CommandContext(ctx, "/bin/sh", "-c", rc.Command)
 	cmd.Dir = c.root
 	cmd.Env = append(os.Environ(), "HOME="+c.root, "PATH="+filepath.Join(c.root, ".stubs")+":"+os.Getenv("PATH"))
-	cmd.Stdout, cmd.Stderr = rc.Stdout, rc.Stderr
+	cmd.Stdin, cmd.Stdout, cmd.Stderr = rc.Stdin, rc.Stdout, rc.Stderr
 	if err := cmd.Start(); err != nil {
 		return err
 	}
@@ -426,7 +426,13 @@ func (p *shellProvisioner) Provision(ctx context.Context, ui packersdk.Ui, comm 
 	if cmd.ExitStatus() != 0 {
 		return fmt.Errorf("%s: exit %d", p.config.Command, cmd.ExitStatus())
 	}
-	report := fmt.Sprintf("output=%s\nconn=%v user=%v port=%v host=%v key=%v\nargs=%s\n", strings.TrimSpace(out.String()), data["ConnType"], data["User"], data["Port"], data["Host"] != "", strings.Contains(fmt.Sprint(data["SSHPrivateKey"]), "PRIVATE KEY"), strings.Join(p.config.Args, "|"))
+	// stdin reaches the command (Ansible's piped transfers).
+	var piped bytes.Buffer
+	cat := &packersdk.RemoteCmd{Command: "cat", Stdin: strings.NewReader("through stdin"), Stdout: &piped}
+	if err := cat.RunWithUi(ctx, comm, ui); err != nil {
+		return err
+	}
+	report := fmt.Sprintf("stdin=%s\noutput=%s\nconn=%v user=%v port=%v host=%v key=%v\nargs=%s\n", piped.String(), strings.TrimSpace(out.String()), data["ConnType"], data["User"], data["Port"], data["Host"] != "", strings.Contains(fmt.Sprint(data["SSHPrivateKey"]), "PRIVATE KEY"), strings.Join(p.config.Args, "|"))
 	if p.config.UploadTo != "" {
 		if err := comm.Upload(p.config.UploadTo+"/sub/up.txt", strings.NewReader("uploaded"), nil); err != nil {
 			return err

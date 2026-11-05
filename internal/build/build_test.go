@@ -138,10 +138,14 @@ func newLocalComm(t *testing.T) *localComm {
 }
 
 func (c *localComm) Run(ctx context.Context, command string, stdout, stderr io.Writer) error {
+	return c.RunInput(ctx, command, nil, stdout, stderr)
+}
+
+func (c *localComm) RunInput(ctx context.Context, command string, stdin io.Reader, stdout, stderr io.Writer) error {
 	cmd := exec.CommandContext(ctx, "/bin/sh", "-c", command)
 	cmd.Dir = c.home
 	cmd.Env = append(os.Environ(), "HOME="+c.home, "PATH="+c.bin+":"+os.Getenv("PATH"), "LOG="+c.log)
-	cmd.Stdout, cmd.Stderr = stdout, stderr
+	cmd.Stdin, cmd.Stdout, cmd.Stderr = stdin, stdout, stderr
 	err := cmd.Run()
 	var exitErr *exec.ExitError
 	if errors.As(err, &exitErr) {

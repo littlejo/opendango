@@ -125,10 +125,26 @@ func (a *commAdapter) Start(ctx context.Context, rc *packersdk.RemoteCmd) error 
 	if stderr == nil {
 		stderr = io.Discard
 	}
+	if rc.Stdin != nil {
+		in, ok := a.c.(inputRunner)
+		if !ok {
+			return errors.New("opendango: this connection cannot pass stdin to a command")
+		}
+		go func() {
+			rc.SetExited(exitCode(in.RunInput(ctx, rc.Command, rc.Stdin, stdout, stderr)))
+		}()
+		return nil
+	}
 	go func() {
 		rc.SetExited(exitCode(a.c.Run(ctx, rc.Command, stdout, stderr)))
 	}()
 	return nil
+}
+
+// inputRunner is a connection that passes stdin to a command (the native
+// SSH one).
+type inputRunner interface {
+	RunInput(ctx context.Context, command string, stdin io.Reader, stdout, stderr io.Writer) error
 }
 
 // exitCode is the exit status of a command, or the SDK's disconnection

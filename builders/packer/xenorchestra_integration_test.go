@@ -22,6 +22,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"slices"
@@ -389,6 +390,55 @@ RUN test "$(cat /tmp/copied)" = %[3]d
 			log = run()
 			if !strings.Contains(log, "==> build: Using the cached files of COPY --from") || strings.Contains(log, "==> build: Starting VM") || strings.Contains(log, "==> build: Creating VM") {
 				t.Errorf("second build did not take the files from the cache")
+			}
+		})
+	}
+}
+
+// TestAnsibleEndToEnd runs the official Ansible plugin (PROVISION
+// plugin://ansible) on XO, with the native builder (the native connection
+// through the adapter) and with packer-plugin-xenorchestra (its
+// communicator): a playbook writes a file as root, RUN reads it. It needs
+// ansible-playbook in PATH and the ansible plugin where the discovery finds
+// it. No template is made.
+func TestAnsibleEndToEnd(t *testing.T) {
+	env(t, "XOA_ENDPOINT")
+	env(t, "XOA_TOKEN")
+	if _, err := exec.LookPath("ansible-playbook"); err != nil {
+		t.Skip("ansible-playbook is not in PATH")
+	}
+	template, pool, network := env(t, "OPENDANGO_TEST_TEMPLATE"), env(t, "OPENDANGO_TEST_POOL"), env(t, "OPENDANGO_TEST_NETWORK")
+	user := env(t, "OPENDANGO_TEST_USER")
+	ctx := context.Background()
+	if _, _, err := build.FindProvisioner(ctx, "ansible"); err != nil {
+		t.Skipf("packer-plugin-ansible: %v", err)
+	}
+	for _, tt := range []struct{ name, from string }{
+		{"native", fmt.Sprintf("FROM --template=%q --pool=%q --network=%q xo://", template, pool, network)},
+		{"plugin", fmt.Sprintf("FROM --template=%q --pool=%q --network=%q plugin://xenorchestra", template, pool, network)},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.name == "plugin" {
+				if _, _, err := build.FindPlugin(ctx, "xenorchestra"); err != nil {
+					t.Skipf("packer-plugin-xenorchestra: %v", err)
+				}
+			}
+			ctxDir := t.TempDir()
+			stamp := fmt.Sprint(time.Now().UnixNano())
+			playbook := "- hosts: all\n  become: true\n  tasks:\n    - copy:\n        dest: /opt/ansible-it\n        content: \"" + stamp + "\\n\"\n        mode: \"0600\"\n"
+			if err := os.WriteFile(filepath.Join(ctxDir, "site.yml"), []byte(playbook), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			src := fmt.Sprintf(`%s AS web
+CONNECT ssh --user=%s --timeout=10m
+USER root
+PROVISION --playbook_file=site.yml plugin://ansible
+RUN test "$(cat /opt/ansible-it)" = %s
+`, tt.from, user, stamp)
+			var log bytes.Buffer
+			run(ctx, t, src, ctxDir, nil, io.MultiWriter(os.Stdout, &log))
+			if !strings.Contains(log.String(), "==> web: PROVISION plugin://ansible") {
+				t.Error("no PROVISION in the log")
 			}
 		})
 	}

@@ -56,7 +56,7 @@ func TestProvision(t *testing.T) {
 				t.Fatalf("%v\n%s", err, log.String())
 			}
 			got := readFile(t, report)
-			for _, want := range []string{"output=from-yaml\n", "conn=ssh user=tester port=22 host=true key=true\n", "args=a b|c\n"} {
+			for _, want := range []string{"stdin=through stdin\n", "output=from-yaml\n", "conn=ssh user=tester port=22 host=true key=true\n", "args=a b|c\n"} {
 				if !strings.Contains(got, want) {
 					t.Errorf("report lacks %q:\n%s", want, got)
 				}
