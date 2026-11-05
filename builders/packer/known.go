@@ -40,6 +40,34 @@ type Known struct {
 	// Inherited are the settings a stage takes from its parent's FROM line
 	// when it does not set them: how to reach the infrastructure.
 	Inherited []string
+
+	// DropInheritedTags is the list setting of the tag prefixes that the
+	// builder removes from the tags the machine copies from its source:
+	// opendango sets it to the cache tags, which belong to the source only.
+	DropInheritedTags string
+	// Cache is the data source that finds a template by its tags, nil when
+	// the stages of this builder are not cached.
+	Cache *CacheLookup
+}
+
+// CacheLookup is a data source of the plugin that finds the template
+// tagged with a cache key.
+type CacheLookup struct {
+	// Datasource is its name in the plugin.
+	Datasource string
+	// Tags is the list setting of the tags the template must have.
+	Tags string
+	// SamePoolAs is the setting that restricts the lookup to where a
+	// machine created from the stage's source would be.
+	SamePoolAs string
+	// AllowMissing is the boolean setting that makes "not found" an empty
+	// ID rather than an error.
+	AllowMissing string
+	// Copy are the stage's FROM flags passed as they are (how to reach the
+	// infrastructure, where to look).
+	Copy []string
+	// ID and Name are the attributes of its output.
+	ID, Name string
 }
 
 // known lists the builders by source type.
@@ -56,6 +84,17 @@ var known = map[string]*Known{
 		Source:       "template",
 		RootOnly:     []string{"template", "pool", "iso"},
 		Inherited:    []string{"endpoint", "token", "insecure"},
+
+		DropInheritedTags: "drop_inherited_tags",
+		Cache: &CacheLookup{
+			Datasource:   "template",
+			Tags:         "tags",
+			SamePoolAs:   "same_pool_as",
+			AllowMissing: "allow_missing",
+			Copy:         []string{"endpoint", "token", "insecure", "pool"},
+			ID:           "id",
+			Name:         "name",
+		},
 	},
 }
 
@@ -94,6 +133,9 @@ func (k *Known) settings() map[string]string {
 	}
 	if k.BootWait != "" {
 		m[k.BootWait] = "BOOT (a <waitX> in the keys)"
+	}
+	if k.DropInheritedTags != "" {
+		m[k.DropInheritedTags] = "opendango (the cache tags)"
 	}
 	return m
 }

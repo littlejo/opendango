@@ -177,7 +177,7 @@ func TestPackerKnownBuilder(t *testing.T) {
 			ctxDir := t.TempDir()
 			src := fmt.Sprintf("FROM --root=%s plugin://xenorchestra\nCONNECT ssh --user=tester\nRUN true\n%s", root, tt.lines)
 			var log syncBuffer
-			if err := Run(context.Background(), mustPlan(t, src), Options{ContextDir: ctxDir, Out: &log, FindPlugin: testPlugin(t)}); err != nil {
+			if err := Run(context.Background(), mustPlan(t, src), Options{ContextDir: ctxDir, Out: &log, FindPlugin: testPlugin(t), NoCache: true}); err != nil {
 				t.Fatalf("%v\n%s", err, log.String())
 			}
 			want := strings.ReplaceAll(tt.want, "CTX", ctxDir)
@@ -212,7 +212,7 @@ RUN test "$GREETING" = hello && pwd > %[3]s/pwd
 OUTPUT --as=template app
 `, base, app, out)
 	var log syncBuffer
-	if err := Run(context.Background(), mustPlan(t, src), Options{ContextDir: t.TempDir(), Out: &log, FindPlugin: testPlugin(t)}); err != nil {
+	if err := Run(context.Background(), mustPlan(t, src), Options{ContextDir: t.TempDir(), Out: &log, FindPlugin: testPlugin(t), NoCache: true}); err != nil {
 		t.Fatalf("%v\n%s", err, log.String())
 	}
 	for _, want := range []string{
@@ -241,7 +241,7 @@ OUTPUT --as=template app
 	base = t.TempDir()
 	src = fmt.Sprintf("FROM --root=%s plugin://xenorchestra AS base\nCONNECT ssh --user=tester\nRUN true\nFROM --root=%s base AS app\nRUN true\n", base, app)
 	var log2 syncBuffer
-	if err := Run(context.Background(), mustPlan(t, src), Options{ContextDir: t.TempDir(), Out: &log2, Target: "base", FindPlugin: testPlugin(t)}); err != nil {
+	if err := Run(context.Background(), mustPlan(t, src), Options{ContextDir: t.TempDir(), Out: &log2, Target: "base", FindPlugin: testPlugin(t), NoCache: true}); err != nil {
 		t.Fatalf("%v\n%s", err, log2.String())
 	}
 	if !strings.Contains(log2.String(), "==> base: Deleting the artifact: no OUTPUT --as=template") || strings.Contains(log2.String(), "intermediate") {
@@ -300,5 +300,68 @@ func TestPackerReboot(t *testing.T) {
 	}
 	if got := readFile(t, filepath.Join(root, ".stub-log")); got != "reboot \n" {
 		t.Errorf("stub log %q", got)
+	}
+}
+
+// TestPackerCache checks the cache of plugin:// stages with a builder of the
+// table: the test plugin's data source finds the artifacts by their tags in
+// a store. First build: everything is built and tagged; second: everything
+// comes from the cache; third: the child changes and starts from the cached
+// parent.
+func TestPackerCache(t *testing.T) {
+	store := t.TempDir()
+	t.Setenv("OPENDANGO_TEST_STORE", store)
+	base, app := t.TempDir(), t.TempDir()
+	src := func(run string) string {
+		return fmt.Sprintf("FROM --root=%s plugin://xenorchestra AS base\nCONNECT ssh --user=tester\nENV FROM_BASE=yes\nRUN true\n\nFROM --root=%s base AS app\nRUN %s\nOUTPUT --as=template app\n", base, app, run)
+	}
+	build := func(src string) string {
+		t.Helper()
+		var log syncBuffer
+		if err := Run(context.Background(), mustPlan(t, src), Options{ContextDir: t.TempDir(), Out: &log, FindPlugin: testPlugin(t)}); err != nil {
+			t.Fatalf("%v\n%s", err, log.String())
+		}
+		return log.String()
+	}
+
+	log := build(src(`test "$FROM_BASE" = yes`))
+	for _, want := range []string{
+		"==> base: artifact: template_name=opendango-cache-base-",
+		" tags=opendango-cache-created:",
+		",opendango-cache:",
+		"==> app: artifact: template_name=app tags=opendango-cache:",
+		"==> base: drop_inherited_tags: opendango-cache:,opendango-cache-created:",
+	} {
+		if !strings.Contains(log, want) {
+			t.Errorf("first build: log lacks %q:\n%s", want, log)
+		}
+	}
+	// A cached intermediate template stays.
+	if strings.Contains(log, "Deleting intermediate template") {
+		t.Errorf("first build deleted the cached template:\n%s", log)
+	}
+
+	log = build(src(`test "$FROM_BASE" = yes`))
+	if !strings.Contains(log, "==> base: Using the cached template "+base) || !strings.Contains(log, "==> app: Using the cached template "+app) || strings.Contains(log, "Running the instructions") {
+		t.Errorf("second build:\n%s", log)
+	}
+
+	// The child changes: it starts from the cached parent, whose ENV it
+	// inherits (replayed).
+	log = build(src(`test "$FROM_BASE" = yes && true`))
+	if !strings.Contains(log, "==> base: Using the cached template "+base) || !strings.Contains(log, "==> app: source: template="+base+"\n") || !strings.Contains(log, "==> app: Running the instructions") {
+		t.Errorf("third build:\n%s", log)
+	}
+}
+
+// TestPackerCacheNoRetry checks that --on-error=ask does not offer retry in
+// a plugin:// stage that the plugin tags for the cache once built.
+func TestPackerCacheNoRetry(t *testing.T) {
+	t.Setenv("OPENDANGO_TEST_STORE", t.TempDir())
+	src := fmt.Sprintf("FROM --root=%s plugin://xenorchestra\nCONNECT ssh --user=tester\nRUN false\nOUTPUT --as=template x\n", t.TempDir())
+	var log syncBuffer
+	err := Run(context.Background(), mustPlan(t, src), Options{Out: &log, Ask: true, Stdin: strings.NewReader("c\n"), FindPlugin: testPlugin(t)})
+	if err == nil || !strings.Contains(log.String(), "no retry (use --no-cache to retry)") || strings.Contains(log.String(), "[r] retry") {
+		t.Errorf("err = %v, log:\n%s", err, log.String())
 	}
 }

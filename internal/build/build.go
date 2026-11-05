@@ -331,7 +331,7 @@ type console struct {
 // stage is not cached.
 func runStage(ctx context.Context, p *plan.Plan, stage *plan.Stage, parent *executor, needed bool, key string, con *console, opts Options) (_ *executor, err error) {
 	if stage.IsPacker() {
-		return runPackerStage(ctx, p, stage, parent, needed, con, opts)
+		return runPackerStage(ctx, p, stage, parent, needed, key, con, opts)
 	}
 	parentTemplate := ""
 	if parent != nil {
@@ -519,7 +519,10 @@ func (e *executor) steps(ctx context.Context, p *plan.Plan, stage *plan.Stage, o
 			if !opts.Ask || ctx.Err() != nil {
 				return err
 			}
-			c := e.ask(ctx, err, true)
+			if e.noRetry {
+				e.say("The stage is cached once built: no retry (use --no-cache to retry)")
+			}
+			c := e.ask(ctx, err, !e.noRetry)
 			if c != choiceRetry {
 				e.answer, e.answered = c, true
 				return answer(err, c)
@@ -651,6 +654,9 @@ type executor struct {
 	serveAddr string
 	// retried is true once --on-error=ask retried an instruction.
 	retried bool
+	// noRetry: --on-error=ask cannot retry (a plugin:// stage that the
+	// plugin tags for the cache at the end).
+	noRetry bool
 	// answer is the answer to --on-error=ask that ended the stage, when
 	// answered is true.
 	answer   choice

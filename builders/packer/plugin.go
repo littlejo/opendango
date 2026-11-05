@@ -92,7 +92,7 @@ func (a *Artifact) Close() {
 // artifact (nil when the builder produced none). The error of Provision is
 // returned as is.
 func (b *Build) Run(ctx context.Context) (_ *Artifact, err error) {
-	p, err := start(b.Plugin, b.Builder, b.Dir)
+	p, err := start(b.Plugin, "builder", b.Builder, b.Dir)
 	if err != nil {
 		return nil, err
 	}
@@ -149,8 +149,8 @@ type process struct {
 
 // start runs `<plugin> start builder <name>` and connects to the address
 // it prints: <api major>|<api minor>|<network>|<address>.
-func start(pl *Plugin, builder, dir string) (*process, error) {
-	cmd := exec.Command(pl.Path, "start", "builder", builder)
+func start(pl *Plugin, kind, name, dir string) (*process, error) {
+	cmd := exec.Command(pl.Path, "start", kind, name)
 	cmd.Dir = dir
 	cmd.Env = append(os.Environ(), cookieKey+"="+cookieValue,
 		// Used on Windows only, where the plugin listens on TCP.
