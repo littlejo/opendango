@@ -1081,6 +1081,9 @@ func (e *executor) reboot(ctx context.Context) error {
 	// The connection drops while the command runs: its error is expected.
 	_ = e.comm.Run(rctx, e.asRoot("reboot"), io.Discard, io.Discard)
 	cancel()
+	if e.b == nil {
+		return e.waitReboot(ctx, before)
+	}
 	e.comm.Close()
 	e.comm = nil
 
@@ -1095,6 +1098,29 @@ func (e *executor) reboot(ctx context.Context) error {
 		}
 		e.comm.Close()
 		e.comm = nil
+		if time.Now().After(deadline) {
+			return fmt.Errorf("the VM did not reboot within %s", e.connect.Timeout)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(e.retryDelay):
+		}
+	}
+}
+
+// waitReboot waits for a new boot ID through the communicator of a
+// plugin:// stage, which reconnects by itself when a command cannot open a
+// session (the SDK's SSH communicator does), within the CONNECT timeout.
+func (e *executor) waitReboot(ctx context.Context, before string) error {
+	deadline := time.Now().Add(e.connect.Timeout)
+	for {
+		actx, cancel := context.WithTimeout(ctx, time.Minute)
+		after, err := e.output(actx, "cat /proc/sys/kernel/random/boot_id")
+		cancel()
+		if err == nil && after != before {
+			return nil
+		}
 		if time.Now().After(deadline) {
 			return fmt.Errorf("the VM did not reboot within %s", e.connect.Timeout)
 		}

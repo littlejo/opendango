@@ -42,15 +42,24 @@ func TestXenorchestraEndToEnd(t *testing.T) {
 		t.Skipf("packer-plugin-xenorchestra: %v", err)
 	}
 	ctxDir := t.TempDir()
+	os.Mkdir(filepath.Join(ctxDir, "http"), 0o755)
+	os.WriteFile(filepath.Join(ctxDir, "http", "hello.txt"), []byte("served\n"), 0o644)
 	stamp := time.Now().Unix()
 	golden := fmt.Sprintf("opendango-it-xoplugin-%d", stamp)
 	scratch := fmt.Sprintf("opendango-it-xoplugin-scratch-%d", stamp)
 
-	// OUTPUT --as=template with a name, LABEL, and an XVA.
+	// OUTPUT --as=template with a name, LABEL, an XVA, SERVE (the plugin's
+	// server, DANGO_HTTP_ADDR from its hook data) and REBOOT (through the
+	// plugin's communicator).
 	src := fmt.Sprintf(`FROM %s --vm_name=%s-vm plugin://xenorchestra AS golden
+SERVE http
 CONNECT ssh --user=%s --timeout=10m
 USER root
 RUN test "$(id -u)" = 0
+RUN test "$(curl -fsS "http://$DANGO_HTTP_ADDR/hello.txt")" = served
+RUN cat /proc/sys/kernel/random/boot_id > /root/boot-before
+REBOOT
+RUN test "$(cat /proc/sys/kernel/random/boot_id)" != "$(cat /root/boot-before)"
 LABEL team=web stage=golden
 OUTPUT --format=xva --compress=zstd out/golden.xva
 OUTPUT --as=template %s
@@ -86,6 +95,9 @@ RUN true
 	info, err := os.Stat(filepath.Join(ctxDir, "out", "golden.xva"))
 	if err != nil || info.Size() < 1<<20 {
 		t.Errorf("XVA: %v %v", info, err)
+	}
+	if !strings.Contains(log.String(), "==> golden: REBOOT\n") {
+		t.Error("log lacks REBOOT")
 	}
 	if !strings.Contains(log.String(), "==> scratch: Deleting the artifact: no OUTPUT --as=template") {
 		t.Error("the artifact of the stage without OUTPUT was not deleted")

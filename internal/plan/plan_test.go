@@ -148,7 +148,6 @@ func TestErrors(t *testing.T) {
 		{"FROM plugin://xenserver_ISO", "Dangofile:1: plugin: invalid source"},
 		{"FROM --ssh_username=root plugin://xenserver-iso", "Dangofile:1: plugin: --ssh_username is set by CONNECT ssh --user=<user>"},
 		{"FROM --network_names=[x plugin://xenserver-iso", "Dangofile:1: plugin: --network_names: invalid JSON"},
-		{"FROM plugin://xenserver-iso\nCONNECT ssh --user=u\nREBOOT", "Dangofile:3: REBOOT is not supported in a plugin:// stage yet"},
 		{"FROM plugin://xenserver-iso\nOUTPUT --as=template", "Dangofile:2: OUTPUT has no meaning in a plugin://xenserver-iso stage"},
 		{"FROM plugin://xenserver-iso AS p\nFROM p", "Dangofile:2: FROM p: a stage cannot start from a plugin://xenserver-iso stage: its artifact is the plugin's (opendango knows the artifacts of plugin://xenorchestra)"},
 		{"FROM plugin://xenorchestra AS p\nFROM --template=t p", "Dangofile:2: FROM p: plugin: --template cannot be set when starting from another stage"},
