@@ -166,7 +166,7 @@ func TestBuild(t *testing.T) {
 			{"packer_build_name": "golden", "packer_builder_type": "opendangotest-local", "packer_on_error": "cleanup"},
 		},
 		Ui: ui,
-		Provision: func(ctx context.Context, c *Comm) error {
+		Provision: func(ctx context.Context, c *Comm, _ HookData) error {
 			var out strings.Builder
 			if err := c.Run(ctx, "echo s3cret; pwd", &out, &out); err != nil {
 				return err
@@ -199,7 +199,7 @@ func TestBuild(t *testing.T) {
 
 	// With KeepPlugin, Destroy goes through the plugin, then stops it.
 	b.KeepPlugin = true
-	b.Provision = func(context.Context, *Comm) error { return nil }
+	b.Provision = func(context.Context, *Comm, HookData) error { return nil }
 	if artifact, err = b.Run(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -243,15 +243,33 @@ func TestBuildErrors(t *testing.T) {
 	// The provision error comes back as is.
 	mine := errors.New("Dangofile:3: RUN: exit code 1")
 	_, err = (&Build{Plugin: pl, Builder: "local", Configs: []map[string]any{{"root": t.TempDir()}}, Ui: ui,
-		Provision: func(context.Context, *Comm) error { return mine }}).Run(context.Background())
+		Provision: func(context.Context, *Comm, HookData) error { return mine }}).Run(context.Background())
 	if err != mine {
 		t.Errorf("provision: err = %v", err)
 	}
 
 	// The builder fails after provisioning.
 	_, err = (&Build{Plugin: pl, Builder: "local", Configs: []map[string]any{{"root": t.TempDir(), "fail": "true"}}, Ui: ui,
-		Provision: func(context.Context, *Comm) error { return nil }}).Run(context.Background())
+		Provision: func(context.Context, *Comm, HookData) error { return nil }}).Run(context.Background())
 	if err == nil || !strings.Contains(err.Error(), "failing as asked") {
 		t.Errorf("run: err = %v", err)
+	}
+}
+
+func TestHookData(t *testing.T) {
+	got := hookData(map[string]any{"PackerHTTPAddr": "10.0.0.1:8000", "Host": "10.0.0.2", "Port": int64(22), "User": "debian", "SSHPrivateKey": "KEY"})
+	if want := (HookData{HTTPAddr: "10.0.0.1:8000", Host: "10.0.0.2", Port: 22, User: "debian", SSHPrivateKey: "KEY"}); got != want {
+		t.Errorf("got %+v, want %+v", got, want)
+	}
+	// The SDK's placeholders, and no data at all.
+	if got := hookData(map[string]any{"PackerHTTPAddr": "ERR_HTTP_ADDR_NOT_IMPLEMENTED_BY_BUILDER"}); got != (HookData{}) {
+		t.Errorf("placeholders: %+v", got)
+	}
+	// As the RPC delivers it.
+	if got := hookData(map[any]any{"PackerHTTPAddr": "10.0.0.1:8000", "Port": uint64(2222)}); got != (HookData{HTTPAddr: "10.0.0.1:8000", Port: 2222}) {
+		t.Errorf("map[any]any: %+v", got)
+	}
+	if got := hookData(nil); got != (HookData{}) {
+		t.Errorf("nil: %+v", got)
 	}
 }

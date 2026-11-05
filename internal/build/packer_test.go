@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"testing"
@@ -138,8 +139,8 @@ func TestPackerStageFailure(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%v\n%s", err, log.String())
 		}
-		// No ssh command: the plugin owns the connection.
-		if !strings.Contains(log.String(), "[r] retry the instruction") || strings.Contains(log.String(), "ssh -i") {
+		// The ssh command of the plugin's connection (its hook data).
+		if !strings.Contains(log.String(), "[r] retry the instruction") || !regexp.MustCompile(`ssh -i \S+ .* -p 22 tester@127\.0\.0\.1\n`).MatchString(log.String()) {
 			t.Errorf("log:\n%s", log.String())
 		}
 	})
@@ -244,5 +245,41 @@ OUTPUT --as=template app
 	}
 	if !strings.Contains(log2.String(), "==> base: Deleting the artifact: no OUTPUT --as=template") || strings.Contains(log2.String(), "intermediate") {
 		t.Errorf("log:\n%s", log2.String())
+	}
+}
+
+// TestPackerServeAndBoot checks SERVE and BOOT with a builder of the table:
+// RUN gets DANGO_HTTP_ADDR from the plugin's hook data, SERVE --addr sets
+// http_ip, and BOOT types without boot_wait.
+func TestPackerServeAndBoot(t *testing.T) {
+	root, out, ctxDir := t.TempDir(), t.TempDir(), t.TempDir()
+	os.Mkdir(filepath.Join(ctxDir, "http"), 0o755)
+	src := fmt.Sprintf("FROM --root=%s plugin://xenorchestra\nSERVE --addr=198.51.100.7 http\nBOOT <enter>\nCONNECT ssh --user=tester\nRUN echo \"$DANGO_HTTP_ADDR\" > %s/addr\n", root, out)
+	var log syncBuffer
+	if err := Run(context.Background(), mustPlan(t, src), Options{ContextDir: ctxDir, Out: &log, FindPlugin: testPlugin(t)}); err != nil {
+		t.Fatalf("%v\n%s", err, log.String())
+	}
+	if got := readFile(t, filepath.Join(out, "addr")); got != "198.51.100.7:8080\n" {
+		t.Errorf("DANGO_HTTP_ADDR = %q\n%s", got, log.String())
+	}
+	if !strings.Contains(log.String(), "==> stage-0: boot_wait: -1s\n") {
+		t.Errorf("log:\n%s", log.String())
+	}
+}
+
+// TestPackerBreakpoint checks that BREAKPOINT prints the ssh command of the
+// plugin's connection, with its key in a file removed afterwards.
+func TestPackerBreakpoint(t *testing.T) {
+	src := fmt.Sprintf("FROM --root=%s plugin://opendangotest-local\nCONNECT ssh --user=tester\nBREAKPOINT look\n", t.TempDir())
+	var log syncBuffer
+	if err := Run(context.Background(), mustPlan(t, src), Options{Out: &log, Stdin: strings.NewReader("\n"), FindPlugin: testPlugin(t)}); err != nil {
+		t.Fatalf("%v\n%s", err, log.String())
+	}
+	m := regexp.MustCompile(`ssh -i (\S+) .* -p 22 tester@127\.0\.0\.1\n`).FindStringSubmatch(log.String())
+	if m == nil {
+		t.Fatalf("log:\n%s", log.String())
+	}
+	if _, err := os.Stat(m[1]); !os.IsNotExist(err) {
+		t.Errorf("key file %s left: %v", m[1], err)
 	}
 }

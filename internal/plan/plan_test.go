@@ -180,7 +180,7 @@ func TestErrors(t *testing.T) {
 		{"FROM xo://t AS a\nCONNECT ssh --user=u\nFROM a\nRUN x\nSERVE http", "Dangofile:5: SERVE must come before BOOT, CONNECT"},
 		{"FROM xo://t\nCONNECT ssh --user=u\nFROM xo://t\nENV --persist A=1\nSERVE http", "Dangofile:4: ENV --persist needs a connection"},
 		{"FROM xo://t\nSERVE ../http", "Dangofile:2: SERVE: \"../http\" is outside the Dangofile directory"},
-		{"FROM --remote_host=h plugin://xenserver-iso\nSERVE --addr=10.0.0.1 http", "Dangofile:2: SERVE --addr is not supported in a plugin:// stage"},
+		{"FROM --remote_host=h plugin://xenserver-iso\nSERVE --addr=10.0.0.1 http", "Dangofile:2: SERVE --addr is not supported in a plugin://xenserver-iso stage"},
 		{"FROM xo://t\nSERVE http\nENV URL=http://${DANGO_HTTP_ADDR}/ks.cfg", "Dangofile:3: ENV URL: ${DANGO_HTTP_ADDR} is only set after SERVE"},
 		{"FROM xo://t\nBOOT <enter>\nSERVE http", "Dangofile:3: SERVE must come before BOOT"},
 		{"FROM xo://t\nCONNECT ssh --user=u\nBOOT <enter>", "Dangofile:3: BOOT must come before CONNECT"},
