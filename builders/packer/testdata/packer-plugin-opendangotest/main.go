@@ -44,6 +44,13 @@ type Config struct {
 	HTTPPortMax int    `mapstructure:"http_port_max"`
 
 	BootCommand []string `mapstructure:"boot_command"`
+
+	// The settings opendango maps for packer://xenorchestra (OUTPUT,
+	// LABEL), which the tests point to this plugin.
+	TemplateName string   `mapstructure:"template_name"`
+	Tags         []string `mapstructure:"tags"`
+	XVAOutput    string   `mapstructure:"xva_output"`
+	XVACompress  string   `mapstructure:"xva_compress"`
 }
 
 type Builder struct{ config Config }
@@ -67,6 +74,9 @@ func (b *Builder) Run(ctx context.Context, ui packersdk.Ui, hook packersdk.Hook)
 		c.Communicator, c.SSHUsername, c.SSHPort, c.SSHTimeout))
 	for _, keys := range c.BootCommand {
 		ui.Say("boot_command: " + keys)
+	}
+	if c.TemplateName != "" || len(c.Tags) > 0 || c.XVAOutput != "" {
+		ui.Say(fmt.Sprintf("artifact: template_name=%s tags=%s xva=%s compress=%s", c.TemplateName, strings.Join(c.Tags, ","), c.XVAOutput, c.XVACompress))
 	}
 	if c.HTTPDir != "" {
 		ui.Say(fmt.Sprintf("http: dir=%s ports=%d-%d", c.HTTPDir, c.HTTPPortMin, c.HTTPPortMax))
@@ -154,7 +164,11 @@ func (a *artifact) Files() []string   { return nil }
 func (a *artifact) Id() string        { return a.root }
 func (a *artifact) String() string    { return "local machine at " + a.root }
 func (a *artifact) State(string) any  { return nil }
-func (a *artifact) Destroy() error    { return nil }
+
+// Destroy leaves a marker in root, for the tests.
+func (a *artifact) Destroy() error {
+	return os.WriteFile(filepath.Join(a.root, "artifact-destroyed"), nil, 0o644)
+}
 
 func main() {
 	set := plugin.NewSet()

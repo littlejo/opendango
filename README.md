@@ -144,7 +144,17 @@ opendango build --build-arg XAPI_PASSWORD="$XAPI_PASSWORD"
   `packer://xenserver-iso`. `SERVE --addr` is not available, nor
   `$DANGO_HTTP_ADDR` in `RUN`.
 - Only builders are supported. A packer:// stage cannot be a parent stage,
-  and `OUTPUT` and `REBOOT` are not available in it.
+  and `REBOOT` is not available in it.
+- `OUTPUT` and `LABEL` work with the builders opendango knows, and only with
+  them (the others set their artifact with their own flags):
+
+  | Builder | `OUTPUT --as=template <name>` | `LABEL` | `OUTPUT --format=xva [--compress] <path>` |
+  |---|---|---|---|
+  | `packer://xenorchestra` ([packer-plugin-xenorchestra](https://github.com/littlejo/packer-plugin-xenorchestra)) | `template_name` | `tags` | `xva_output`, `xva_compress` (one XVA) |
+
+  Like a native stage, a stage without `OUTPUT --as=template` deletes the
+  plugin's artifact once built (an XVA stays). These settings cannot be FROM
+  flags.
 
 ### Installing plugins
 

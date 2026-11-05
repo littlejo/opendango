@@ -39,6 +39,9 @@ type Build struct {
 	Ui packersdk.Ui
 	// Provision runs the instructions with the plugin's communicator.
 	Provision func(ctx context.Context, comm *Comm) error
+	// DestroyArtifact deletes the artifact once built (the stage has no
+	// OUTPUT --as=template): only its files, such as an XVA, stay.
+	DestroyArtifact bool
 }
 
 // Run starts the plugin, prepares and runs the builder, and returns a
@@ -74,7 +77,14 @@ func (b *Build) Run(ctx context.Context) (string, error) {
 	if artifact == nil {
 		return "no artifact", nil
 	}
-	return artifact.String(), nil
+	desc := artifact.String()
+	if b.DestroyArtifact {
+		b.Ui.Say("Deleting the artifact: no OUTPUT --as=template")
+		if err := artifact.Destroy(); err != nil {
+			return desc, fmt.Errorf("packer: %s: deleting the artifact %s: %w%s", b.Plugin.Name, artifact.Id(), err, p.logTail())
+		}
+	}
+	return desc, nil
 }
 
 // process is a running plugin.

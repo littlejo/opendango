@@ -93,6 +93,16 @@ func runPackerStage(ctx context.Context, p *plan.Plan, stage *plan.Stage, con *c
 		}
 		settings["boot_command"] = keys
 	}
+	// OUTPUT and LABEL become the settings of the builder's artifact; without
+	// OUTPUT --as=template, the artifact is deleted once built, like the VM
+	// of a native stage.
+	destroy := false
+	if k := packer.Lookup(cfg.Component); k != nil {
+		if err := knownSettings(settings, k, stage, opts.ContextDir); err != nil {
+			return nil, err
+		}
+		destroy = stage.TemplateOutput() == nil
+	}
 	// What the plugin does when a step fails (its own cleanup).
 	onError := "cleanup"
 	switch {
@@ -118,11 +128,12 @@ func runPackerStage(ctx context.Context, p *plan.Plan, stage *plan.Stage, con *c
 		Secrets:  cfg.Secrets,
 	}
 	b := &packer.Build{
-		Plugin:  pl,
-		Builder: builder,
-		Dir:     opts.ContextDir,
-		Configs: []map[string]any{settings, core},
-		Ui:      ui,
+		Plugin:          pl,
+		Builder:         builder,
+		Dir:             opts.ContextDir,
+		Configs:         []map[string]any{settings, core},
+		Ui:              ui,
+		DestroyArtifact: destroy,
 		Provision: func(ctx context.Context, comm *packer.Comm) error {
 			e.say("Running the instructions")
 			e.comm = comm
@@ -137,6 +148,38 @@ func runPackerStage(ctx context.Context, p *plan.Plan, stage *plan.Stage, con *c
 	e.say("Artifact: %s", artifact)
 	e.say("Stage finished")
 	return e, nil
+}
+
+// knownSettings sets the settings that OUTPUT and LABEL become for a builder
+// of the table. The plan checked that the builder supports them.
+func knownSettings(settings map[string]any, k *packer.Known, stage *plan.Stage, contextDir string) error {
+	for _, out := range stage.Outputs {
+		switch out.Kind {
+		case instructions.OutputTemplate:
+			if out.Name != "" {
+				settings[k.TemplateName] = out.Name
+			}
+		case instructions.OutputXVA:
+			path := out.Path
+			if !filepath.IsAbs(path) {
+				path = filepath.Join(contextDir, path)
+			}
+			settings[k.XVAOutput] = path
+			if out.Compress != "" {
+				settings[k.XVACompress] = out.Compress
+			}
+		default:
+			return fmt.Errorf("packer: unsupported output %q", out.Kind)
+		}
+	}
+	if len(stage.Labels) > 0 {
+		tags := make([]any, 0, len(stage.Labels))
+		for _, l := range stage.Labels {
+			tags = append(tags, l.Key+"="+l.Value)
+		}
+		settings[k.Tags] = tags
+	}
+	return nil
 }
 
 // pluginQuestion answers the plugin, which asks what to do after a failed
