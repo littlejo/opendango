@@ -103,7 +103,7 @@ plugin attaches it as a CD, and the image is written to `dist/`.
 | `SERVE` | `SERVE --port=8080 http/` (before `CONNECT`) |
 | `BOOT` | `BOOT <wait10><esc>auto url=http://${DANGO_HTTP_ADDR}/preseed.cfg<enter>` (before `CONNECT`) |
 | `LABEL` | `LABEL org.opencontainers.image.version=1.2 team=web` (with `OUTPUT --as=template`) |
-| `OUTPUT` | `OUTPUT --as=template "name"`, `OUTPUT --format=xva --compress=zstd ./out.xva` |
+| `OUTPUT` | `OUTPUT --as=template "name"`, `OUTPUT --format=xva --compress=zstd ./out.xva`, `OUTPUT --format=manifest dist/manifest.json`, `OUTPUT --output=dist/app.box plugin://vagrant` (see [Post-processors](#post-processors)) |
 
 `CONNECT` is required before the instructions that need the machine (`RUN`,
 `COPY`, `ADD`, `WORKDIR`, `REBOOT`, `BREAKPOINT`, `ENV --persist`), unless
@@ -148,10 +148,11 @@ unknown until downloaded). Unlike Docker, local archives are not extracted:
 `ADD` refuses them (use `COPY`, then `RUN tar -xf`), and git sources are not
 supported yet.
 
-`OUTPUT` and `LABEL` describe the artifact, which depends on the builder:
-they work with the [builders opendango knows](#builders-opendango-knows); the
-other plugins set their artifact with their own flags (`--output_directory`,
-`--ami_name`…).
+`OUTPUT --as=template`, `OUTPUT --format=xva` and `LABEL` describe the
+artifact, which depends on the builder: they work with the
+[builders opendango knows](#builders-opendango-knows); the other plugins set
+their artifact with their own flags (`--output_directory`, `--ami_name`…).
+The [post-processors](#post-processors) work with every builder.
 
 `CMD`, `ENTRYPOINT`, `EXPOSE`, `HEALTHCHECK`, `VOLUME`, `ONBUILD` and
 `STOPSIGNAL` have no meaning for a VM image and are rejected.
@@ -404,6 +405,39 @@ RUN systemctl enable app
   no machine for it. When `build` is in the cache as a template but its
   files are not (a `COPY --from` added later), a machine starts from the
   template only to fetch them.
+
+## Post-processors
+
+Once a stage has made its artifact, `OUTPUT` can process it, in the order of
+the Dangofile, like the post-processors of Packer:
+
+```dockerfile
+FROM plugin://qemu AS golden
+RUN apt-get update && apt-get -y upgrade
+OUTPUT --format=checksum dist/SHA256SUMS
+OUTPUT --format=compress dist/golden.tar.gz
+OUTPUT --format=manifest dist/manifest.json
+OUTPUT --output=dist/golden.box plugin://vagrant
+```
+
+| Output | What it does |
+|---|---|
+| `--format=manifest <path>` | Adds the build to a JSON manifest, in the format of Packer's: `builds` (`name`, `builder_type`, `build_time`, `files` with their size, `artifact_id`, `packer_run_uuid`) and `last_run_uuid`. The builds of the previous runs stay; several stages can write to the same file. |
+| `--format=checksum [--type=sha256] <path>` | Writes the checksums of the artifact's files, in the format of `sha256sum` (`sha256sum -c` checks them). Types: `md5`, `sha1`, `sha224`, `sha256` (default), `sha384`, `sha512`. |
+| `--format=compress <path>` | Puts the artifact's files in an archive: `.tar`, `.tar.gz` (or `.tgz`), `.zip`, by the extension. The files stay. |
+| `[--settings] plugin://<post-processor>` | Runs the post-processor of a plugin (`plugin://vagrant`, `plugin://docker-import`…) on the artifact (its id, files and builder). Its settings are the flags, by their Packer names, over its section of [`dango.yaml`](#plugin-settings-file-dangoyaml). |
+
+- The artifact's files are those of the plugin (an image, a box) and the XVA
+  exports of the stage. A template or an AMI has none: `checksum` and
+  `compress` need files.
+- A stage found in the cache runs its post-processors on the cached template.
+- The post-processors are not part of the cache key: adding one does not
+  build the stage again.
+- `opendango validate` has the plugins' post-processors check their
+  settings.
+- `manifest`, `checksum` and `compress` are written by opendango (Packer's
+  are part of Packer); the plugins' post-processors are the same as with
+  Packer. They process the artifact of the build: they are not chained.
 
 ## Cache
 

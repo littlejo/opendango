@@ -12,6 +12,7 @@ import (
 	"path"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -184,19 +185,43 @@ type Boot struct {
 const (
 	OutputTemplate = "template"
 	OutputXVA      = "xva"
+	// The post-processors: they run once the artifact is made.
+	OutputManifest = "manifest"
+	OutputChecksum = "checksum"
+	OutputArchive  = "compress"
+	OutputPlugin   = "plugin"
 )
+
+// ChecksumTypes are the hashes of OUTPUT --format=checksum.
+var ChecksumTypes = []string{"md5", "sha1", "sha224", "sha256", "sha384", "sha512"}
+
+// ArchiveExtensions are the archive formats of OUTPUT --format=compress, by
+// the extension of the path.
+var ArchiveExtensions = []string{".tar", ".tar.gz", ".tgz", ".zip"}
 
 // Output produces an artifact once all other instructions have run.
 type Output struct {
 	Pos
-	// Kind is OutputTemplate or OutputXVA.
+	// Kind is one of the Output* constants.
 	Kind string
 	// Name is the template name (template only, optional).
 	Name string
-	// Path is the destination file (xva only).
+	// Path is the destination file (xva, manifest, checksum, compress).
 	Path string
 	// Compress is "", "zstd" or "gzip" (xva only).
 	Compress string
+	// Type is the hash of a checksum (one of ChecksumTypes).
+	Type string
+	// Source is the plugin's post-processor type (plugin only), such as
+	// vagrant or docker-import; Settings are its flags.
+	Source   string
+	Settings map[string]string
+}
+
+// PostProcess tells whether an output runs once the artifact is made
+// (a post-processor), rather than making it.
+func (o *Output) PostProcess() bool {
+	return o.Kind != OutputTemplate && o.Kind != OutputXVA
 }
 
 // Forbidden lists the Dockerfile instructions that make no sense for a VM.
@@ -645,27 +670,36 @@ func ParseBoot(cmd *parser.Command, expand Expander) (*Boot, error) {
 // ParseOutput parses `OUTPUT --as=template [name]` and
 // `OUTPUT --format=xva [--compress=zstd|gzip] <path>`.
 func ParseOutput(cmd *parser.Command, expand Expander) (*Output, error) {
-	flags, err := parseFlags(cmd, expand, map[string]bool{"as": true, "format": true, "compress": true})
-	if err != nil {
-		return nil, err
-	}
 	args, err := expandAll(cmd.Args, expand)
 	if err != nil {
 		return nil, fmt.Errorf("OUTPUT: %w", err)
 	}
+	// OUTPUT [--settings] plugin://<post-processor>: the flags are the
+	// post-processor's settings.
+	if len(args) == 1 && strings.HasPrefix(args[0], "plugin://") {
+		return parsePluginOutput(cmd, args[0], expand)
+	}
+	flags, err := parseFlags(cmd, expand, map[string]bool{"as": true, "format": true, "compress": true, "type": true})
+	if err != nil {
+		return nil, err
+	}
 	as, hasAs := flags["as"]
 	format, hasFormat := flags["format"]
 	compress, hasCompress := flags["compress"]
+	typ, hasType := flags["type"]
 	out := &Output{Pos: pos(cmd)}
+	if hasType && format != OutputChecksum {
+		return nil, fmt.Errorf("OUTPUT: --type is for --format=checksum")
+	}
+	if hasCompress && format != OutputXVA {
+		return nil, fmt.Errorf("OUTPUT: --compress is for --format=xva")
+	}
 	switch {
 	case hasAs == hasFormat:
-		return nil, fmt.Errorf("OUTPUT requires exactly one of --as=template or --format=xva")
+		return nil, fmt.Errorf("OUTPUT requires exactly one of --as=template, --format=<format> or plugin://<post-processor>")
 	case hasAs:
 		if as != OutputTemplate {
 			return nil, fmt.Errorf("OUTPUT: unknown --as %q (expected template)", as)
-		}
-		if hasCompress {
-			return nil, fmt.Errorf("OUTPUT --as=template does not accept --compress")
 		}
 		if len(args) > 1 {
 			return nil, fmt.Errorf("OUTPUT --as=template takes at most one name")
@@ -674,17 +708,58 @@ func ParseOutput(cmd *parser.Command, expand Expander) (*Output, error) {
 		if len(args) == 1 {
 			out.Name = args[0]
 		}
+		return out, nil
+	}
+	switch format {
+	case OutputXVA, OutputManifest, OutputChecksum, OutputArchive:
 	default:
-		if format != OutputXVA {
-			return nil, fmt.Errorf("OUTPUT: unknown --format %q (expected xva)", format)
-		}
-		if len(args) != 1 {
-			return nil, fmt.Errorf("OUTPUT --format=xva requires exactly one destination path")
-		}
+		return nil, fmt.Errorf("OUTPUT: unknown --format %q (expected xva, manifest, checksum or compress)", format)
+	}
+	if len(args) != 1 {
+		return nil, fmt.Errorf("OUTPUT --format=%s requires exactly one destination path", format)
+	}
+	out.Kind, out.Path = format, args[0]
+	switch format {
+	case OutputXVA:
 		if compress != "" && compress != "zstd" && compress != "gzip" {
 			return nil, fmt.Errorf("OUTPUT: unknown --compress %q (expected zstd or gzip)", compress)
 		}
-		out.Kind, out.Path, out.Compress = OutputXVA, args[0], compress
+		out.Compress = compress
+	case OutputChecksum:
+		out.Type = "sha256"
+		if hasType {
+			out.Type = typ
+		}
+		if !slices.Contains(ChecksumTypes, out.Type) {
+			return nil, fmt.Errorf("OUTPUT: unknown --type %q (expected %s)", out.Type, strings.Join(ChecksumTypes, ", "))
+		}
+	case OutputArchive:
+		if !slices.ContainsFunc(ArchiveExtensions, func(ext string) bool { return strings.HasSuffix(out.Path, ext) }) {
+			return nil, fmt.Errorf("OUTPUT --format=compress: %s: the extension gives the format (%s)", out.Path, strings.Join(ArchiveExtensions, ", "))
+		}
+	}
+	return out, nil
+}
+
+// parsePluginOutput parses OUTPUT [--settings] plugin://<post-processor>.
+func parsePluginOutput(cmd *parser.Command, source string, expand Expander) (*Output, error) {
+	out := &Output{Pos: pos(cmd), Kind: OutputPlugin, Source: strings.TrimPrefix(source, "plugin://"), Settings: map[string]string{}}
+	if out.Source == "" {
+		return nil, fmt.Errorf("OUTPUT: missing post-processor after plugin://")
+	}
+	for _, f := range cmd.Flags {
+		name, value, hasValue := strings.Cut(strings.TrimPrefix(f, "--"), "=")
+		if !hasValue {
+			return nil, fmt.Errorf("OUTPUT: flag --%s requires a value", name)
+		}
+		if _, dup := out.Settings[name]; dup {
+			return nil, fmt.Errorf("OUTPUT: flag --%s set twice", name)
+		}
+		v, err := expand(value)
+		if err != nil {
+			return nil, fmt.Errorf("OUTPUT: flag --%s: %w", name, err)
+		}
+		out.Settings[name] = v
 	}
 	return out, nil
 }

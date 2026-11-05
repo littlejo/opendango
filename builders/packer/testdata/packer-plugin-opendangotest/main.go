@@ -164,6 +164,10 @@ func (b *Builder) Run(ctx context.Context, ui packersdk.Ui, hook packersdk.Hook)
 	if err := storeTags(c.Tags, c.Root); err != nil {
 		return nil, err
 	}
+	// The file of the artifact (Files), like a disk image.
+	if err := os.WriteFile(filepath.Join(c.Root, "image.qcow2"), []byte("image of "+c.Root), 0o644); err != nil {
+		return nil, err
+	}
 	return &artifact{root: c.Root}, nil
 }
 
@@ -361,11 +365,35 @@ func (p *postProcessor) PostProcess(ctx context.Context, ui packersdk.Ui, a pack
 	return &artifact{root: p.config.Output}, true, false, nil
 }
 
+// The "inspect" post-processor writes what it gets to its output: the id,
+// the builder id and the files of the artifact.
+type inspector struct {
+	config struct {
+		Output string `mapstructure:"output"`
+		Note   string `mapstructure:"note"`
+	}
+}
+
+func (p *inspector) ConfigSpec() hcldec.ObjectSpec { return hcldec.ObjectSpec{} }
+
+func (p *inspector) Configure(raws ...any) error {
+	return config.Decode(&p.config, &config.DecodeOpts{}, raws...)
+}
+
+func (p *inspector) PostProcess(ctx context.Context, ui packersdk.Ui, a packersdk.Artifact) (packersdk.Artifact, bool, bool, error) {
+	content := fmt.Sprintf("id=%s\nbuilder=%s\nfiles=%s\nnote=%s\n", a.Id(), a.BuilderId(), strings.Join(a.Files(), ","), p.config.Note)
+	if err := os.WriteFile(p.config.Output, []byte(content), 0o644); err != nil {
+		return nil, true, false, err
+	}
+	return &artifact{root: filepath.Dir(p.config.Output)}, true, false, nil
+}
+
 func main() {
 	set := plugin.NewSet()
 	set.RegisterBuilder("local", new(Builder))
 	set.RegisterDatasource("template", new(datasource))
 	set.RegisterPostProcessor("xva", new(postProcessor))
+	set.RegisterPostProcessor("inspect", new(inspector))
 	if err := set.Run(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)

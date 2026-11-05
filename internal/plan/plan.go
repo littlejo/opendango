@@ -585,12 +585,14 @@ func BuildSettings(file string, res *parser.Result, buildArgs map[string]string,
 
 		case "OUTPUT":
 			k := stage.known()
-			if stage.IsPacker() && k == nil {
-				return fail(line, fmt.Errorf("OUTPUT has no meaning in a plugin://%s stage: the plugin configuration (FROM flags) sets its artifact (opendango maps OUTPUT for plugin://%s)", stage.Root().From.Source, packer.KnownSources()))
-			}
 			out, err := instructions.ParseOutput(cmd, expand)
 			if err != nil {
 				return fail(line, err)
+			}
+			// The artifact itself (template, XVA) needs a builder opendango
+			// knows; the post-processors work with any.
+			if stage.IsPacker() && k == nil && !out.PostProcess() {
+				return fail(line, fmt.Errorf("OUTPUT --%s has no meaning in a plugin://%s stage: the plugin configuration (FROM flags) sets its artifact (opendango maps it for plugin://%s)", outputFlag(out), stage.Root().From.Source, packer.KnownSources()))
 			}
 			if k != nil && out.Kind == instructions.OutputXVA && k.XVA == nil {
 				return fail(line, fmt.Errorf("OUTPUT --format=xva is not supported by plugin://%s", stage.Root().From.Source))
@@ -599,8 +601,23 @@ func BuildSettings(file string, res *parser.Result, buildArgs map[string]string,
 				if out.Kind == instructions.OutputTemplate && prev.Kind == instructions.OutputTemplate {
 					return fail(line, fmt.Errorf("only one OUTPUT --as=template is allowed (already set at line %d)", prev.Line()))
 				}
-				if out.Kind == instructions.OutputXVA && prev.Path == out.Path {
+				if out.Path != "" && prev.Path == out.Path && out.Kind != instructions.OutputPlugin {
 					return fail(line, fmt.Errorf("OUTPUT %s already written at line %d", out.Path, prev.Line()))
+				}
+			}
+			// A plugin's post-processor: its dango.yaml section under its
+			// flags.
+			if out.Kind == instructions.OutputPlugin && settings != nil {
+				if section, ok := settings.Sections[out.Source]; ok {
+					usedSections[out.Source] = true
+					flags, err := sectionFlags(settings, out.Source, section, nil, res.EscapeToken, expand)
+					if err != nil {
+						return nil, err
+					}
+					for name, v := range out.Settings {
+						flags[name] = v
+					}
+					out.Settings = flags
 				}
 			}
 			stage.Outputs = append(stage.Outputs, out)
@@ -754,6 +771,14 @@ func copyFrom(stage *Stage, c *instructions.Copy, byName map[string]*Stage) erro
 	}
 	slices.Sort(src.Fetch)
 	return nil
+}
+
+// outputFlag names an output for the messages: as=template or format=xva.
+func outputFlag(o *instructions.Output) string {
+	if o.Kind == instructions.OutputTemplate {
+		return "as=template"
+	}
+	return "format=" + o.Kind
 }
 
 func needsConnect(what string, stage *Stage) error {

@@ -149,6 +149,10 @@ func runPackerStage(ctx context.Context, p *plan.Plan, stage *plan.Stage, parent
 				if err := packerXVA(ctx, p, stage, pl, k, flags, found.ID, cfg.Secrets, e, opts); err != nil {
 					return nil, err
 				}
+				m := made{ID: found.ID, BuilderType: cfg.Component, Files: xvaPaths(stage, opts.ContextDir)}
+				if err := postProcess(ctx, p, stage, m, e, opts); err != nil {
+					return nil, err
+				}
 				e.say("Stage finished (cached)")
 				return e, nil
 			}
@@ -205,8 +209,8 @@ func runPackerStage(ctx context.Context, p *plan.Plan, stage *plan.Stage, parent
 		Ui:      ui,
 		// The XVA OUTPUTs are exported from the artifact before it is
 		// deleted: through the plugin, kept until then.
-		DestroyArtifact: destroy && !hasXVA(stage),
-		KeepPlugin:      intermediate || (destroy && hasXVA(stage)),
+		DestroyArtifact: destroy && !hasPostOutputs(stage),
+		KeepPlugin:      intermediate || (destroy && hasPostOutputs(stage)),
 		Provision: func(ctx context.Context, comm *packer.Comm, data packer.HookData) error {
 			e.say("Running the instructions")
 			e.comm = comm
@@ -247,9 +251,24 @@ func runPackerStage(ctx context.Context, p *plan.Plan, stage *plan.Stage, parent
 	}
 	e.artifact = &packerTemplate{artifact}
 	e.say("Artifact: %s", artifact.Desc)
-	if hasXVA(stage) {
-		k := packer.Lookup(cfg.Component)
-		err := packerXVA(ctx, p, stage, pl, k, flags, artifact.ID, cfg.Secrets, e, opts)
+	if hasPostOutputs(stage) {
+		var err error
+		if hasXVA(stage) {
+			err = packerXVA(ctx, p, stage, pl, packer.Lookup(cfg.Component), flags, artifact.ID, cfg.Secrets, e, opts)
+		}
+		if err == nil {
+			// The plugin's files are relative to its directory, the
+			// Dangofile's.
+			m := made{ID: artifact.ID, BuilderID: artifact.BuilderID, BuilderType: cfg.Component}
+			for _, f := range artifact.Files {
+				if !filepath.IsAbs(f) {
+					f = filepath.Join(opts.ContextDir, f)
+				}
+				m.Files = append(m.Files, f)
+			}
+			m.Files = append(m.Files, xvaPaths(stage, opts.ContextDir)...)
+			err = postProcess(ctx, p, stage, m, e, opts)
+		}
 		if destroy {
 			e.say("Deleting the artifact: no OUTPUT --as=template")
 			if derr := artifact.Destroy(); derr != nil {
@@ -384,7 +403,7 @@ func packerXVA(ctx context.Context, p *plan.Plan, stage *plan.Stage, pl *packer.
 			}
 		}
 		ui := &packer.Ui{Print: func(line string) { e.say("%s", line) }, Secrets: secrets}
-		if _, err := packer.PostProcess(ctx, pl, k.XVA.PostProcessor, opts.ContextDir, ui, id, cfg); err != nil {
+		if _, err := packer.PostProcess(ctx, pl, k.XVA.PostProcessor, opts.ContextDir, ui, packer.Input{ID: id}, cfg); err != nil {
 			return &plan.Error{File: p.File, Line: out.Line(), Err: err}
 		}
 	}
@@ -459,6 +478,33 @@ func packerFetchFromTemplate(ctx context.Context, p *plan.Plan, stage *plan.Stag
 	return nil
 }
 
+// hasPostOutputs tells whether the stage has outputs that run on the
+// artifact once made: XVA exports and post-processors.
+func hasPostOutputs(stage *plan.Stage) bool {
+	for _, out := range stage.Outputs {
+		if out.Kind == instructions.OutputXVA || out.PostProcess() {
+			return true
+		}
+	}
+	return false
+}
+
+// xvaPaths returns the absolute paths of the XVA OUTPUTs of a stage.
+func xvaPaths(stage *plan.Stage, contextDir string) []string {
+	var paths []string
+	for _, out := range stage.Outputs {
+		if out.Kind != instructions.OutputXVA {
+			continue
+		}
+		path := out.Path
+		if !filepath.IsAbs(path) {
+			path = filepath.Join(contextDir, path)
+		}
+		paths = append(paths, path)
+	}
+	return paths
+}
+
 // hasXVA tells whether the stage has an OUTPUT --format=xva.
 func hasXVA(stage *plan.Stage) bool {
 	for _, out := range stage.Outputs {
@@ -503,6 +549,8 @@ func knownSettings(settings map[string]any, k *packer.Known, stage *plan.Stage, 
 			}
 		case instructions.OutputXVA:
 			// The plugin's post-processor, once built (packerXVA).
+		case instructions.OutputManifest, instructions.OutputChecksum, instructions.OutputArchive, instructions.OutputPlugin:
+			// Once built (postProcess).
 		default:
 			return fmt.Errorf("plugin: unsupported output %q", out.Kind)
 		}

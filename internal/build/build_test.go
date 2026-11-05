@@ -82,6 +82,12 @@ func (b *fakeBuilder) Stop(_ context.Context, grace time.Duration) error {
 func (b *fakeBuilder) Output(_ context.Context, out *instructions.Output) error {
 	b.calls = append(b.calls, "output:"+out.Kind)
 	b.outputs = append(b.outputs, *out)
+	// An XVA export writes its file (absolute paths only: under the tests'
+	// directories).
+	if out.Kind == instructions.OutputXVA && filepath.IsAbs(out.Path) {
+		os.MkdirAll(filepath.Dir(out.Path), 0o755)
+		return os.WriteFile(out.Path, []byte("xva of "+b.ID()), 0o644)
+	}
 	return nil
 }
 

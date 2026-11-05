@@ -93,9 +93,14 @@ type Options struct {
 	// FilesCache is the directory of the files cache of COPY --from;
 	// empty: ~/.cache/opendango/files (unless NoCache).
 	FilesCache string
+	// FindPostProcessor finds the plugin of the post-processors
+	// (OUTPUT plugin://...); FindPostProcessor when nil.
+	FindPostProcessor FindPluginFunc
 	// filesDir holds the files fetched for COPY --from during the build
 	// (set by Run).
 	filesDir string
+	// manifests writes the manifest files (set by Run).
+	manifests *manifests
 	// Target builds only this stage and its ancestors; every stage when
 	// empty.
 	Target string
@@ -175,6 +180,10 @@ func Run(ctx context.Context, p *plan.Plan, opts Options) (err error) {
 	if opts.FindPlugin == nil {
 		opts.FindPlugin = FindPlugin
 	}
+	if opts.FindPostProcessor == nil {
+		opts.FindPostProcessor = FindPostProcessor
+	}
+	opts.manifests = newManifests()
 	if opts.NewBuilder == nil {
 		opts.NewBuilder = func(s *plan.Stage, parent string) (Builder, error) { return NewBuilder(s, parent, opts.Out) }
 	}
@@ -321,6 +330,12 @@ func Run(ctx context.Context, p *plan.Plan, opts Options) (err error) {
 	return nil
 }
 
+// nativeMade is what a native stage made, for the post-processors: its
+// template (or VM), and its XVA exports.
+func nativeMade(stage *plan.Stage, b Builder, opts Options) made {
+	return made{ID: b.ID(), BuilderID: "opendango." + stage.Root().From.Builder, BuilderType: stage.Root().From.Builder, Files: xvaPaths(stage, opts.ContextDir)}
+}
+
 // filesOnly tells whether a stage only feeds COPY --from: it ends neither
 // as a template nor with an output, so the files cache is its cache.
 func filesOnly(s *plan.Stage, needed bool) bool {
@@ -442,6 +457,9 @@ func runStage(ctx context.Context, p *plan.Plan, stage *plan.Stage, parent *exec
 			// The child stages inherit the final USER, SHELL, WORKDIR and ENV.
 			e.replay(stage.Steps)
 			if err := exportXVA(ctx, p, stage, e, opts); err != nil {
+				return nil, err
+			}
+			if err := postProcess(ctx, p, stage, nativeMade(stage, b, opts), e, opts); err != nil {
 				return nil, err
 			}
 			e.say("Stage finished (cached)")
@@ -573,6 +591,9 @@ func runStage(ctx context.Context, p *plan.Plan, stage *plan.Stage, parent *exec
 		if store {
 			e.cached = e.tag(ctx, fmt.Sprintf("%s%d", CreatedTagPrefix, now)) && e.tag(ctx, CacheTagPrefix+key)
 		}
+	}
+	if err := postProcess(ctx, p, stage, nativeMade(stage, b, opts), e, opts); err != nil {
+		return nil, err
 	}
 	e.say("Stage finished")
 	return e, nil
