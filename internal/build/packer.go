@@ -40,7 +40,7 @@ func FindPlugin(ctx context.Context, source string) (*packer.Plugin, string, err
 // starts from one: the plugin creates the machine and connects to it, then
 // calls back to run the instructions through its communicator, then
 // produces its artifact. parent and needed are those of runStage.
-func runPackerStage(ctx context.Context, p *plan.Plan, stage *plan.Stage, parent *executor, needed bool, con *console, opts Options) (*executor, error) {
+func runPackerStage(ctx context.Context, p *plan.Plan, stage *plan.Stage, parent *executor, needed bool, key string, con *console, opts Options) (*executor, error) {
 	flags, err := stage.PackerFlags()
 	if err != nil {
 		return nil, err
@@ -108,16 +108,17 @@ func runPackerStage(ctx context.Context, p *plan.Plan, stage *plan.Stage, parent
 	}
 	// OUTPUT and LABEL become the settings of the builder's artifact; without
 	// OUTPUT --as=template, the artifact is deleted once built, like the VM
-	// of a native stage, or at the end of the build when other stages start
-	// from it (an intermediate template, like with --no-cache: plugin://
-	// stages are not cached).
+	// of a native stage, or ends as an intermediate template when other
+	// stages start from it.
 	destroy, intermediate := false, false
 	if k := packer.Lookup(cfg.Component); k != nil {
 		if err := knownSettings(settings, k, stage, opts.ContextDir); err != nil {
 			return nil, err
 		}
+		source := flags[k.Source]
 		if parent != nil {
-			settings[k.Source] = parent.artifact.ID()
+			source = parent.artifact.ID()
+			settings[k.Source] = source
 		}
 		if sv := stage.Serve; sv != nil && sv.Addr != "" {
 			settings[k.HTTPIP] = sv.Addr
@@ -125,13 +126,69 @@ func runPackerStage(ctx context.Context, p *plan.Plan, stage *plan.Stage, parent
 		if len(stage.Boot) > 0 && k.BootWait != "" {
 			settings[k.BootWait] = "-1s"
 		}
-		if stage.TemplateOutput() == nil {
-			if needed {
-				intermediate = true
-				settings[k.TemplateName] = fmt.Sprintf("opendango-tmp-%s-%d", stage.Name(), time.Now().Unix())
-			} else {
-				destroy = true
+		// The cache tags of the source are not the machine's.
+		if k.DropInheritedTags != "" {
+			settings[k.DropInheritedTags] = []any{CacheTagPrefix, CreatedTagPrefix}
+		}
+
+		// The cache: a template tagged with the key, found by the plugin's
+		// data source. The plugin cannot export an XVA from an existing
+		// template: a stage with OUTPUT --format=xva is built.
+		if key != "" && k.Cache != nil && hasXVA(stage) {
+			e.say("Not cached: the plugin cannot export an XVA from a cached template")
+			key = ""
+		}
+		if key != "" && k.Cache != nil {
+			found, err := packerCache(pl, k.Cache, flags, source, key, opts.ContextDir)
+			if err != nil {
+				return nil, fmt.Errorf("looking up the cache: %w", err)
 			}
+			if found != nil {
+				e.say("Using the cached template %s (key %s)", found.ID, key[:12])
+				e.cached = true
+				e.artifact = &packerTemplate{found}
+				// The child stages inherit the final USER, SHELL, WORKDIR and
+				// ENV.
+				e.replay(stage.Steps)
+				e.say("Stage finished (cached)")
+				return e, nil
+			}
+		} else {
+			key = ""
+		}
+
+		// The labels, then the cache tags (the creation one first: a
+		// template with the key but without it would never be pruned).
+		tags, _ := settings[k.Tags].([]any)
+		name := ""
+		switch {
+		case stage.TemplateOutput() != nil:
+			if key != "" {
+				tags = append(tags, CacheTagPrefix+key)
+			}
+		case needed && key != "":
+			now := time.Now().Unix()
+			name = fmt.Sprintf("opendango-cache-%s-%d", stage.Name(), now)
+			tags = append(tags, fmt.Sprintf("%s%d", CreatedTagPrefix, now), CacheTagPrefix+key)
+		case needed:
+			// Not cached: deleted at the end of the build, through the
+			// plugin that made it.
+			intermediate = true
+			name = fmt.Sprintf("opendango-tmp-%s-%d", stage.Name(), time.Now().Unix())
+		default:
+			destroy = true
+		}
+		if name != "" {
+			settings[k.TemplateName] = name
+		}
+		if len(tags) > 0 {
+			settings[k.Tags] = tags
+		}
+		if key != "" {
+			// What was fixed by hand before a retry is not reproducible,
+			// and the cache tags are set by the plugin at the end.
+			e.noRetry = true
+			e.cached = true
 		}
 	}
 	// What the plugin does when a step fails (its own cleanup).
@@ -215,6 +272,39 @@ func (t *packerTemplate) Destroy(ctx context.Context) error { return t.a.Destroy
 
 // close stops the plugin kept for Destroy.
 func (t *packerTemplate) close() { t.a.Close() }
+
+// hasXVA tells whether the stage has an OUTPUT --format=xva.
+func hasXVA(stage *plan.Stage) bool {
+	for _, out := range stage.Outputs {
+		if out.Kind == instructions.OutputXVA {
+			return true
+		}
+	}
+	return false
+}
+
+// packerCache looks for the template tagged with the cache key, where a
+// machine created from source would be, with the plugin's data source. It
+// returns nil when there is none.
+func packerCache(pl *packer.Plugin, c *packer.CacheLookup, flags map[string]string, source, key, dir string) (*packer.Artifact, error) {
+	cfg := map[string]any{c.Tags: []any{CacheTagPrefix + key}, c.AllowMissing: true}
+	for _, name := range c.Copy {
+		if v, ok := flags[name]; ok {
+			cfg[name] = v
+		}
+	}
+	if source != "" {
+		cfg[c.SamePoolAs] = source
+	}
+	out, err := packer.Datasource(pl, c.Datasource, dir, cfg)
+	if err != nil {
+		return nil, err
+	}
+	if out[c.ID] == "" {
+		return nil, nil
+	}
+	return &packer.Artifact{ID: out[c.ID], Desc: out[c.Name]}, nil
+}
 
 // knownSettings sets the settings that OUTPUT and LABEL become for a builder
 // of the table. The plan checked that the builder supports them.

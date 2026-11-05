@@ -23,12 +23,15 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/littlejo/opendango/internal/build"
+	"github.com/littlejo/opendango/internal/parser"
+	"github.com/littlejo/opendango/internal/plan"
 )
 
 func TestXenorchestraEndToEnd(t *testing.T) {
@@ -152,6 +155,133 @@ OUTPUT --as=template %s
 	}
 	if !strings.Contains(log.String(), "==> base: Deleting intermediate template ") {
 		t.Error("the intermediate template was not deleted")
+	}
+}
+
+// TestXenorchestraCacheEndToEnd builds base then app three times with the
+// cache: everything is built, then everything comes from the cache (the
+// plugin's data source finds the tagged templates), then app changes and
+// starts from the cached base. app never keeps the cache tags XO copies
+// from base. Only the templates the builds report are deleted.
+func TestXenorchestraCacheEndToEnd(t *testing.T) {
+	env(t, "XOA_ENDPOINT")
+	env(t, "XOA_TOKEN")
+	from := fmt.Sprintf("--template=%q --pool=%q --network=%q --cpus=2 --memory=2G",
+		env(t, "OPENDANGO_TEST_TEMPLATE"), env(t, "OPENDANGO_TEST_POOL"), env(t, "OPENDANGO_TEST_NETWORK"))
+	user := env(t, "OPENDANGO_TEST_USER")
+	ctx := context.Background()
+	if _, _, err := build.FindPlugin(ctx, "xenorchestra"); err != nil {
+		t.Skipf("packer-plugin-xenorchestra: %v", err)
+	}
+	stamp := time.Now().Unix()
+	app := fmt.Sprintf("opendango-it-xoplugin-cache-%d", stamp)
+	src := func(run string) string {
+		return fmt.Sprintf(`FROM %s plugin://xenorchestra AS base
+CONNECT ssh --user=%s --timeout=10m
+USER root
+RUN echo %d > /opt/opendango-cache-it
+
+FROM base AS app
+RUN %s
+LABEL team=web
+OUTPUT --as=template %s
+`, from, user, stamp, run, app)
+	}
+	// The templates the builds made, by id, from their logs.
+	made := map[string]bool{}
+	artifact := regexp.MustCompile(`==> \w+: Artifact: Xen Orchestra template \S+ \(([0-9a-f-]+)\)`)
+	defer func() {
+		for id := range made {
+			deleteXOTemplateID(t, id)
+		}
+	}()
+	buildCached := func(src string) string {
+		t.Helper()
+		var log bytes.Buffer
+		res, err := parser.Parse(strings.NewReader(src))
+		if err != nil {
+			t.Fatal(err)
+		}
+		p, err := plan.Build("Dangofile", res, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		err = build.Run(ctx, p, build.Options{ContextDir: t.TempDir(), Out: io.MultiWriter(os.Stdout, &log)})
+		for _, m := range artifact.FindAllStringSubmatch(log.String(), -1) {
+			made[m[1]] = true
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		return log.String()
+	}
+
+	run := `test "$(cat /opt/opendango-cache-it)" = ` + fmt.Sprint(stamp)
+	t.Log("first build: fills the cache")
+	log := buildCached(src(run))
+	if strings.Contains(log, "Using the cached template") {
+		t.Errorf("first build used the cache")
+	}
+	t.Log("second build: everything from the cache")
+	log = buildCached(src(run))
+	for _, want := range []string{"==> base: Using the cached template ", "==> app: Using the cached template "} {
+		if !strings.Contains(log, want) {
+			t.Errorf("second build: log lacks %q", want)
+		}
+	}
+	if strings.Contains(log, "Running the instructions") {
+		t.Error("second build ran instructions")
+	}
+	t.Log("third build: app changes, base comes from the cache")
+	log = buildCached(src(run + " && true"))
+	if !strings.Contains(log, "==> base: Using the cached template ") || !strings.Contains(log, "==> app: Running the instructions") {
+		t.Errorf("third build:\n%s", log)
+	}
+
+	// Two app templates (first and third key), each with the label and its
+	// own cache tag only.
+	var apps int
+	for _, tmpl := range xoTemplates(t) {
+		if !made[tmpl.ID] || tmpl.NameLabel != app {
+			continue
+		}
+		apps++
+		var keys int
+		for _, tag := range tmpl.Tags {
+			if strings.HasPrefix(tag, "opendango-cache") {
+				keys++
+			}
+		}
+		if keys != 1 || !slices.Contains(tmpl.Tags, "team=web") {
+			t.Errorf("template %s tags %q: want team=web and one cache tag", tmpl.ID, tmpl.Tags)
+		}
+	}
+	if apps != 2 {
+		t.Errorf("%d templates %s, want 2", apps, app)
+	}
+}
+
+// deleteXOTemplateID deletes one template by id through the XO REST API.
+func deleteXOTemplateID(t *testing.T, id string) {
+	t.Helper()
+	client := &http.Client{}
+	if os.Getenv("XOA_INSECURE") == "true" {
+		client.Transport = &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}
+	}
+	req, err := http.NewRequest(http.MethodDelete, strings.TrimSuffix(os.Getenv("XOA_ENDPOINT"), "/")+"/rest/v0/vm-templates/"+url.PathEscape(id), nil)
+	if err != nil {
+		t.Error(err)
+		return
+	}
+	req.AddCookie(&http.Cookie{Name: "authenticationToken", Value: os.Getenv("XOA_TOKEN")})
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Errorf("deleting template %s: %v", id, err)
+		return
+	}
+	resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		t.Errorf("deleting template %s: %s", id, resp.Status)
 	}
 }
 

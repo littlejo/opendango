@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -20,6 +21,7 @@ import (
 	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
 	"github.com/hashicorp/packer-plugin-sdk/plugin"
 	"github.com/hashicorp/packer-plugin-sdk/template/config"
+	"github.com/zclconf/go-cty/cty"
 )
 
 type Config struct {
@@ -56,6 +58,8 @@ type Config struct {
 	Source   string `mapstructure:"template"`
 	HTTPIP   string `mapstructure:"http_ip"`
 	BootWait string `mapstructure:"boot_wait"`
+	// DropInheritedTags is printed, for the tests.
+	DropInheritedTags []string `mapstructure:"drop_inherited_tags"`
 }
 
 type Builder struct{ config Config }
@@ -79,6 +83,9 @@ func (b *Builder) Run(ctx context.Context, ui packersdk.Ui, hook packersdk.Hook)
 		c.Communicator, c.SSHUsername, c.SSHPort, c.SSHTimeout))
 	for _, keys := range c.BootCommand {
 		ui.Say("boot_command: " + keys)
+	}
+	if len(c.DropInheritedTags) > 0 {
+		ui.Say("drop_inherited_tags: " + strings.Join(c.DropInheritedTags, ","))
 	}
 	if c.BootWait != "" {
 		ui.Say("boot_wait: " + c.BootWait)
@@ -111,6 +118,10 @@ func (b *Builder) Run(ctx context.Context, ui packersdk.Ui, hook packersdk.Hook)
 	}
 	if c.Fail {
 		return nil, errors.New("failing as asked")
+	}
+	// The tags go to the store of the "template" data source.
+	if err := storeTags(c.Tags, c.Root); err != nil {
+		return nil, err
 	}
 	return &artifact{root: c.Root}, nil
 }
@@ -218,9 +229,70 @@ func (a *artifact) Destroy() error {
 	return os.WriteFile(filepath.Join(a.root, "artifact-destroyed"), nil, 0o644)
 }
 
+// The "template" data source finds an artifact by its tags in a store: the
+// directory OPENDANGO_TEST_STORE, with one file per tag that holds the
+// artifact id (the builder's root). It stands for the one of
+// packer-plugin-xenorchestra.
+type dsConfig struct {
+	Tags         []string `mapstructure:"tags"`
+	SamePoolAs   string   `mapstructure:"same_pool_as"`
+	AllowMissing bool     `mapstructure:"allow_missing"`
+	Endpoint     string   `mapstructure:"endpoint"`
+	Token        string   `mapstructure:"token"`
+	Insecure     string   `mapstructure:"insecure"`
+	Pool         string   `mapstructure:"pool"`
+}
+
+type datasource struct{ config dsConfig }
+
+func (d *datasource) ConfigSpec() hcldec.ObjectSpec { return hcldec.ObjectSpec{} }
+
+func (d *datasource) OutputSpec() hcldec.ObjectSpec {
+	return hcldec.ObjectSpec{
+		"id":   &hcldec.AttrSpec{Name: "id", Type: cty.String},
+		"name": &hcldec.AttrSpec{Name: "name", Type: cty.String},
+	}
+}
+
+func (d *datasource) Configure(raws ...any) error {
+	return config.Decode(&d.config, &config.DecodeOpts{}, raws...)
+}
+
+func (d *datasource) Execute() (cty.Value, error) {
+	id := ""
+	for i, tag := range d.config.Tags {
+		b, err := os.ReadFile(filepath.Join(os.Getenv("OPENDANGO_TEST_STORE"), url.PathEscape(tag)))
+		if err != nil || (i > 0 && string(b) != id) {
+			id = ""
+			break
+		}
+		id = string(b)
+	}
+	if id == "" && !d.config.AllowMissing {
+		return cty.NilVal, fmt.Errorf("no artifact with the tags %q", d.config.Tags)
+	}
+	return cty.ObjectVal(map[string]cty.Value{"id": cty.StringVal(id), "name": cty.StringVal("lookup from " + d.config.SamePoolAs)}), nil
+}
+
+// storeTags records the tags of an artifact in the store, when the test set
+// one.
+func storeTags(tags []string, id string) error {
+	dir := os.Getenv("OPENDANGO_TEST_STORE")
+	if dir == "" {
+		return nil
+	}
+	for _, tag := range tags {
+		if err := os.WriteFile(filepath.Join(dir, url.PathEscape(tag)), []byte(id), 0o644); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func main() {
 	set := plugin.NewSet()
 	set.RegisterBuilder("local", new(Builder))
+	set.RegisterDatasource("template", new(datasource))
 	if err := set.Run(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
