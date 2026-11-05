@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/littlejo/opendango/builders/packer"
 	"github.com/littlejo/opendango/internal/instructions"
@@ -35,11 +36,16 @@ func FindPlugin(ctx context.Context, source string) (*packer.Plugin, string, err
 	return nil, "", fmt.Errorf("packer: %s has no builder %q (builders: %s)", pl.Path, builder, strings.Join(d.Builders, ", "))
 }
 
-// runPackerStage builds a FROM packer://<source> stage: the plugin creates
-// the machine and connects to it, then calls back to run the instructions
-// through its communicator, then produces its artifact.
-func runPackerStage(ctx context.Context, p *plan.Plan, stage *plan.Stage, con *console, opts Options) (*executor, error) {
-	cfg, err := packer.ParseConfig(stage.From.Source, stage.From.Flags)
+// runPackerStage builds a FROM packer://<source> stage, or a stage that
+// starts from one: the plugin creates the machine and connects to it, then
+// calls back to run the instructions through its communicator, then
+// produces its artifact. parent and needed are those of runStage.
+func runPackerStage(ctx context.Context, p *plan.Plan, stage *plan.Stage, parent *executor, needed bool, con *console, opts Options) (*executor, error) {
+	flags, err := stage.PackerFlags()
+	if err != nil {
+		return nil, err
+	}
+	cfg, err := packer.ParseConfig(stage.Root().From.Source, flags)
 	if err != nil {
 		return nil, err
 	}
@@ -50,6 +56,11 @@ func runPackerStage(ctx context.Context, p *plan.Plan, stage *plan.Stage, con *c
 		connect:    stage.Connect,
 		contextDir: opts.ContextDir,
 		console:    con,
+	}
+	if parent != nil {
+		// Like a native stage: USER, SHELL, WORKDIR and ENV carry over.
+		e.user, e.shell, e.workdir = parent.user, parent.shell, parent.workdir
+		e.env = append([]instructions.KeyValue{}, parent.env...)
 	}
 
 	e.say("Looking for the plugin of %s", cfg.Component)
@@ -63,7 +74,9 @@ func runPackerStage(ctx context.Context, p *plan.Plan, stage *plan.Stage, con *c
 	// flags.
 	settings := cfg.Settings
 	if c := e.connect; c != nil {
-		e.user = c.User
+		if e.user == "" {
+			e.user = c.User
+		}
 		settings["communicator"] = "ssh"
 		settings["ssh_username"] = c.User
 		settings["ssh_port"] = c.Port
@@ -95,13 +108,25 @@ func runPackerStage(ctx context.Context, p *plan.Plan, stage *plan.Stage, con *c
 	}
 	// OUTPUT and LABEL become the settings of the builder's artifact; without
 	// OUTPUT --as=template, the artifact is deleted once built, like the VM
-	// of a native stage.
-	destroy := false
+	// of a native stage, or at the end of the build when other stages start
+	// from it (an intermediate template, like with --no-cache: packer://
+	// stages are not cached).
+	destroy, intermediate := false, false
 	if k := packer.Lookup(cfg.Component); k != nil {
 		if err := knownSettings(settings, k, stage, opts.ContextDir); err != nil {
 			return nil, err
 		}
-		destroy = stage.TemplateOutput() == nil
+		if parent != nil {
+			settings[k.Source] = parent.artifact.ID()
+		}
+		if stage.TemplateOutput() == nil {
+			if needed {
+				intermediate = true
+				settings[k.TemplateName] = fmt.Sprintf("opendango-tmp-%s-%d", stage.Name(), time.Now().Unix())
+			} else {
+				destroy = true
+			}
+		}
 	}
 	// What the plugin does when a step fails (its own cleanup).
 	onError := "cleanup"
@@ -134,6 +159,7 @@ func runPackerStage(ctx context.Context, p *plan.Plan, stage *plan.Stage, con *c
 		Configs:         []map[string]any{settings, core},
 		Ui:              ui,
 		DestroyArtifact: destroy,
+		KeepPlugin:      intermediate,
 		Provision: func(ctx context.Context, comm *packer.Comm) error {
 			e.say("Running the instructions")
 			e.comm = comm
@@ -145,10 +171,29 @@ func runPackerStage(ctx context.Context, p *plan.Plan, stage *plan.Stage, con *c
 	if err != nil {
 		return nil, err
 	}
-	e.say("Artifact: %s", artifact)
+	if artifact == nil {
+		if needed {
+			return nil, fmt.Errorf("packer: %s produced no artifact for the stages that start from %s", pl.Name, stage.Name())
+		}
+		e.say("No artifact")
+		e.say("Stage finished")
+		return e, nil
+	}
+	e.artifact = &packerTemplate{artifact}
+	e.say("Artifact: %s", artifact.Desc)
 	e.say("Stage finished")
 	return e, nil
 }
+
+// packerTemplate is the artifact of a packer:// stage that other stages
+// start from.
+type packerTemplate struct{ a *packer.Artifact }
+
+func (t *packerTemplate) ID() string                        { return t.a.ID }
+func (t *packerTemplate) Destroy(ctx context.Context) error { return t.a.Destroy() }
+
+// close stops the plugin kept for Destroy.
+func (t *packerTemplate) close() { t.a.Close() }
 
 // knownSettings sets the settings that OUTPUT and LABEL become for a builder
 // of the table. The plan checked that the builder supports them.

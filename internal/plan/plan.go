@@ -79,6 +79,28 @@ func (s *Stage) Root() *Stage {
 	return s
 }
 
+// PackerFlags returns the FROM flags of a packer:// stage: its own for a
+// root stage; for a stage that starts from another one, also the flags it
+// inherits (packer.Known.StageFlags).
+func (s *Stage) PackerFlags() (map[string]string, error) {
+	if s.Parent == nil {
+		return s.From.Flags, nil
+	}
+	k := s.known()
+	if k == nil || k.Source == "" {
+		return nil, fmt.Errorf("FROM %s: a stage cannot start from a packer://%s stage: its artifact is the plugin's (opendango knows the artifacts of packer://%s)", s.From.Stage, s.Root().From.Source, packer.KnownSources())
+	}
+	parent, err := s.Parent.PackerFlags()
+	if err != nil {
+		return nil, err
+	}
+	flags, err := k.StageFlags(parent, s.From.Flags)
+	if err != nil {
+		return nil, fmt.Errorf("FROM %s: %w", s.From.Stage, err)
+	}
+	return flags, nil
+}
+
 // known returns what opendango knows of the Packer builder of the stage,
 // nil for a native stage or a builder that is not in the table.
 func (s *Stage) known() *packer.Known {
@@ -466,10 +488,11 @@ func checkBuilder(s *Stage) error {
 		}
 		return err
 	case "packer":
-		if s.Parent != nil {
-			return fmt.Errorf("FROM %s: a stage cannot start from a packer:// stage: its artifact is the plugin's", s.From.Stage)
+		flags, err := s.PackerFlags()
+		if err != nil {
+			return err
 		}
-		_, err := packer.ParseConfig(s.From.Source, s.From.Flags)
+		_, err = packer.ParseConfig(root.Source, flags)
 		return err
 	default:
 		return fmt.Errorf("unknown builder %q (supported: xo, packer)", root.Builder)

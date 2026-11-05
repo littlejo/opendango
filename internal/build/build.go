@@ -210,18 +210,21 @@ func Run(ctx context.Context, p *plan.Plan, opts Options) (err error) {
 		}
 		if err != nil && keep(err, opts) {
 			for _, e := range temporary {
-				e.say("Build failed, keeping intermediate template %s", e.b.ID())
+				e.say("Build failed, keeping intermediate template %s", e.template().ID())
+				if t, ok := e.template().(*packerTemplate); ok {
+					t.close()
+				}
 			}
 			return
 		}
 		// Children first: a template cannot always be deleted while VMs
 		// created from it exist.
 		for i := len(temporary) - 1; i >= 0; i-- {
-			e := temporary[i]
+			t := temporary[i].template()
 			cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Minute)
-			e.say("Deleting intermediate template %s", e.b.ID())
-			if derr := e.b.Destroy(cctx); derr != nil {
-				err = errors.Join(err, fmt.Errorf("deleting intermediate template %s: %w", e.b.ID(), derr))
+			temporary[i].say("Deleting intermediate template %s", t.ID())
+			if derr := t.Destroy(cctx); derr != nil {
+				err = errors.Join(err, fmt.Errorf("deleting intermediate template %s: %w", t.ID(), derr))
 			}
 			cancel()
 		}
@@ -327,11 +330,11 @@ type console struct {
 // stage is not cached.
 func runStage(ctx context.Context, p *plan.Plan, stage *plan.Stage, parent *executor, needed bool, key string, con *console, opts Options) (_ *executor, err error) {
 	if stage.IsPacker() {
-		return runPackerStage(ctx, p, stage, con, opts)
+		return runPackerStage(ctx, p, stage, parent, needed, con, opts)
 	}
 	parentTemplate := ""
 	if parent != nil {
-		parentTemplate = parent.b.ID()
+		parentTemplate = parent.template().ID()
 	}
 	b, err := opts.NewBuilder(stage, parentTemplate)
 	if err != nil {
@@ -599,11 +602,29 @@ func (e *executor) workdirPath(dir string) string {
 	return dir
 }
 
+// template is the template a stage ended as, for the stages that start from
+// it and for the deletion of the intermediate ones.
+type template interface {
+	ID() string
+	Destroy(ctx context.Context) error
+}
+
+// template returns the template the stage ended as: the builder's VM once
+// converted, or the artifact of a packer:// stage.
+func (e *executor) template() template {
+	if e.artifact != nil {
+		return e.artifact
+	}
+	return e.b
+}
+
 type executor struct {
-	file       string
-	name       string
-	out        io.Writer
-	b          Builder
+	file string
+	name string
+	out  io.Writer
+	b    Builder
+	// artifact is the artifact of a packer:// stage (b is nil).
+	artifact   *packerTemplate
 	comm       Communicator
 	connect    *instructions.Connect
 	dial       DialFunc

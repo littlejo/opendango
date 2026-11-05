@@ -51,6 +51,9 @@ type Config struct {
 	Tags         []string `mapstructure:"tags"`
 	XVAOutput    string   `mapstructure:"xva_output"`
 	XVACompress  string   `mapstructure:"xva_compress"`
+	// Source is the parent's artifact of a stage that starts from another
+	// one (FROM <stage>).
+	Source string `mapstructure:"template"`
 }
 
 type Builder struct{ config Config }
@@ -74,6 +77,9 @@ func (b *Builder) Run(ctx context.Context, ui packersdk.Ui, hook packersdk.Hook)
 		c.Communicator, c.SSHUsername, c.SSHPort, c.SSHTimeout))
 	for _, keys := range c.BootCommand {
 		ui.Say("boot_command: " + keys)
+	}
+	if c.Source != "" {
+		ui.Say("source: template=" + c.Source)
 	}
 	if c.TemplateName != "" || len(c.Tags) > 0 || c.XVAOutput != "" {
 		ui.Say(fmt.Sprintf("artifact: template_name=%s tags=%s xva=%s compress=%s", c.TemplateName, strings.Join(c.Tags, ","), c.XVAOutput, c.XVACompress))

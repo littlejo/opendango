@@ -92,6 +92,57 @@ RUN true
 	}
 }
 
+// TestXenorchestraMultiStageEndToEnd builds base (an intermediate
+// template) then app from it, with packer://xenorchestra: the file written
+// in base is in app, ENV and USER carry over, the intermediate template is
+// deleted at the end and app keeps its labels.
+func TestXenorchestraMultiStageEndToEnd(t *testing.T) {
+	env(t, "XOA_ENDPOINT")
+	env(t, "XOA_TOKEN")
+	from := fmt.Sprintf("--template=%q --pool=%q --network=%q --cpus=2 --memory=2G",
+		env(t, "OPENDANGO_TEST_TEMPLATE"), env(t, "OPENDANGO_TEST_POOL"), env(t, "OPENDANGO_TEST_NETWORK"))
+	user := env(t, "OPENDANGO_TEST_USER")
+	ctx := context.Background()
+	if _, _, err := build.FindPlugin(ctx, "xenorchestra"); err != nil {
+		t.Skipf("packer-plugin-xenorchestra: %v", err)
+	}
+	app := fmt.Sprintf("opendango-it-xoplugin-app-%d", time.Now().Unix())
+	src := fmt.Sprintf(`FROM %s packer://xenorchestra AS base
+CONNECT ssh --user=%s --timeout=10m
+USER root
+ENV STAGE_ENV=from-base
+WORKDIR /opt/opendango
+RUN echo base > from-base.txt
+
+FROM --cpus=1 base AS app
+RUN test "$(cat from-base.txt)" = base && test "$STAGE_ENV" = from-base && test "$(id -u)" = 0 && test "$(nproc)" = 1
+LABEL team=web
+OUTPUT --as=template %s
+`, from, user, app)
+	var log bytes.Buffer
+	run(ctx, t, src, t.TempDir(), nil, io.MultiWriter(os.Stdout, &log))
+	defer deleteXOTemplate(t, app)
+
+	var found bool
+	for _, tmpl := range xoTemplates(t) {
+		switch {
+		case tmpl.NameLabel == app:
+			found = true
+			if !slices.Contains(tmpl.Tags, "team=web") {
+				t.Errorf("template tags %q lack team=web", tmpl.Tags)
+			}
+		case strings.HasPrefix(tmpl.NameLabel, "opendango-tmp-base-"):
+			t.Errorf("intermediate template %s (%s) left", tmpl.NameLabel, tmpl.ID)
+		}
+	}
+	if !found {
+		t.Errorf("no template %s", app)
+	}
+	if !strings.Contains(log.String(), "==> base: Deleting intermediate template ") {
+		t.Error("the intermediate template was not deleted")
+	}
+}
+
 type xoTemplate struct {
 	ID        string   `json:"id"`
 	NameLabel string   `json:"name_label"`

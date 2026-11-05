@@ -42,16 +42,65 @@ type Build struct {
 	// DestroyArtifact deletes the artifact once built (the stage has no
 	// OUTPUT --as=template): only its files, such as an XVA, stay.
 	DestroyArtifact bool
+	// KeepPlugin keeps the plugin running after Run, for a later
+	// Artifact.Destroy (an intermediate template, deleted at the end of the
+	// build): the artifact can only be destroyed through the plugin that
+	// made it. Artifact.Close stops it.
+	KeepPlugin bool
 }
 
-// Run starts the plugin, prepares and runs the builder, and returns a
-// description of the artifact. The error of Provision is returned as is.
-func (b *Build) Run(ctx context.Context) (string, error) {
+// Artifact is what a build produced.
+type Artifact struct {
+	// ID is the plugin's id of the artifact (xenorchestra: the template
+	// UUID).
+	ID string
+	// Desc describes it, for the log.
+	Desc  string
+	Files []string
+
+	art packersdk.Artifact
+	// p is the plugin, kept with KeepPlugin.
+	p      *process
+	plugin string
+}
+
+// Destroy deletes the artifact through the plugin, which must still run
+// (KeepPlugin), then stops the plugin.
+func (a *Artifact) Destroy() error {
+	if a.p == nil {
+		return fmt.Errorf("packer: %s: the plugin of the artifact %s is not running anymore", a.plugin, a.ID)
+	}
+	err := a.art.Destroy()
+	if err != nil {
+		err = fmt.Errorf("packer: %s: deleting the artifact %s: %w%s", a.plugin, a.ID, err, a.p.logTail())
+	}
+	a.Close()
+	return err
+}
+
+// Close stops the plugin kept with KeepPlugin; Destroy is not possible
+// afterwards.
+func (a *Artifact) Close() {
+	if a.p != nil {
+		a.p.stop()
+		a.p = nil
+	}
+}
+
+// Run starts the plugin, prepares and runs the builder, and returns its
+// artifact (nil when the builder produced none). The error of Provision is
+// returned as is.
+func (b *Build) Run(ctx context.Context) (_ *Artifact, err error) {
 	p, err := start(b.Plugin, b.Builder, b.Dir)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
-	defer p.stop()
+	kept := false
+	defer func() {
+		if !kept {
+			p.stop()
+		}
+	}()
 
 	builder := p.client.Builder()
 	configs := make([]any, len(b.Configs))
@@ -63,28 +112,31 @@ func (b *Build) Run(ctx context.Context) (string, error) {
 		b.Ui.Say("Warning: " + w)
 	}
 	if err != nil {
-		return "", fmt.Errorf("packer: %s: invalid configuration: %w%s", b.Plugin.Name, err, p.logTail())
+		return nil, fmt.Errorf("packer: %s: invalid configuration: %w%s", b.Plugin.Name, err, p.logTail())
 	}
 
 	h := &hook{provision: b.Provision}
-	artifact, err := builder.Run(ctx, b.Ui, h)
+	art, err := builder.Run(ctx, b.Ui, h)
 	if h.err != nil {
-		return "", h.err
+		return nil, h.err
 	}
 	if err != nil {
-		return "", fmt.Errorf("packer: %s: %w%s", b.Plugin.Name, err, p.logTail())
+		return nil, fmt.Errorf("packer: %s: %w%s", b.Plugin.Name, err, p.logTail())
 	}
-	if artifact == nil {
-		return "no artifact", nil
+	if art == nil {
+		return nil, nil
 	}
-	desc := artifact.String()
+	a := &Artifact{ID: art.Id(), Desc: art.String(), Files: art.Files(), art: art, plugin: b.Plugin.Name}
 	if b.DestroyArtifact {
 		b.Ui.Say("Deleting the artifact: no OUTPUT --as=template")
-		if err := artifact.Destroy(); err != nil {
-			return desc, fmt.Errorf("packer: %s: deleting the artifact %s: %w%s", b.Plugin.Name, artifact.Id(), err, p.logTail())
+		if err := art.Destroy(); err != nil {
+			return a, fmt.Errorf("packer: %s: deleting the artifact %s: %w%s", b.Plugin.Name, a.ID, err, p.logTail())
 		}
 	}
-	return desc, nil
+	if b.KeepPlugin {
+		a.p, kept = p, true
+	}
+	return a, nil
 }
 
 // process is a running plugin.
