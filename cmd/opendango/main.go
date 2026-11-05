@@ -613,6 +613,8 @@ func cmdInit(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(&b, "\n%s:\n", source)
 		b.WriteString("  # dango:                    # opendango's options, not the plugin's\n")
 		b.WriteString("  #   connect: ssh --user=debian --timeout=10m   # CONNECT of the stages without one\n")
+		b.WriteString("  #   parent:                  # settings of a stage that starts from another one (FROM <stage>)\n")
+		b.WriteString("  #     setting: ${DANGO_PARENT_ID}             # or ${DANGO_PARENT_FILE}: the parent's artifact\n")
 		if url := packer.DocURL(pl); url != "" {
 			fmt.Fprintf(&b, "  # What the settings do: %s\n", url)
 		}

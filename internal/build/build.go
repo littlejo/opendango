@@ -277,7 +277,7 @@ func Run(ctx context.Context, p *plan.Plan, opts Options) (err error) {
 		}
 		done[r.stage] = r.e
 		// A template in the cache stays for the next builds.
-		if needsTemplate(r.stage, selected) && r.stage.TemplateOutput() == nil && !r.e.cached {
+		if needsTemplate(r.stage, selected) && r.stage.TemplateOutput() == nil && !r.e.cached && !r.e.keepArtifact {
 			temporary = append(temporary, r.e)
 		}
 	}
@@ -657,6 +657,9 @@ type executor struct {
 	// noRetry: --on-error=ask cannot retry (a plugin:// stage that the
 	// plugin tags for the cache at the end).
 	noRetry bool
+	// keepArtifact: the artifact of a plugin:// stage of a builder that is
+	// not in the table, set by its own flags, is never deleted.
+	keepArtifact bool
 	// answer is the answer to --on-error=ask that ended the stage, when
 	// answered is true.
 	answer   choice

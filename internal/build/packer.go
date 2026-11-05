@@ -78,9 +78,25 @@ func runPackerStage(ctx context.Context, p *plan.Plan, stage *plan.Stage, parent
 	if parent != nil {
 		parentID = parent.artifact.ID()
 	}
-	settings, err := stageSettings(p.File, stage, cfg, parentID, opts.ContextDir)
+	// With dango.parent, the user tells how the plugin starts from the
+	// parent's artifact; otherwise the table does (its Source setting).
+	tableSource := parentID
+	if stage.ParentFlags != nil {
+		tableSource = ""
+	}
+	settings, err := stageSettings(p.File, stage, cfg, tableSource, opts.ContextDir)
 	if err != nil {
 		return nil, err
+	}
+	if parent != nil {
+		if err := parentSettings(settings, parent.artifact, stage, cfg.Component); err != nil {
+			return nil, err
+		}
+	}
+	if packer.Lookup(cfg.Component) == nil {
+		// Its own flags set the artifact (a file, an AMI…): it stays, also
+		// when other stages start from it.
+		e.keepArtifact = true
 	}
 	// OUTPUT and LABEL become the settings of the builder's artifact; without
 	// OUTPUT --as=template, the artifact is deleted once built, like the VM
@@ -345,6 +361,29 @@ func packerXVA(ctx context.Context, p *plan.Plan, stage *plan.Stage, pl *packer.
 		if _, err := packer.PostProcess(ctx, pl, k.XVA.PostProcessor, opts.ContextDir, ui, id, cfg); err != nil {
 			return &plan.Error{File: p.File, Line: out.Line(), Err: err}
 		}
+	}
+	return nil
+}
+
+// parentSettings sets the dango.parent settings of a stage that starts from
+// another one, expanded with the parent's artifact (its id and first
+// file), over the section and under the FROM flags.
+func parentSettings(settings map[string]any, parent *packerTemplate, stage *plan.Stage, source string) error {
+	file := ""
+	if files := parent.a.Files; len(files) > 0 {
+		file = files[0]
+	}
+	values, err := stage.ExpandParent(parent.ID(), file)
+	if err != nil || len(values) == 0 {
+		return err
+	}
+	// The JSON values become lists and maps, like FROM flags.
+	cfg, err := packer.ParseConfig(source, values)
+	if err != nil {
+		return err
+	}
+	for k, v := range cfg.Settings {
+		settings[k] = v
 	}
 	return nil
 }
