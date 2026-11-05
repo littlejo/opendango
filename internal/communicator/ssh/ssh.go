@@ -63,12 +63,18 @@ func Dial(ctx context.Context, cfg Config) (*Comm, error) {
 // Run runs command through the remote user's shell. It returns *ExitError
 // when the command exits with a non-zero status.
 func (c *Comm) Run(ctx context.Context, command string, stdout, stderr io.Writer) error {
+	return c.RunInput(ctx, command, nil, stdout, stderr)
+}
+
+// RunInput is Run with stdin (nil for none): the provisioners of plugins
+// stream data to their commands (Ansible's piped transfers).
+func (c *Comm) RunInput(ctx context.Context, command string, stdin io.Reader, stdout, stderr io.Writer) error {
 	sess, err := c.client.NewSession()
 	if err != nil {
 		return err
 	}
 	defer sess.Close()
-	sess.Stdout, sess.Stderr = stdout, stderr
+	sess.Stdin, sess.Stdout, sess.Stderr = stdin, stdout, stderr
 
 	done := make(chan error, 1)
 	go func() { done <- sess.Run(command) }()

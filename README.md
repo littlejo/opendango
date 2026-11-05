@@ -100,13 +100,14 @@ plugin attaches it as a CD, and the image is written to `dist/`.
 | `WORKDIR` | `WORKDIR /opt/app` |
 | `REBOOT` | `REBOOT` |
 | `BREAKPOINT` | `BREAKPOINT "check nginx"` |
+| `PROVISION` | `PROVISION --playbook_file=site.yml plugin://ansible` (see [Provisioners](#provisioners)) |
 | `SERVE` | `SERVE --port=8080 http/` (before `CONNECT`) |
 | `BOOT` | `BOOT <wait10><esc>auto url=http://${DANGO_HTTP_ADDR}/preseed.cfg<enter>` (before `CONNECT`) |
 | `LABEL` | `LABEL org.opencontainers.image.version=1.2 team=web` (with `OUTPUT --as=template`) |
 | `OUTPUT` | `OUTPUT --as=template "name"`, `OUTPUT --format=xva --compress=zstd ./out.xva`, `OUTPUT --format=manifest dist/manifest.json`, `OUTPUT --output=dist/app.box plugin://vagrant` (see [Post-processors](#post-processors)) |
 
 `CONNECT` is required before the instructions that need the machine (`RUN`,
-`COPY`, `ADD`, `WORKDIR`, `REBOOT`, `BREAKPOINT`, `ENV --persist`), unless
+`COPY`, `ADD`, `WORKDIR`, `REBOOT`, `BREAKPOINT`, `PROVISION`, `ENV --persist`), unless
 `dango.yaml` gives it (`dango.connect`) or the parent stage has one.
 
 `ENV` values only exist during the build; add `--persist` to write them to
@@ -405,6 +406,38 @@ RUN systemctl enable app
   no machine for it. When `build` is in the cache as a template but its
   files are not (a `COPY --from` added later), a machine starts from the
   template only to fetch them.
+
+## Provisioners
+
+`PROVISION [--settings] plugin://<provisioner>` runs the provisioner of a
+Packer plugin among the instructions: Ansible, Chef, Puppet, Salt…
+
+```dockerfile
+FROM plugin://qemu AS web
+RUN apt-get update
+PROVISION --playbook_file=site.yml --extra_arguments='["--tags", "web"]' plugin://ansible
+RUN systemctl is-active nginx
+```
+
+```sh
+opendango plugin pull ansible    # ansible (remote) and ansible-local
+```
+
+- The settings are the provisioner's, by their Packer names (lists and maps
+  in JSON), over its section of [`dango.yaml`](#plugin-settings-file-dangoyaml)
+  (`ansible:`).
+- The provisioner gets the stage's connection, like with Packer: the
+  plugin's in a `plugin://` stage, opendango's own with `xo://`, and its
+  data (host, port, user, key). `plugin://ansible` runs `ansible-playbook`
+  on this machine, which must have it; `plugin://ansible-local` runs it in
+  the machine.
+- It runs as the connection's user: `USER`, `ENV` and `WORKDIR` do not apply
+  (with Ansible, use `become`).
+- The files and directories of the Dangofile directory that its settings
+  name (`site.yml`, `roles/`) are part of the cache key: changing the
+  playbook builds the stage again.
+- `opendango validate` has the provisioner check its settings; with
+  `--on-error=ask`, a failed `PROVISION` can be retried.
 
 ## Post-processors
 
