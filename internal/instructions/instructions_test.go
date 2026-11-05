@@ -285,7 +285,11 @@ func TestParseCopy(t *testing.T) {
 		{"COPY a", nil, "at least one source"},
 		{"COPY --chmod=rw a b", nil, "invalid --chmod"},
 		{"COPY --chown= a b", nil, "invalid --chown"},
-		{"COPY --from=x a b", nil, "unknown flag --from"},
+		// Paths from the root of the source stage's machine.
+		{"COPY --from=${V} --chmod=0755 /opt/app etc/../etc/app.conf /usr/local/", &Copy{Pos: Pos{1}, Sources: []string{"/opt/app", "/etc/app.conf"}, Dest: "/usr/local/", Chmod: "0755", From: "val"}, ""},
+		{"COPY --from= a b", nil, "--from needs the name of a stage"},
+		{"COPY --from=x /opt/*.so b", nil, "patterns are not supported"},
+		{"COPY --from=x / b", nil, "the whole machine (/) cannot be copied"},
 		{`COPY ["a", "b"]`, nil, "JSON form"},
 	}
 	for _, tt := range tests {
