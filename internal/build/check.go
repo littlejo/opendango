@@ -57,7 +57,7 @@ func CheckPlugins(ctx context.Context, p *plan.Plan, contextDir string, find Fin
 			}
 			specs[cfg.Component] = names
 		}
-		if unknown := unknownFlags(cfg.Component, flags, names); len(unknown) > 0 {
+		if unknown := unknownFlags(cfg.Component, flags, stage, names); len(unknown) > 0 {
 			for _, err := range unknown {
 				fail(err)
 			}
@@ -88,7 +88,7 @@ func CheckPlugins(ctx context.Context, p *plan.Plan, contextDir string, find Fin
 
 // unknownFlags returns an error for each flag that is not a setting of the
 // builder, with the closest setting when there is one.
-func unknownFlags(source string, flags map[string]string, settings map[string]bool) []error {
+func unknownFlags(source string, flags map[string]string, stage *plan.Stage, settings map[string]bool) []error {
 	all := make([]string, 0, len(settings))
 	for name := range settings {
 		all = append(all, name)
@@ -102,9 +102,16 @@ func unknownFlags(source string, flags map[string]string, settings map[string]bo
 	sort.Strings(unknown)
 	var errs []error
 	for _, name := range unknown {
-		msg := fmt.Sprintf("plugin://%s has no setting %q (opendango plugin describe %s lists them)", source, name, source)
+		// Where it comes from: a FROM flag, or dango.yaml.
+		where := ""
+		if _, ok := stage.From.Flags[name]; !ok {
+			if _, ok := stage.FileFlags[name]; ok {
+				where = " (in " + plan.SettingsFile + ")"
+			}
+		}
+		msg := fmt.Sprintf("plugin://%s has no setting %q%s (opendango plugin describe %s lists them)", source, name, where, source)
 		if s := didyoumean.NameSuggestion(name, all); s != "" {
-			msg = fmt.Sprintf("plugin://%s has no setting %q, did you mean --%s?", source, name, s)
+			msg = fmt.Sprintf("plugin://%s has no setting %q%s, did you mean %s?", source, name, where, s)
 		}
 		errs = append(errs, errors.New(msg))
 	}
