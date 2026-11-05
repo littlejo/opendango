@@ -322,3 +322,64 @@ func xoTemplates(t *testing.T) []xoTemplate {
 	}
 	return templates
 }
+
+// TestCopyFromEndToEnd runs COPY --from between two unrelated stages on
+// XO, with the native builder and with packer-plugin-xenorchestra: the build
+// stage writes a file as root, fetched at its end; the app stage gets it.
+// The second build takes the files from the files cache: the build stage
+// starts no VM. No template is made.
+func TestCopyFromEndToEnd(t *testing.T) {
+	env(t, "XOA_ENDPOINT")
+	env(t, "XOA_TOKEN")
+	template, pool, network := env(t, "OPENDANGO_TEST_TEMPLATE"), env(t, "OPENDANGO_TEST_POOL"), env(t, "OPENDANGO_TEST_NETWORK")
+	user := env(t, "OPENDANGO_TEST_USER")
+	for _, tt := range []struct{ name, from string }{
+		{"native", fmt.Sprintf("FROM --template=%q --pool=%q --network=%q xo://", template, pool, network)},
+		{"plugin", fmt.Sprintf("FROM --template=%q --pool=%q --network=%q plugin://xenorchestra", template, pool, network)},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			if tt.name == "plugin" {
+				if _, _, err := build.FindPlugin(ctx, "xenorchestra"); err != nil {
+					t.Skipf("packer-plugin-xenorchestra: %v", err)
+				}
+			}
+			stamp := time.Now().UnixNano()
+			src := fmt.Sprintf(`%[1]s AS build
+CONNECT ssh --user=%[2]s --timeout=10m
+USER root
+RUN mkdir -p /opt/it && echo %[3]d > /opt/it/app && chmod 0700 /opt/it
+
+%[1]s AS app
+CONNECT ssh --user=%[2]s --timeout=10m
+COPY --from=build --chmod=0644 /opt/it/app /tmp/copied
+RUN test "$(cat /tmp/copied)" = %[3]d
+`, tt.from, user, stamp)
+			cache := t.TempDir()
+			run := func() string {
+				t.Helper()
+				res, err := parser.Parse(strings.NewReader(src))
+				if err != nil {
+					t.Fatal(err)
+				}
+				p, err := plan.Build("Dangofile", res, nil)
+				if err != nil {
+					t.Fatal(err)
+				}
+				var log bytes.Buffer
+				if err := build.Run(ctx, p, build.Options{ContextDir: t.TempDir(), Out: io.MultiWriter(os.Stdout, &log), FilesCache: cache}); err != nil {
+					t.Fatal(err)
+				}
+				return log.String()
+			}
+			log := run()
+			if !strings.Contains(log, "==> build: Fetching /opt/it/app for COPY --from=build") {
+				t.Error("the file was not fetched")
+			}
+			log = run()
+			if !strings.Contains(log, "==> build: Using the cached files of COPY --from") || strings.Contains(log, "==> build: Starting VM") || strings.Contains(log, "==> build: Creating VM") {
+				t.Errorf("second build did not take the files from the cache")
+			}
+		})
+	}
+}
