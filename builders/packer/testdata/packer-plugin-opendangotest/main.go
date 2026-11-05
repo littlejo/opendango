@@ -106,6 +106,11 @@ func (b *Builder) Prepare(raws ...any) ([]string, []string, error) {
 	if err := config.Decode(&b.config, &config.DecodeOpts{}, raws...); err != nil {
 		return nil, nil, err
 	}
+	// A machine opendango builds from a cached template only gets the
+	// inherited settings: the tests give its root this way.
+	if b.config.Root == "" {
+		b.config.Root = os.Getenv("OPENDANGO_TEST_ROOT")
+	}
 	if b.config.Root == "" {
 		return nil, nil, errors.New("root is required")
 	}

@@ -59,11 +59,24 @@ func runPackerStage(ctx context.Context, p *plan.Plan, stage *plan.Stage, parent
 		console:    con,
 		fetchRoot:  filepath.Join(opts.filesDir, fmt.Sprint(stage.Index)),
 		fetched:    from,
+		files:      filesCache(opts.FilesCache),
+	}
+	if key != "" && len(stage.Fetch) > 0 {
+		e.filesKey = key
 	}
 	if parent != nil {
 		// Like a native stage: USER, SHELL, WORKDIR and ENV carry over.
 		e.user, e.shell, e.workdir = parent.user, parent.shell, parent.workdir
 		e.env = append([]instructions.KeyValue{}, parent.env...)
+	}
+	// A stage that only feeds COPY --from, with its files in the cache:
+	// nothing to build, whatever the plugin.
+	if e.filesKey != "" && filesOnly(stage, needed) && e.files.has(key, stage.Fetch) {
+		e.say("Using the cached files of COPY --from (key %s)", key[:12])
+		e.fetchRoot = e.files.root(key)
+		e.replay(stage.Steps)
+		e.say("Stage finished (cached)")
+		return e, nil
 	}
 
 	e.say("Looking for the plugin of %s", cfg.Component)
@@ -113,10 +126,17 @@ func runPackerStage(ctx context.Context, p *plan.Plan, stage *plan.Stage, parent
 
 		// The cache: a template tagged with the key, found by the plugin's
 		// data source.
-		if key != "" && k.Cache != nil {
+		if key != "" && k.Cache != nil && !filesOnly(stage, needed) {
 			found, err := packerCache(pl, k.Cache, flags, source, key, opts.ContextDir)
 			if err != nil {
 				return nil, fmt.Errorf("looking up the cache: %w", err)
+			}
+			if found != nil && e.filesKey != "" {
+				if e.files.has(key, stage.Fetch) {
+					e.fetchRoot = e.files.root(key)
+				} else if err := packerFetchFromTemplate(ctx, p, stage, pl, builder, k, cfg, flags, found.ID, e, opts); err != nil {
+					return nil, err
+				}
 			}
 			if found != nil {
 				e.say("Using the cached template %s (key %s)", found.ID, key[:12])
@@ -132,7 +152,7 @@ func runPackerStage(ctx context.Context, p *plan.Plan, stage *plan.Stage, parent
 				e.say("Stage finished (cached)")
 				return e, nil
 			}
-		} else {
+		} else if !filesOnly(stage, needed) {
 			key = ""
 		}
 
@@ -210,7 +230,7 @@ func runPackerStage(ctx context.Context, p *plan.Plan, stage *plan.Stage, parent
 				return err
 			}
 			// The files later stages COPY --from, while the machine runs.
-			return e.fetch(ctx, stage, e.fetchRoot)
+			return e.fetchFiles(ctx, stage)
 		},
 	}
 	artifact, err := b.Run(ctx)
@@ -391,6 +411,51 @@ func parentSettings(settings map[string]any, parent *packerTemplate, stage *plan
 	for k, v := range cfg.Settings {
 		settings[k] = v
 	}
+	return nil
+}
+
+// packerFetchFromTemplate fetches the files of a stage of a known builder
+// found in the cache as a template, without its files: the plugin builds a
+// machine from the template (a child stage without instructions), the files
+// are fetched, its artifact is deleted.
+func packerFetchFromTemplate(ctx context.Context, p *plan.Plan, stage *plan.Stage, pl *packer.Plugin, builder string, k *packer.Known, cfg *packer.Config, flags map[string]string, id string, e *executor, opts Options) error {
+	e.say("The files of COPY --from are not in the cache: fetching them from the cached template %s", id)
+	synth := fetchStage(stage)
+	inherited := map[string]string{}
+	for _, name := range k.Inherited {
+		if v, ok := flags[name]; ok {
+			inherited[name] = v
+		}
+	}
+	scfg, err := packer.ParseConfig(cfg.Component, inherited)
+	if err != nil {
+		return err
+	}
+	settings, err := stageSettings(p.File, synth, scfg, id, opts.ContextDir)
+	if err != nil {
+		return err
+	}
+	settings[k.TemplateName] = fmt.Sprintf("opendango-fetch-%s-%d", stage.Name(), time.Now().Unix())
+	fe := &executor{file: e.file, name: e.name, out: e.out, connect: stage.Connect, contextDir: e.contextDir, console: e.console,
+		filesKey: e.filesKey, files: e.files, fetchRoot: e.fetchRoot}
+	ui := &packer.Ui{Print: func(line string) { fe.say("%s", line) }, Secrets: cfg.Secrets}
+	b := &packer.Build{
+		Plugin:          pl,
+		Builder:         builder,
+		Dir:             opts.ContextDir,
+		Configs:         []map[string]any{settings, coreSettings(synth, scfg, opts)},
+		Ui:              ui,
+		DestroyArtifact: true,
+		Provision: func(ctx context.Context, comm *packer.Comm, _ packer.HookData) error {
+			fe.comm = comm
+			defer func() { fe.comm = nil }()
+			return fe.fetchFiles(ctx, stage)
+		},
+	}
+	if _, err := b.Run(ctx); err != nil {
+		return err
+	}
+	e.fetchRoot = fe.fetchRoot
 	return nil
 }
 
