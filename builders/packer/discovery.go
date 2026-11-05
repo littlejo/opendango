@@ -161,9 +161,10 @@ func compareVersions(a, b string) int {
 
 // Description is the output of `packer-plugin-<name> describe`.
 type Description struct {
-	Version    string   `json:"version"`
-	APIVersion string   `json:"api_version"`
-	Builders   []string `json:"builders"`
+	Version        string   `json:"version"`
+	APIVersion     string   `json:"api_version"`
+	Builders       []string `json:"builders"`
+	PostProcessors []string `json:"post_processors"`
 }
 
 // Describe runs the plugin's describe command.

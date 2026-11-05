@@ -9,6 +9,7 @@ import (
 	"github.com/hashicorp/packer-plugin-sdk/didyoumean"
 
 	"github.com/littlejo/opendango/builders/packer"
+	"github.com/littlejo/opendango/internal/instructions"
 	"github.com/littlejo/opendango/internal/plan"
 )
 
@@ -24,6 +25,25 @@ func CheckPlugins(ctx context.Context, p *plan.Plan, contextDir string, find Fin
 	specs := map[string]map[string]bool{}
 	var errs []error
 	for _, stage := range p.Stages {
+		// The plugins' post-processors check their settings (Configure).
+		for _, out := range stage.Outputs {
+			if out.Kind != instructions.OutputPlugin {
+				continue
+			}
+			cfg, err := packer.ParseConfig(out.Source, out.Settings)
+			if err == nil {
+				pl, name, ferr := FindPostProcessor(ctx, cfg.Component)
+				if ferr != nil {
+					warnings = append(warnings, fmt.Sprintf("stage %s: plugin://%s is not checked: %v", stage.Name(), cfg.Component, ferr))
+					continue
+				}
+				core := map[string]any{"packer_build_name": stage.Name(), "packer_builder_type": stage.Root().From.Builder}
+				err = packer.ConfigurePostProcessor(pl, name, contextDir, cfg.Settings, core)
+			}
+			if err != nil {
+				errs = append(errs, &plan.Error{File: p.File, Line: out.Line(), Err: fmt.Errorf("plugin://%s: %w", out.Source, err)})
+			}
+		}
 		if !stage.IsPacker() {
 			continue
 		}

@@ -66,6 +66,8 @@ RUN test "$(cat /proc/sys/kernel/random/boot_id)" != "$(cat /root/boot-before)"
 LABEL team=web stage=golden
 OUTPUT --format=xva --compress=zstd out/golden.xva
 OUTPUT --as=template %s
+OUTPUT --format=checksum out/SHA256SUMS
+OUTPUT --format=manifest out/manifest.json
 
 FROM %s --vm_name=%s plugin://xenorchestra AS scratch
 CONNECT ssh --user=%s --timeout=10m
@@ -98,6 +100,14 @@ RUN true
 	info, err := os.Stat(filepath.Join(ctxDir, "out", "golden.xva"))
 	if err != nil || info.Size() < 1<<20 {
 		t.Errorf("XVA: %v %v", info, err)
+	}
+	// The post-processors: the checksum of the XVA, the manifest with the
+	// template.
+	if sums, err := os.ReadFile(filepath.Join(ctxDir, "out", "SHA256SUMS")); err != nil || !strings.HasSuffix(string(sums), "  golden.xva\n") {
+		t.Errorf("SHA256SUMS: %q %v", sums, err)
+	}
+	if manifest, err := os.ReadFile(filepath.Join(ctxDir, "out", "manifest.json")); err != nil || !strings.Contains(string(manifest), `"builder_type": "xenorchestra"`) || !strings.Contains(string(manifest), `"name": "out/golden.xva"`) {
+		t.Errorf("manifest: %s %v", manifest, err)
 	}
 	if !strings.Contains(log.String(), "==> golden: REBOOT\n") {
 		t.Error("log lacks REBOOT")

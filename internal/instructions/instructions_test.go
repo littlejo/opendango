@@ -380,11 +380,23 @@ func TestParseOutput(t *testing.T) {
 		{"OUTPUT x", nil, "exactly one of"},
 		{"OUTPUT --as=template --format=xva x", nil, "exactly one of"},
 		{"OUTPUT --as=image", nil, "unknown --as"},
-		{"OUTPUT --as=template --compress=zstd", nil, "does not accept --compress"},
+		{"OUTPUT --as=template --compress=zstd", nil, "--compress is for --format=xva"},
 		{"OUTPUT --as=template a b", nil, "at most one name"},
 		{"OUTPUT --format=qcow2 x", nil, "unknown --format"},
 		{"OUTPUT --format=xva", nil, "exactly one destination"},
 		{"OUTPUT --format=xva --compress=xz x", nil, "unknown --compress"},
+		// The post-processors.
+		{"OUTPUT --format=manifest dist/manifest.json", &Output{Pos: Pos{1}, Kind: OutputManifest, Path: "dist/manifest.json"}, ""},
+		{"OUTPUT --format=checksum dist/SHA256SUMS", &Output{Pos: Pos{1}, Kind: OutputChecksum, Path: "dist/SHA256SUMS", Type: "sha256"}, ""},
+		{"OUTPUT --format=checksum --type=sha512 dist/SUMS", &Output{Pos: Pos{1}, Kind: OutputChecksum, Path: "dist/SUMS", Type: "sha512"}, ""},
+		{"OUTPUT --format=compress dist/${V}.tar.gz", &Output{Pos: Pos{1}, Kind: OutputArchive, Path: "dist/val.tar.gz"}, ""},
+		{"OUTPUT --output=dist/${V}.box --compression_level=6 plugin://vagrant", &Output{Pos: Pos{1}, Kind: OutputPlugin, Source: "vagrant", Settings: map[string]string{"output": "dist/val.box", "compression_level": "6"}}, ""},
+		{"OUTPUT --format=checksum --type=crc32 a", nil, "unknown --type"},
+		{"OUTPUT --format=manifest --type=md5 a", nil, "--type is for --format=checksum"},
+		{"OUTPUT --format=compress a.rar", nil, "the extension gives the format"},
+		{"OUTPUT --format=manifest", nil, "requires exactly one destination path"},
+		{"OUTPUT --keep plugin://vagrant", nil, "flag --keep requires a value"},
+		{"OUTPUT plugin://", nil, "missing post-processor"},
 	}
 	for _, tt := range tests {
 		got, err := ParseOutput(parse(t, tt.src), expander())

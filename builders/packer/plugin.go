@@ -58,6 +58,9 @@ type Artifact struct {
 	// Desc describes it, for the log.
 	Desc  string
 	Files []string
+	// BuilderID is the builder's id of the artifact type, which some
+	// post-processors read (vagrant picks its provider by it).
+	BuilderID string
 
 	art packersdk.Artifact
 	// p is the plugin, kept with KeepPlugin.
@@ -127,7 +130,7 @@ func (b *Build) Run(ctx context.Context) (_ *Artifact, err error) {
 	if art == nil {
 		return nil, nil
 	}
-	a := &Artifact{ID: art.Id(), Desc: art.String(), Files: art.Files(), art: art, plugin: b.Plugin.Name}
+	a := &Artifact{ID: art.Id(), Desc: art.String(), Files: art.Files(), BuilderID: art.BuilderId(), art: art, plugin: b.Plugin.Name}
 	if b.DestroyArtifact {
 		b.Ui.Say("Deleting the artifact: no OUTPUT --as=template")
 		if err := art.Destroy(); err != nil {

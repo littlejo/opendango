@@ -148,7 +148,7 @@ func TestErrors(t *testing.T) {
 		{"FROM plugin://xenserver_ISO", "Dangofile:1: plugin: invalid source"},
 		{"FROM --ssh_username=root plugin://xenserver-iso", "Dangofile:1: plugin: --ssh_username is set by CONNECT ssh --user=<user>"},
 		{"FROM --network_names=[x plugin://xenserver-iso", "Dangofile:1: plugin: --network_names: invalid JSON"},
-		{"FROM plugin://xenserver-iso\nOUTPUT --as=template", "Dangofile:2: OUTPUT has no meaning in a plugin://xenserver-iso stage"},
+		{"FROM plugin://xenserver-iso\nOUTPUT --as=template", "Dangofile:2: OUTPUT --as=template has no meaning in a plugin://xenserver-iso stage"},
 		{"FROM plugin://xenserver-iso AS p\nFROM p", "Dangofile:2: FROM p: opendango does not know how plugin://xenserver-iso starts from the artifact of a stage: set dango.parent in the xenserver-iso section of dango.yaml"},
 		{"FROM plugin://xenorchestra AS p\nFROM --template=t p", "Dangofile:2: FROM p: plugin: --template cannot be set when starting from another stage"},
 		{"FROM plugin://xenorchestra AS p\nFROM --iso=x p", "Dangofile:2: FROM p: plugin: --iso cannot be set when starting from another stage"},
@@ -383,6 +383,37 @@ OUTPUT --as=template app
 		if _, err := build(t, tt.src, nil); err == nil || !strings.Contains(err.Error(), tt.err) {
 			t.Errorf("%q: err = %v, want %q", tt.src, err, tt.err)
 		}
+	}
+}
+
+// TestPostProcessors checks the OUTPUT post-processors: allowed in any
+// stage (a plugin that is not in the table too), one path per output, and
+// a plugin's post-processor gets its dango.yaml section under its flags.
+func TestPostProcessors(t *testing.T) {
+	p, err := build(t, "FROM plugin://qemu AS q\nOUTPUT --format=manifest m.json\nOUTPUT --format=checksum SUMS\nOUTPUT --format=compress a.zip\nOUTPUT --output=b.box plugin://vagrant\n", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := len(p.Stages[0].Outputs); n != 4 || len(p.Warnings) != 0 {
+		t.Errorf("outputs %d, warnings %q", n, p.Warnings)
+	}
+	if _, err := build(t, "FROM xo://t\nOUTPUT --format=checksum a.zip\nOUTPUT --format=compress a.zip\n", nil); err == nil || !strings.Contains(err.Error(), "OUTPUT a.zip already written at line 2") {
+		t.Errorf("same path: %v", err)
+	}
+
+	settings, err := LoadSettings(writeSettings(t, "vagrant:\n  compression_level: 9\n  output: dist/x.box\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := parser.Parse(strings.NewReader("FROM xo://t\nOUTPUT --output=dist/${NAME}.box plugin://vagrant\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p, err = BuildSettings("Dangofile", res, map[string]string{}, settings); err != nil {
+		t.Fatal(err)
+	}
+	if got := p.Stages[0].Outputs[0].Settings; !reflect.DeepEqual(got, map[string]string{"compression_level": "9", "output": "dist/.box"}) {
+		t.Errorf("settings %v", got)
 	}
 }
 
