@@ -169,7 +169,8 @@ func TestPackerKnownBuilder(t *testing.T) {
 	}{
 		{"template", "LABEL team=web stage=golden\nOUTPUT --as=template golden\n", "artifact: template_name=golden tags=team=web,stage=golden xva= compress=", false},
 		{"unnamed template", "OUTPUT --as=template\n", "", false},
-		{"xva only", "OUTPUT --format=xva --compress=zstd out/golden.xva\n", "artifact: template_name= tags= xva=CTX/out/golden.xva compress=zstd", true},
+		// The post-processor exports the artifact, then it is deleted.
+		{"xva only", "OUTPUT --format=xva --compress=zstd out/golden.xva\nOUTPUT --format=xva other.xva\n", "", true},
 		{"no output", "", "", true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
@@ -190,6 +191,13 @@ func TestPackerKnownBuilder(t *testing.T) {
 			}
 			if tt.destroyed && !strings.Contains(log.String(), "Deleting the artifact: no OUTPUT --as=template") {
 				t.Errorf("log:\n%s", log.String())
+			}
+			if tt.name == "xva only" {
+				for p, want := range map[string]string{"out/golden.xva": "xva of " + root + " compress=zstd", "other.xva": "xva of " + root + " compress="} {
+					if got := readFile(t, filepath.Join(ctxDir, p)); got != want {
+						t.Errorf("%s = %q, want %q", p, got, want)
+					}
+				}
 			}
 		})
 	}
@@ -313,12 +321,14 @@ func TestPackerCache(t *testing.T) {
 	t.Setenv("OPENDANGO_TEST_STORE", store)
 	base, app := t.TempDir(), t.TempDir()
 	src := func(run string) string {
-		return fmt.Sprintf("FROM --root=%s plugin://xenorchestra AS base\nCONNECT ssh --user=tester\nENV FROM_BASE=yes\nRUN true\n\nFROM --root=%s base AS app\nRUN %s\nOUTPUT --as=template app\n", base, app, run)
+		return fmt.Sprintf("FROM --root=%s plugin://xenorchestra AS base\nCONNECT ssh --user=tester\nENV FROM_BASE=yes\nRUN true\n\nFROM --root=%s base AS app\nRUN %s\nOUTPUT --format=xva app.xva\nOUTPUT --as=template app\n", base, app, run)
 	}
+	ctxDir := t.TempDir()
 	build := func(src string) string {
 		t.Helper()
+		os.Remove(filepath.Join(ctxDir, "app.xva"))
 		var log syncBuffer
-		if err := Run(context.Background(), mustPlan(t, src), Options{ContextDir: t.TempDir(), Out: &log, FindPlugin: testPlugin(t)}); err != nil {
+		if err := Run(context.Background(), mustPlan(t, src), Options{ContextDir: ctxDir, Out: &log, FindPlugin: testPlugin(t)}); err != nil {
 			t.Fatalf("%v\n%s", err, log.String())
 		}
 		return log.String()
@@ -344,6 +354,10 @@ func TestPackerCache(t *testing.T) {
 	log = build(src(`test "$FROM_BASE" = yes`))
 	if !strings.Contains(log, "==> base: Using the cached template "+base) || !strings.Contains(log, "==> app: Using the cached template "+app) || strings.Contains(log, "Running the instructions") {
 		t.Errorf("second build:\n%s", log)
+	}
+	// The XVA is exported from the cached template.
+	if got := readFile(t, filepath.Join(ctxDir, "app.xva")); got != "xva of "+app+" compress=" {
+		t.Errorf("app.xva = %q", got)
 	}
 
 	// The child changes: it starts from the cached parent, whose ENV it

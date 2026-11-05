@@ -167,10 +167,8 @@ func TestErrors(t *testing.T) {
 		// plugin://xenorchestra is in the table: OUTPUT and LABEL map to
 		// its settings, which are not FROM flags.
 		{"FROM plugin://xenorchestra\nLABEL a=b", "Dangofile:2: LABEL needs OUTPUT --as=template"},
-		{"FROM plugin://xenorchestra\nOUTPUT --format=xva a.xva\nOUTPUT --format=xva b.xva", "Dangofile:3: plugin://xenorchestra exports one XVA at most (already at line 2)"},
 		{"FROM --template_name=x plugin://xenorchestra", "Dangofile:1: plugin: --template_name is set by OUTPUT --as=template <name>"},
 		{"FROM --tags=[] plugin://xenorchestra", "Dangofile:1: plugin: --tags is set by LABEL"},
-		{"FROM --xva_output=a plugin://xenorchestra", "Dangofile:1: plugin: --xva_output is set by OUTPUT --format=xva <path>"},
 		{"FROM xo://t\nADD a b", "Dangofile:2: ADD needs a connection"},
 		{"FROM xo://t\nFOO", "Dangofile:2: unknown instruction FOO"},
 		{"FROM xo://t\nUSER a:b", "Dangofile:2: USER: groups are not supported"},

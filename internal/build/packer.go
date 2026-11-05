@@ -2,6 +2,7 @@ package build
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -132,12 +133,7 @@ func runPackerStage(ctx context.Context, p *plan.Plan, stage *plan.Stage, parent
 		}
 
 		// The cache: a template tagged with the key, found by the plugin's
-		// data source. The plugin cannot export an XVA from an existing
-		// template: a stage with OUTPUT --format=xva is built.
-		if key != "" && k.Cache != nil && hasXVA(stage) {
-			e.say("Not cached: the plugin cannot export an XVA from a cached template")
-			key = ""
-		}
+		// data source.
 		if key != "" && k.Cache != nil {
 			found, err := packerCache(pl, k.Cache, flags, source, key, opts.ContextDir)
 			if err != nil {
@@ -150,6 +146,10 @@ func runPackerStage(ctx context.Context, p *plan.Plan, stage *plan.Stage, parent
 				// The child stages inherit the final USER, SHELL, WORKDIR and
 				// ENV.
 				e.replay(stage.Steps)
+				// The XVA OUTPUTs, exported from the cached template.
+				if err := packerXVA(ctx, p, stage, pl, k, flags, found.ID, cfg.Secrets, e, opts); err != nil {
+					return nil, err
+				}
 				e.say("Stage finished (cached)")
 				return e, nil
 			}
@@ -216,13 +216,15 @@ func runPackerStage(ctx context.Context, p *plan.Plan, stage *plan.Stage, parent
 		Secrets:  cfg.Secrets,
 	}
 	b := &packer.Build{
-		Plugin:          pl,
-		Builder:         builder,
-		Dir:             opts.ContextDir,
-		Configs:         []map[string]any{settings, core},
-		Ui:              ui,
-		DestroyArtifact: destroy,
-		KeepPlugin:      intermediate,
+		Plugin:  pl,
+		Builder: builder,
+		Dir:     opts.ContextDir,
+		Configs: []map[string]any{settings, core},
+		Ui:      ui,
+		// The XVA OUTPUTs are exported from the artifact before it is
+		// deleted: through the plugin, kept until then.
+		DestroyArtifact: destroy && !hasXVA(stage),
+		KeepPlugin:      intermediate || (destroy && hasXVA(stage)),
 		Provision: func(ctx context.Context, comm *packer.Comm, data packer.HookData) error {
 			e.say("Running the instructions")
 			e.comm = comm
@@ -259,6 +261,19 @@ func runPackerStage(ctx context.Context, p *plan.Plan, stage *plan.Stage, parent
 	}
 	e.artifact = &packerTemplate{artifact}
 	e.say("Artifact: %s", artifact.Desc)
+	if hasXVA(stage) {
+		k := packer.Lookup(cfg.Component)
+		err := packerXVA(ctx, p, stage, pl, k, flags, artifact.ID, cfg.Secrets, e, opts)
+		if destroy {
+			e.say("Deleting the artifact: no OUTPUT --as=template")
+			if derr := artifact.Destroy(); derr != nil {
+				err = errors.Join(err, derr)
+			}
+		}
+		if err != nil {
+			return nil, err
+		}
+	}
 	e.say("Stage finished")
 	return e, nil
 }
@@ -272,6 +287,35 @@ func (t *packerTemplate) Destroy(ctx context.Context) error { return t.a.Destroy
 
 // close stops the plugin kept for Destroy.
 func (t *packerTemplate) close() { t.a.Close() }
+
+// packerXVA runs the XVA OUTPUTs of a stage of a known builder: the
+// plugin's post-processor exports the template id, once per OUTPUT.
+func packerXVA(ctx context.Context, p *plan.Plan, stage *plan.Stage, pl *packer.Plugin, k *packer.Known, flags map[string]string, id string, secrets []string, e *executor, opts Options) error {
+	for _, out := range stage.Outputs {
+		if out.Kind != instructions.OutputXVA {
+			continue
+		}
+		path := out.Path
+		if !filepath.IsAbs(path) {
+			path = filepath.Join(opts.ContextDir, path)
+		}
+		e.say("Exporting XVA to %s", path)
+		cfg := map[string]any{k.XVA.Output: path}
+		if out.Compress != "" {
+			cfg[k.XVA.Compress] = out.Compress
+		}
+		for _, name := range k.XVA.Copy {
+			if v, ok := flags[name]; ok {
+				cfg[name] = v
+			}
+		}
+		ui := &packer.Ui{Print: func(line string) { e.say("%s", line) }, Secrets: secrets}
+		if _, err := packer.PostProcess(ctx, pl, k.XVA.PostProcessor, opts.ContextDir, ui, id, cfg); err != nil {
+			return &plan.Error{File: p.File, Line: out.Line(), Err: err}
+		}
+	}
+	return nil
+}
 
 // hasXVA tells whether the stage has an OUTPUT --format=xva.
 func hasXVA(stage *plan.Stage) bool {
@@ -316,14 +360,7 @@ func knownSettings(settings map[string]any, k *packer.Known, stage *plan.Stage, 
 				settings[k.TemplateName] = out.Name
 			}
 		case instructions.OutputXVA:
-			path := out.Path
-			if !filepath.IsAbs(path) {
-				path = filepath.Join(contextDir, path)
-			}
-			settings[k.XVAOutput] = path
-			if out.Compress != "" {
-				settings[k.XVACompress] = out.Compress
-			}
+			// The plugin's post-processor, once built (packerXVA).
 		default:
 			return fmt.Errorf("plugin: unsupported output %q", out.Kind)
 		}

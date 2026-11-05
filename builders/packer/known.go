@@ -16,10 +16,10 @@ type Known struct {
 	TemplateName string
 	// Tags is the list setting that the labels go to, as key=value.
 	Tags string
-	// XVAOutput and XVACompress are the settings of OUTPUT --format=xva
-	// [--compress] <path>, empty when the builder cannot export an XVA.
-	// The builder exports one XVA at most.
-	XVAOutput, XVACompress string
+	// XVA is the post-processor of the plugin that runs OUTPUT --format=xva
+	// on the artifact (or on a template found in the cache), nil when the
+	// builder cannot export an XVA.
+	XVA *XVAExport
 
 	// HTTPIP is the setting that SERVE --addr sets: the address the
 	// machine reaches the plugin's HTTP server at. Empty when the builder
@@ -50,6 +50,18 @@ type Known struct {
 	Cache *CacheLookup
 }
 
+// XVAExport is a post-processor of the plugin that exports the artifact
+// (a template) as an XVA, once per OUTPUT --format=xva.
+type XVAExport struct {
+	// PostProcessor is its name in the plugin.
+	PostProcessor string
+	// Output and Compress are the settings of the path and of the
+	// compression.
+	Output, Compress string
+	// Copy are the stage's FROM flags passed as they are.
+	Copy []string
+}
+
 // CacheLookup is a data source of the plugin that finds the template
 // tagged with a cache key.
 type CacheLookup struct {
@@ -77,13 +89,17 @@ var known = map[string]*Known{
 	"xenorchestra": {
 		TemplateName: "template_name",
 		Tags:         "tags",
-		XVAOutput:    "xva_output",
-		XVACompress:  "xva_compress",
-		HTTPIP:       "http_ip",
-		BootWait:     "boot_wait",
-		Source:       "template",
-		RootOnly:     []string{"template", "pool", "iso"},
-		Inherited:    []string{"endpoint", "token", "insecure"},
+		XVA: &XVAExport{
+			PostProcessor: "xva",
+			Output:        "output",
+			Compress:      "compress",
+			Copy:          []string{"endpoint", "token", "insecure"},
+		},
+		HTTPIP:    "http_ip",
+		BootWait:  "boot_wait",
+		Source:    "template",
+		RootOnly:  []string{"template", "pool", "iso"},
+		Inherited: []string{"endpoint", "token", "insecure"},
 
 		DropInheritedTags: "drop_inherited_tags",
 		Cache: &CacheLookup{
@@ -121,12 +137,6 @@ func (k *Known) settings() map[string]string {
 	}
 	if k.Tags != "" {
 		m[k.Tags] = "LABEL"
-	}
-	if k.XVAOutput != "" {
-		m[k.XVAOutput] = "OUTPUT --format=xva <path>"
-	}
-	if k.XVACompress != "" {
-		m[k.XVACompress] = "OUTPUT --format=xva --compress=<algorithm>"
 	}
 	if k.HTTPIP != "" {
 		m[k.HTTPIP] = "SERVE --addr=<ip>"

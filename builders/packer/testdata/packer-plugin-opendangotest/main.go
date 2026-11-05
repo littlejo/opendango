@@ -289,10 +289,42 @@ func storeTags(tags []string, id string) error {
 	return nil
 }
 
+// The "xva" post-processor writes "xva of <artifact id> compress=<c>" to
+// its output, like the one of packer-plugin-xenorchestra exports the
+// template.
+type ppConfig struct {
+	Output   string `mapstructure:"output"`
+	Compress string `mapstructure:"compress"`
+	Endpoint string `mapstructure:"endpoint"`
+	Token    string `mapstructure:"token"`
+	Insecure string `mapstructure:"insecure"`
+}
+
+type postProcessor struct{ config ppConfig }
+
+func (p *postProcessor) ConfigSpec() hcldec.ObjectSpec { return hcldec.ObjectSpec{} }
+
+func (p *postProcessor) Configure(raws ...any) error {
+	return config.Decode(&p.config, &config.DecodeOpts{}, raws...)
+}
+
+func (p *postProcessor) PostProcess(ctx context.Context, ui packersdk.Ui, a packersdk.Artifact) (packersdk.Artifact, bool, bool, error) {
+	if err := os.MkdirAll(filepath.Dir(p.config.Output), 0o755); err != nil {
+		return nil, true, false, err
+	}
+	content := fmt.Sprintf("xva of %s compress=%s", a.Id(), p.config.Compress)
+	if err := os.WriteFile(p.config.Output, []byte(content), 0o644); err != nil {
+		return nil, true, false, err
+	}
+	ui.Say("exported " + p.config.Output)
+	return &artifact{root: p.config.Output}, true, false, nil
+}
+
 func main() {
 	set := plugin.NewSet()
 	set.RegisterBuilder("local", new(Builder))
 	set.RegisterDatasource("template", new(datasource))
+	set.RegisterPostProcessor("xva", new(postProcessor))
 	if err := set.Run(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
