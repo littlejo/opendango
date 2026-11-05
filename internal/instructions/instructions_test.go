@@ -406,6 +406,27 @@ func TestParseOutput(t *testing.T) {
 	}
 }
 
+func TestParseProvision(t *testing.T) {
+	tests := []struct {
+		src  string
+		want *Provision
+		err  string
+	}{
+		{`PROVISION --playbook_file=${V}.yml --extra_arguments='["--tags", "web"]' plugin://ansible`, &Provision{Pos: Pos{1}, Source: "ansible", Settings: map[string]string{"playbook_file": "val.yml", "extra_arguments": `["--tags", "web"]`}}, ""},
+		{"PROVISION plugin://ansible-local", &Provision{Pos: Pos{1}, Source: "ansible-local", Settings: map[string]string{}}, ""},
+		{"PROVISION ansible", nil, "requires one plugin://<provisioner>"},
+		{"PROVISION plugin://", nil, "requires one plugin://<provisioner>"},
+		{"PROVISION plugin://a plugin://b", nil, "requires one plugin://<provisioner>"},
+		{"PROVISION --become plugin://ansible", nil, "flag --become requires a value"},
+	}
+	for _, tt := range tests {
+		got, err := ParseProvision(parse(t, tt.src), expander())
+		if checkErr(t, tt.src, err, tt.err) && !reflect.DeepEqual(got, tt.want) {
+			t.Errorf("%q: got %+v, want %+v", tt.src, got, tt.want)
+		}
+	}
+}
+
 func TestShellQuote(t *testing.T) {
 	if got := ShellQuote("it's"); got != `'it'\''s'` {
 		t.Errorf("got %s", got)

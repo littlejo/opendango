@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 
 	"github.com/littlejo/opendango/internal/instructions"
 	"github.com/littlejo/opendango/internal/plan"
@@ -104,6 +105,10 @@ func stageKey(file string, s *plan.Stage, keys map[*plan.Stage]string, contextDi
 			fmt.Fprintf(h, "WORKDIR %q\n", st.Path)
 		case *instructions.Run:
 			fmt.Fprintf(h, "RUN %q\n", st.Script)
+		case *instructions.Provision:
+			if err := hashProvision(h, contextDir, st); err != nil {
+				return "", &plan.Error{File: file, Line: st.Line(), Err: fmt.Errorf("PROVISION: %w", err)}
+			}
 		case *instructions.Copy:
 			if st.From != "" {
 				fmt.Fprintf(h, "COPY --from=%q %q %q %q %q\n", byName[st.From], st.Sources, st.Dest, st.Chmod, st.Chown)
@@ -158,6 +163,40 @@ func hashSources(h hash.Hash, contextDir string, patterns []string) error {
 			if err := hashTree(h, contextDir, m); err != nil {
 				return err
 			}
+		}
+	}
+	return nil
+}
+
+// hashProvision writes a PROVISION with its settings, and the content of
+// the files and directories of the Dangofile directory that the settings
+// name (a playbook, roles…): a provisioner reads them, they make the image.
+func hashProvision(h hash.Hash, contextDir string, p *instructions.Provision) error {
+	fmt.Fprintf(h, "PROVISION %q\n", p.Source)
+	names := make([]string, 0, len(p.Settings))
+	for name := range p.Settings {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		v := p.Settings[name]
+		fmt.Fprintf(h, "  --%s=%q\n", name, v)
+		if v == "" || strings.HasPrefix(v, "[") || strings.HasPrefix(v, "{") {
+			continue
+		}
+		local := v
+		if !filepath.IsAbs(local) {
+			local = filepath.Join(contextDir, local)
+		}
+		rel, err := filepath.Rel(contextDir, local)
+		if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			continue
+		}
+		if _, err := os.Lstat(local); err != nil {
+			continue
+		}
+		if err := hashTree(h, contextDir, local); err != nil {
+			return err
 		}
 	}
 	return nil

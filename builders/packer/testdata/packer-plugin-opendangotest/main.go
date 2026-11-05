@@ -6,6 +6,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -142,7 +143,7 @@ func (b *Builder) Run(ctx context.Context, ui packersdk.Ui, hook packersdk.Hook)
 	}
 	// The generated data of a real builder; PackerHTTPAddr only with an
 	// HTTP server, like the SDK's.
-	data := map[string]any{"Host": "127.0.0.1", "Port": c.SSHPort, "User": c.SSHUsername, "SSHPrivateKey": "PRIVATE KEY", "PackerHTTPAddr": "ERR_HTTP_ADDR_NOT_IMPLEMENTED_BY_BUILDER"}
+	data := map[string]any{"ConnType": "ssh", "Host": "127.0.0.1", "Port": c.SSHPort, "User": c.SSHUsername, "SSHPrivateKey": "PRIVATE KEY", "PackerHTTPAddr": "ERR_HTTP_ADDR_NOT_IMPLEMENTED_BY_BUILDER"}
 	if c.HTTPDir != "" {
 		ip := "192.0.2.9"
 		if c.HTTPIP != "" {
@@ -388,12 +389,69 @@ func (p *inspector) PostProcess(ctx context.Context, ui packersdk.Ui, a packersd
 	return &artifact{root: filepath.Dir(p.config.Output)}, true, false, nil
 }
 
+// The "shell" provisioner runs command through the communicator, uploads
+// a file, downloads it back (alone and with its directory), and writes to
+// report (on this machine) what it got: the generated data and the output.
+type shellProvisioner struct {
+	config struct {
+		Command  string   `mapstructure:"command"`
+		Report   string   `mapstructure:"report"`
+		UploadTo string   `mapstructure:"upload_to"`
+		Args     []string `mapstructure:"args"`
+		Fail     bool     `mapstructure:"fail"`
+	}
+}
+
+func (p *shellProvisioner) ConfigSpec() hcldec.ObjectSpec { return hcldec.ObjectSpec{} }
+
+func (p *shellProvisioner) Prepare(raws ...any) error {
+	if err := config.Decode(&p.config, &config.DecodeOpts{}, raws...); err != nil {
+		return err
+	}
+	if p.config.Report == "" {
+		return errors.New("report is required")
+	}
+	return nil
+}
+
+func (p *shellProvisioner) Provision(ctx context.Context, ui packersdk.Ui, comm packersdk.Communicator, data map[string]any) error {
+	if p.config.Fail {
+		return errors.New("failing as asked")
+	}
+	var out bytes.Buffer
+	cmd := &packersdk.RemoteCmd{Command: p.config.Command, Stdout: &out, Stderr: &out}
+	if err := cmd.RunWithUi(ctx, comm, ui); err != nil {
+		return err
+	}
+	if cmd.ExitStatus() != 0 {
+		return fmt.Errorf("%s: exit %d", p.config.Command, cmd.ExitStatus())
+	}
+	report := fmt.Sprintf("output=%s\nconn=%v user=%v port=%v host=%v key=%v\nargs=%s\n", strings.TrimSpace(out.String()), data["ConnType"], data["User"], data["Port"], data["Host"] != "", strings.Contains(fmt.Sprint(data["SSHPrivateKey"]), "PRIVATE KEY"), strings.Join(p.config.Args, "|"))
+	if p.config.UploadTo != "" {
+		if err := comm.Upload(p.config.UploadTo+"/sub/up.txt", strings.NewReader("uploaded"), nil); err != nil {
+			return err
+		}
+		var back bytes.Buffer
+		if err := comm.Download(p.config.UploadTo+"/sub/up.txt", &back); err != nil {
+			return err
+		}
+		dir := p.config.Report + ".dir"
+		if err := comm.DownloadDir(p.config.UploadTo+"/sub", dir, nil); err != nil {
+			return err
+		}
+		inDir, _ := os.ReadFile(filepath.Join(dir, "up.txt"))
+		report += "download=" + back.String() + " dir=" + string(inDir) + "\n"
+	}
+	return os.WriteFile(p.config.Report, []byte(report), 0o644)
+}
+
 func main() {
 	set := plugin.NewSet()
 	set.RegisterBuilder("local", new(Builder))
 	set.RegisterDatasource("template", new(datasource))
 	set.RegisterPostProcessor("xva", new(postProcessor))
 	set.RegisterPostProcessor("inspect", new(inspector))
+	set.RegisterProvisioner("shell", new(shellProvisioner))
 	if err := set.Run(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)

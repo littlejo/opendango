@@ -510,7 +510,7 @@ func BuildSettings(file string, res *parser.Result, buildArgs map[string]string,
 			}
 			stage.Steps = append(stage.Steps, sh)
 
-		case "WORKDIR", "RUN", "COPY", "ADD", "REBOOT", "BREAKPOINT":
+		case "WORKDIR", "RUN", "COPY", "ADD", "REBOOT", "BREAKPOINT", "PROVISION":
 			if stage.Connect == nil {
 				return fail(line, needsConnect(cmd.Keyword, stage))
 			}
@@ -535,6 +535,12 @@ func BuildSettings(file string, res *parser.Result, buildArgs map[string]string,
 				step, err = instructions.ParseReboot(cmd)
 			case "BREAKPOINT":
 				step, err = instructions.ParseBreakpoint(cmd, expand)
+			case "PROVISION":
+				var pr *instructions.Provision
+				if pr, err = instructions.ParseProvision(cmd, expand); err == nil {
+					pr.Settings, err = withSection(settings, usedSections, pr.Source, pr.Settings, res.EscapeToken, expand)
+				}
+				step = pr
 			}
 			if err != nil {
 				return fail(line, err)
@@ -607,17 +613,9 @@ func BuildSettings(file string, res *parser.Result, buildArgs map[string]string,
 			}
 			// A plugin's post-processor: its dango.yaml section under its
 			// flags.
-			if out.Kind == instructions.OutputPlugin && settings != nil {
-				if section, ok := settings.Sections[out.Source]; ok {
-					usedSections[out.Source] = true
-					flags, err := sectionFlags(settings, out.Source, section, nil, res.EscapeToken, expand)
-					if err != nil {
-						return nil, err
-					}
-					for name, v := range out.Settings {
-						flags[name] = v
-					}
-					out.Settings = flags
+			if out.Kind == instructions.OutputPlugin {
+				if out.Settings, err = withSection(settings, usedSections, out.Source, out.Settings, res.EscapeToken, expand); err != nil {
+					return nil, err
 				}
 			}
 			stage.Outputs = append(stage.Outputs, out)
@@ -771,6 +769,27 @@ func copyFrom(stage *Stage, c *instructions.Copy, byName map[string]*Stage) erro
 	}
 	slices.Sort(src.Fetch)
 	return nil
+}
+
+// withSection returns the settings of a plugin component (a provisioner, a
+// post-processor) over its dango.yaml section.
+func withSection(settings *Settings, used map[string]bool, source string, flags map[string]string, escape rune, expand func(string) (string, error)) (map[string]string, error) {
+	if settings == nil {
+		return flags, nil
+	}
+	section, ok := settings.Sections[source]
+	if !ok {
+		return flags, nil
+	}
+	used[source] = true
+	merged, err := sectionFlags(settings, source, section, nil, escape, expand)
+	if err != nil {
+		return nil, err
+	}
+	for name, v := range flags {
+		merged[name] = v
+	}
+	return merged, nil
 }
 
 // outputFlag names an output for the messages: as=template or format=xva.
