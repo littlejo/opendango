@@ -45,6 +45,12 @@ type Stage struct {
 	Parent *Stage
 	// Children are the stages that start from this one.
 	Children []*Stage
+	// CopyFrom are the stages that COPY --from reads (they must be built
+	// before), in the order of the Dangofile.
+	CopyFrom []*Stage
+	// Fetch are the paths that later stages COPY --from this one, sorted:
+	// fetched at the end of its build.
+	Fetch []string
 	// Connect is the stage's CONNECT, or the one inherited from its parent;
 	// nil when no instruction needs a connection.
 	Connect *instructions.Connect
@@ -268,9 +274,24 @@ func (p *Plan) Select(target string) ([]*Stage, error) {
 			}
 			continue
 		}
+		// The stage, its ancestors and the stages they COPY --from (and
+		// theirs), in file order.
+		need := map[*Stage]bool{}
+		var add func(*Stage)
+		add = func(a *Stage) {
+			for ; a != nil && !need[a]; a = a.Parent {
+				need[a] = true
+				for _, src := range a.CopyFrom {
+					add(src)
+				}
+			}
+		}
+		add(s)
 		var chain []*Stage
-		for a := s; a != nil; a = a.Parent {
-			chain = append([]*Stage{a}, chain...)
+		for _, st := range p.Stages {
+			if need[st] {
+				chain = append(chain, st)
+			}
 		}
 		return chain, nil
 	}
@@ -503,7 +524,11 @@ func BuildSettings(file string, res *parser.Result, buildArgs map[string]string,
 			case "RUN":
 				step, err = instructions.ParseRun(cmd)
 			case "COPY":
-				step, err = instructions.ParseCopy(cmd, expand)
+				var c *instructions.Copy
+				if c, err = instructions.ParseCopy(cmd, expand); err == nil && c.From != "" {
+					err = copyFrom(stage, c, byName)
+				}
+				step = c
 			case "ADD":
 				step, err = instructions.ParseAdd(cmd, expand)
 			case "REBOOT":
@@ -595,7 +620,7 @@ func BuildSettings(file string, res *parser.Result, buildArgs map[string]string,
 	}
 	for _, s := range p.Stages {
 		switch {
-		case len(s.Outputs) > 0 || len(s.Children) > 0:
+		case len(s.Outputs) > 0 || len(s.Children) > 0 || len(s.Fetch) > 0:
 		case !s.IsPacker():
 			p.Warnings = append(p.Warnings, fmt.Sprintf("stage %s has no OUTPUT and no stage starts from it: its VM will be destroyed at the end of the build", s.Name()))
 		case s.known() != nil:
@@ -704,6 +729,28 @@ func unsetServeAddr() error {
 
 func reserved(name string) error {
 	return fmt.Errorf("%s is reserved: SERVE sets it", name)
+}
+
+// copyFrom records a COPY --from: the stage it reads must come earlier,
+// and fetches the paths at the end of its build.
+func copyFrom(stage *Stage, c *instructions.Copy, byName map[string]*Stage) error {
+	src, ok := byName[c.From]
+	if !ok {
+		return fmt.Errorf("COPY --from=%s: no earlier stage named %q (images are not supported)", c.From, c.From)
+	}
+	if src == stage {
+		return fmt.Errorf("COPY --from=%s: a stage cannot copy from itself", c.From)
+	}
+	if !slices.Contains(stage.CopyFrom, src) {
+		stage.CopyFrom = append(stage.CopyFrom, src)
+	}
+	for _, p := range c.Sources {
+		if !slices.Contains(src.Fetch, p) {
+			src.Fetch = append(src.Fetch, p)
+		}
+	}
+	slices.Sort(src.Fetch)
+	return nil
 }
 
 func needsConnect(what string, stage *Stage) error {

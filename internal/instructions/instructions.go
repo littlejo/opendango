@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"path"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -126,6 +127,10 @@ type Copy struct {
 	Dest    string
 	Chmod   string
 	Chown   string
+	// From is the stage the sources come from (COPY --from=<stage>), "" for
+	// the Dangofile directory. Its sources are absolute paths in that
+	// stage's machine.
+	From string
 }
 
 // Add is COPY plus http(s) URL sources, downloaded by opendango.
@@ -470,8 +475,29 @@ func ParseShell(cmd *parser.Command) (*Shell, error) {
 
 // ParseCopy parses `COPY [--chmod=MODE] [--chown=USER[:GROUP]] <src>... <dest>`.
 func ParseCopy(cmd *parser.Command, expand Expander) (*Copy, error) {
-	c, _, err := parseCopy(cmd, expand, map[string]bool{"chmod": true, "chown": true})
-	return c, err
+	c, flags, err := parseCopy(cmd, expand, map[string]bool{"chmod": true, "chown": true, "from": true})
+	if err != nil {
+		return nil, err
+	}
+	from, ok := flags["from"]
+	if !ok {
+		return c, nil
+	}
+	if from == "" {
+		return nil, fmt.Errorf("COPY: --from needs the name of a stage")
+	}
+	c.From = from
+	// Paths in the source stage's machine, from its root, like Docker.
+	for i, src := range c.Sources {
+		if strings.ContainsAny(src, "*?[") {
+			return nil, fmt.Errorf("COPY --from: %s: patterns are not supported, give the paths", src)
+		}
+		c.Sources[i] = path.Clean("/" + src)
+		if c.Sources[i] == "/" {
+			return nil, fmt.Errorf("COPY --from: the whole machine (/) cannot be copied")
+		}
+	}
+	return c, nil
 }
 
 // checksumLen is the length in hex of the digests ADD --checksum accepts.

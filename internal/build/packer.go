@@ -41,7 +41,7 @@ func FindPlugin(ctx context.Context, source string) (*packer.Plugin, string, err
 // starts from one: the plugin creates the machine and connects to it, then
 // calls back to run the instructions through its communicator, then
 // produces its artifact. parent and needed are those of runStage.
-func runPackerStage(ctx context.Context, p *plan.Plan, stage *plan.Stage, parent *executor, needed bool, key string, con *console, opts Options) (*executor, error) {
+func runPackerStage(ctx context.Context, p *plan.Plan, stage *plan.Stage, parent *executor, needed bool, key string, from map[string]string, con *console, opts Options) (*executor, error) {
 	flags, err := stage.PackerFlags()
 	if err != nil {
 		return nil, err
@@ -57,6 +57,8 @@ func runPackerStage(ctx context.Context, p *plan.Plan, stage *plan.Stage, parent
 		connect:    stage.Connect,
 		contextDir: opts.ContextDir,
 		console:    con,
+		fetchRoot:  filepath.Join(opts.filesDir, fmt.Sprint(stage.Index)),
+		fetched:    from,
 	}
 	if parent != nil {
 		// Like a native stage: USER, SHELL, WORKDIR and ENV carry over.
@@ -204,7 +206,11 @@ func runPackerStage(ctx context.Context, p *plan.Plan, stage *plan.Stage, parent
 				}
 				e.serveAddr = data.HTTPAddr
 			}
-			return e.steps(ctx, p, stage, opts)
+			if err := e.steps(ctx, p, stage, opts); err != nil {
+				return err
+			}
+			// The files later stages COPY --from, while the machine runs.
+			return e.fetch(ctx, stage, e.fetchRoot)
 		},
 	}
 	artifact, err := b.Run(ctx)

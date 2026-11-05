@@ -341,6 +341,51 @@ func TestPackerStageFlags(t *testing.T) {
 	}
 }
 
+// TestCopyFrom checks COPY --from: an earlier stage, the paths it fetches,
+// the stages that wait for it, --target and the warnings.
+func TestCopyFrom(t *testing.T) {
+	src := `FROM xo://t AS build
+CONNECT ssh --user=u
+RUN true
+
+FROM xo://t AS other
+CONNECT ssh --user=u
+RUN true
+
+FROM xo://t AS app
+CONNECT ssh --user=u
+COPY --from=build /opt/app /usr/local/bin/
+COPY --from=build /etc/app.conf /opt/app /etc/
+OUTPUT --as=template app
+`
+	p, err := build(t, src, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, app := p.Stages[0], p.Stages[2]
+	if !reflect.DeepEqual(b.Fetch, []string{"/etc/app.conf", "/opt/app"}) || len(app.CopyFrom) != 1 || app.CopyFrom[0] != b {
+		t.Errorf("fetch %q, copy from %v", b.Fetch, app.CopyFrom)
+	}
+	// build feeds app: no warning about its missing OUTPUT; other has one.
+	if len(p.Warnings) != 1 || !strings.Contains(p.Warnings[0], "stage other has no OUTPUT") {
+		t.Errorf("warnings = %q", p.Warnings)
+	}
+	got, err := p.Select("app")
+	if err != nil || len(got) != 2 || got[0] != b || got[1] != app {
+		t.Errorf("Select(app) = %v, %v", got, err)
+	}
+
+	for _, tt := range []struct{ src, err string }{
+		{"FROM xo://t AS a\nCONNECT ssh --user=u\nCOPY --from=b /x /y\nFROM xo://t AS b\n", `COPY --from=b: no earlier stage named "b"`},
+		{"FROM xo://t AS a\nCONNECT ssh --user=u\nCOPY --from=a /x /y\n", "a stage cannot copy from itself"},
+		{"FROM xo://t AS a\nCONNECT ssh --user=u\nCOPY --from=debian:13 /x /y\n", "images are not supported"},
+	} {
+		if _, err := build(t, tt.src, nil); err == nil || !strings.Contains(err.Error(), tt.err) {
+			t.Errorf("%q: err = %v, want %q", tt.src, err, tt.err)
+		}
+	}
+}
+
 func TestServe(t *testing.T) {
 	src := "ARG DIR=http\nFROM xo://t AS a\nARG DIR\nUSER root\nSERVE --port=8080 ${DIR}\nCONNECT ssh --user=u\nRUN curl http://$DANGO_HTTP_ADDR/ks.cfg\n" +
 		"FROM a AS b\nOUTPUT --as=template\n"

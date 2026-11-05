@@ -90,6 +90,9 @@ type Options struct {
 	// ContextDir is the directory COPY sources and OUTPUT paths are
 	// relative to: the Dangofile's directory.
 	ContextDir string
+	// filesDir holds the files fetched for COPY --from during the build
+	// (set by Run).
+	filesDir string
 	// Target builds only this stage and its ancestors; every stage when
 	// empty.
 	Target string
@@ -198,6 +201,14 @@ func Run(ctx context.Context, p *plan.Plan, opts Options) (err error) {
 		}
 	}
 
+	// The files of COPY --from, for the build.
+	filesDir, err := os.MkdirTemp("", "opendango-files-")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(filesDir)
+	opts.filesDir = filesDir
+
 	done := map[*plan.Stage]*executor{}
 	var temporary []*executor
 	defer func() {
@@ -246,7 +257,8 @@ func Run(ctx context.Context, p *plan.Plan, opts Options) (err error) {
 	for {
 		for i := 0; len(errs) == 0 && ctx.Err() == nil && running < opts.Jobs && i < len(pending); {
 			s := pending[i]
-			if s.Parent != nil && done[s.Parent] == nil {
+			// After its parent and the stages it COPY --from.
+			if !ready(s, done) {
 				i++
 				continue
 			}
@@ -258,8 +270,17 @@ func Run(ctx context.Context, p *plan.Plan, opts Options) (err error) {
 				key = ""
 			}
 			running++
+			// The files of the stages it COPY --from.
+			from := map[string]string{}
+			for _, src := range s.CopyFrom {
+				from[src.Name()] = done[src].fetchRoot
+			}
+			// A stage that feeds COPY --from runs, for its files.
+			if len(s.Fetch) > 0 {
+				key = ""
+			}
 			go func(parent *executor) {
-				e, err := runStage(ctx, p, s, parent, needed, key, con, opts)
+				e, err := runStage(ctx, p, s, parent, needed, key, from, con, opts)
 				results <- result{s, e, err}
 			}(done[s.Parent])
 		}
@@ -293,6 +314,20 @@ func Run(ctx context.Context, p *plan.Plan, opts Options) (err error) {
 	}
 	fmt.Fprintln(opts.Out, "==> Build finished")
 	return nil
+}
+
+// ready tells whether the stages s needs are built: its parent and the
+// stages it COPY --from.
+func ready(s *plan.Stage, done map[*plan.Stage]*executor) bool {
+	if s.Parent != nil && done[s.Parent] == nil {
+		return false
+	}
+	for _, src := range s.CopyFrom {
+		if done[src] == nil {
+			return false
+		}
+	}
+	return true
 }
 
 // needsTemplate tells whether a selected stage starts from s.
@@ -329,9 +364,9 @@ type console struct {
 // needed is true when a selected stage starts from this one: the VM then
 // always ends as a template. key is the stage's cache key, empty when the
 // stage is not cached.
-func runStage(ctx context.Context, p *plan.Plan, stage *plan.Stage, parent *executor, needed bool, key string, con *console, opts Options) (_ *executor, err error) {
+func runStage(ctx context.Context, p *plan.Plan, stage *plan.Stage, parent *executor, needed bool, key string, from map[string]string, con *console, opts Options) (_ *executor, err error) {
 	if stage.IsPacker() {
-		return runPackerStage(ctx, p, stage, parent, needed, key, con, opts)
+		return runPackerStage(ctx, p, stage, parent, needed, key, from, con, opts)
 	}
 	parentTemplate := ""
 	if parent != nil {
@@ -351,6 +386,8 @@ func runStage(ctx context.Context, p *plan.Plan, stage *plan.Stage, parent *exec
 		retryDelay: opts.RetryDelay,
 		contextDir: opts.ContextDir,
 		console:    con,
+		fetchRoot:  filepath.Join(opts.filesDir, fmt.Sprint(stage.Index)),
+		fetched:    from,
 	}
 	if parent != nil {
 		// Like a Docker image: USER, SHELL, WORKDIR and ENV carry over, ARG
@@ -447,6 +484,10 @@ func runStage(ctx context.Context, p *plan.Plan, stage *plan.Stage, parent *exec
 	}
 
 	if err := e.steps(ctx, p, stage, opts); err != nil {
+		return nil, err
+	}
+	// The files later stages COPY --from, while the VM runs.
+	if err := e.fetch(ctx, stage, e.fetchRoot); err != nil {
 		return nil, err
 	}
 
@@ -660,6 +701,12 @@ type executor struct {
 	// keepArtifact: the artifact of a plugin:// stage of a builder that is
 	// not in the table, set by its own flags, is never deleted.
 	keepArtifact bool
+	// fetchRoot is where the files later stages COPY --from this one are
+	// fetched (the machine's / is fetchRoot).
+	fetchRoot string
+	// fetched are the fetchRoot of the stages this one COPY --from, by
+	// stage name.
+	fetched map[string]string
 	// answer is the answer to --on-error=ask that ended the stage, when
 	// answered is true.
 	answer   choice
@@ -770,6 +817,13 @@ func (e *executor) step(ctx context.Context, step instructions.Instruction) erro
 		}
 		return nil
 	case *instructions.Copy:
+		if s.From != "" {
+			e.say("COPY --from=%s %s %s", s.From, strings.Join(s.Sources, " "), s.Dest)
+			if err := e.copyFrom(ctx, s); err != nil {
+				return fmt.Errorf("COPY: %w", err)
+			}
+			return nil
+		}
 		e.say("COPY %s %s", strings.Join(s.Sources, " "), s.Dest)
 		if err := e.copy(ctx, s); err != nil {
 			return fmt.Errorf("COPY: %w", err)
@@ -921,6 +975,14 @@ func (e *executor) add(ctx context.Context, a *instructions.Add) error {
 
 // upload copies local files and directories to c.Dest, as the current USER.
 func (e *executor) upload(ctx context.Context, c *instructions.Copy, srcs []string) error {
+	return e.place(ctx, c, srcs, false)
+}
+
+// place copies srcs (local paths) to c.Dest in the machine, with the
+// semantics of COPY. Each source is uploaded with the communicator (which
+// follows symbolic links); with viaTar, they go in one tar archive
+// extracted in the machine, which keeps symbolic links (COPY --from).
+func (e *executor) place(ctx context.Context, c *instructions.Copy, srcs []string, viaTar bool) error {
 	tmp, err := e.output(ctx, "mktemp -d /tmp/opendango.XXXXXX")
 	if err != nil {
 		return fmt.Errorf("creating a temporary directory: %w", err)
@@ -934,16 +996,26 @@ func (e *executor) upload(ctx context.Context, c *instructions.Copy, srcs []stri
 	}
 
 	toDir := len(srcs) > 1 || strings.HasSuffix(c.Dest, "/")
+	stat, cp := os.Stat, "cp"
+	if viaTar {
+		if err := e.uploadTar(ctx, srcs, tmp); err != nil {
+			return err
+		}
+		// Symbolic links stay links.
+		stat, cp = os.Lstat, "cp -P"
+	}
 	var script strings.Builder
 	script.WriteString("set -e\n")
 	for i, src := range srcs {
-		info, err := os.Stat(src)
+		info, err := stat(src)
 		if err != nil {
 			return err
 		}
 		remote := path.Join(tmp, fmt.Sprint(i), filepath.Base(src))
-		if err := e.comm.Upload(ctx, src, remote); err != nil {
-			return fmt.Errorf("uploading %s: %w", src, err)
+		if !viaTar {
+			if err := e.comm.Upload(ctx, src, remote); err != nil {
+				return fmt.Errorf("uploading %s: %w", src, err)
+			}
 		}
 
 		var targets []string
@@ -951,7 +1023,7 @@ func (e *executor) upload(ctx context.Context, c *instructions.Copy, srcs []stri
 		case info.IsDir():
 			// Like Docker, a directory's contents are copied, not the
 			// directory itself.
-			fmt.Fprintf(&script, "mkdir -p %s\ncp -R %s/. %s/\n", q(c.Dest), q(remote), q(c.Dest))
+			fmt.Fprintf(&script, "mkdir -p %s\n%s -R %s/. %s/\n", q(c.Dest), cp, q(remote), q(c.Dest))
 			entries, err := os.ReadDir(src)
 			if err != nil {
 				return err
@@ -961,10 +1033,10 @@ func (e *executor) upload(ctx context.Context, c *instructions.Copy, srcs []stri
 			}
 		case toDir:
 			target := path.Join(c.Dest, filepath.Base(src))
-			fmt.Fprintf(&script, "mkdir -p %s\ncp %s %s\n", q(c.Dest), q(remote), q(target))
+			fmt.Fprintf(&script, "mkdir -p %s\n%s %s %s\n", q(c.Dest), cp, q(remote), q(target))
 			targets = append(targets, target)
 		default:
-			fmt.Fprintf(&script, "mkdir -p %s\ncp %s %s\n", q(path.Dir(c.Dest)), q(remote), q(c.Dest))
+			fmt.Fprintf(&script, "mkdir -p %s\n%s %s %s\n", q(path.Dir(c.Dest)), cp, q(remote), q(c.Dest))
 			targets = append(targets, c.Dest)
 		}
 		for _, t := range targets {
