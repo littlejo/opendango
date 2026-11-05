@@ -143,6 +143,13 @@ plugin. The source is the Packer source type: `qemu`, `proxmox-iso`,
 - The flags are the builder's settings, by their Packer names. Lists and maps
   are JSON (`--network_names='["LAN"]'`). Paths are relative to the Dangofile
   directory.
+- `opendango plugin describe <source>` lists them, with their types
+  (`--search disk` filters them) and a link to the plugin's documentation,
+  which tells what they do. `opendango validate` checks them with the
+  plugin: a misspelled flag gets the closest setting
+  (`plugin://qemu has no setting "disk_sise", did you mean --disk_size?`),
+  and the plugin reports what is missing or invalid, without creating
+  anything (`--offline` skips this).
 - `CONNECT` sets `communicator`, `ssh_username`, `ssh_port` and `ssh_timeout`.
   The credentials (`ssh_password`, `ssh_private_key_file`…) are flags, or the
   plugin's own temporary key when it makes one.
@@ -182,6 +189,7 @@ opendango plugin pull github.com/vatesfr/xenserver   # a plugin published on Git
 opendango plugin pull qemu@1.1.7                     # a given version
 opendango plugin search xenserver                    # official plugins, then GitHub repositories
 opendango plugin list                                # the plugins plugin:// stages can use
+opendango plugin describe qemu --search disk         # the settings (FROM flags) of a builder
 opendango plugin rm qemu@1.1.7                       # remove an installed version
 ```
 
@@ -305,7 +313,8 @@ from the cloud-config drive) and the guest tools (the IP address).
 ## Commands
 
 ```sh
-opendango validate -f Dangofile --build-arg K=V   # check without building
+opendango validate -f Dangofile --build-arg K=V   # check without building (plugins check their flags)
+opendango validate --offline    # without asking the plugins
 opendango build -f Dangofile --build-arg K=V
 opendango build --target nginx  # one stage and the stages it starts from
 opendango build -j 4            # up to 4 stages at the same time
@@ -314,7 +323,7 @@ opendango build --on-error=keep # leave the machine in place when the build fail
 opendango build --on-error=ask  # on failure: retry the instruction, clean up or keep
 opendango fmt -w                # rewrite the Dangofile in its canonical layout
 opendango fmt --check           # exit 1 if it is not formatted (CI)
-opendango plugin pull|search|list|rm
+opendango plugin pull|search|list|describe|rm
 opendango cache prune [--older-than=DURATION] [--dry-run]
 ```
 

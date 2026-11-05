@@ -120,6 +120,7 @@ func loadPlan(c *commonFlags) (*plan.Plan, error) {
 
 func cmdValidate(args []string, stdout, stderr io.Writer) int {
 	fs, c := newFlagSet("validate", stderr)
+	offline := fs.Bool("offline", false, "do not check the FROM flags of plugin:// stages with their plugins")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -134,6 +135,17 @@ func cmdValidate(args []string, stdout, stderr io.Writer) int {
 	}
 	for _, w := range p.Warnings {
 		fmt.Fprintf(stderr, "warning: %s\n", w)
+	}
+	if !*offline {
+		// The plugins check their settings (Prepare creates nothing).
+		warnings, err := build.CheckPlugins(context.Background(), p, filepath.Dir(c.file), nil)
+		for _, w := range warnings {
+			fmt.Fprintf(stderr, "warning: %s\n", w)
+		}
+		if err != nil {
+			fmt.Fprintln(stderr, err)
+			return 1
+		}
 	}
 	fmt.Fprintf(stdout, "%s is valid\n", c.file)
 	return 0
@@ -320,6 +332,7 @@ const pluginUsage = `Usage:
   opendango plugin pull <name|github.com/owner/name>[@version]...
   opendango plugin search <term>
   opendango plugin list
+  opendango plugin describe <source> [--search <text>]
   opendango plugin rm <name|github.com/owner/name>[@version]...
 
 A name is the official HashiCorp plugin of that name, or else the only
@@ -344,6 +357,8 @@ func cmdPlugin(args []string, stdout, stderr io.Writer) int {
 		return 0
 	case cmd == "list" && len(args) == 0:
 		return pluginList(stdout)
+	case cmd == "describe":
+		return pluginDescribe(args, stdout, stderr)
 	case cmd == "search" && len(args) == 1:
 	case (cmd == "pull" || cmd == "rm") && len(args) > 0:
 	default:
@@ -451,6 +466,62 @@ func pluginRemove(reg *packer.Registry, refs []string, stdout, stderr io.Writer)
 			fmt.Fprintf(stderr, "opendango plugin rm %s: %v\n", ref, err)
 			return 1
 		}
+	}
+	return 0
+}
+
+// pluginDescribe prints the settings of a builder: the FROM flags of
+// plugin://<source>.
+func pluginDescribe(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("plugin describe", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	search := fs.String("search", "", "only the settings whose name contains this text")
+	// The source may come before the flags.
+	var source string
+	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
+		source, args = args[0], args[1:]
+	}
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if source == "" && fs.NArg() == 1 {
+		source = fs.Arg(0)
+	} else if source == "" || fs.NArg() > 0 {
+		fmt.Fprint(stderr, pluginUsage)
+		return 2
+	}
+	source = strings.TrimPrefix(source, "plugin://")
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	pl, builder, err := build.FindPlugin(ctx, source)
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
+	}
+	settings, err := packer.Settings(pl, builder)
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
+	}
+	w := tabwriter.NewWriter(stdout, 0, 4, 2, ' ', 0)
+	fmt.Fprintln(w, "SETTING\tTYPE\tNOTE")
+	shown := 0
+	for _, s := range settings {
+		// Packer's core settings, which opendango sets.
+		if strings.HasPrefix(s.Name, "packer_") || !strings.Contains(s.Name, strings.ToLower(*search)) {
+			continue
+		}
+		note := ""
+		if by := packer.Reserved(source, s.Name); by != "" {
+			note = "set by " + by
+		}
+		fmt.Fprintf(w, "--%s\t%s\t%s\n", s.Name, s.Type, note)
+		shown++
+	}
+	w.Flush()
+	fmt.Fprintf(stdout, "\n%d settings of plugin://%s (%s %s)\n", shown, source, pl.Name, pl.Version)
+	if url := packer.DocURL(pl); url != "" {
+		fmt.Fprintf(stdout, "What they do: %s\n", url)
 	}
 	return 0
 }

@@ -273,3 +273,49 @@ func TestHookData(t *testing.T) {
 		t.Errorf("nil: %+v", got)
 	}
 }
+
+func TestSettings(t *testing.T) {
+	pl := &Plugin{Name: "opendangotest", Path: testPlugin(t)}
+	settings, err := Settings(pl, "local")
+	if err != nil {
+		t.Fatal(err)
+	}
+	types := map[string]string{}
+	for _, s := range settings {
+		types[s.Name] = s.Type
+	}
+	for name, want := range map[string]string{"root": "string", "count": "number", "fail": "bool", "items": "list of string", "packer_build_name": "string"} {
+		if types[name] != want {
+			t.Errorf("%s: type %q, want %q", name, types[name], want)
+		}
+	}
+	if !sort.SliceIsSorted(settings, func(i, j int) bool { return settings[i].Name < settings[j].Name }) {
+		t.Error("not sorted")
+	}
+}
+
+func TestDocURLAndReserved(t *testing.T) {
+	for path, want := range map[string]string{
+		"/cfg/plugins/github.com/hashicorp/qemu/packer-plugin-qemu_v1.1.8_x5.0_linux_amd64":          "https://developer.hashicorp.com/packer/integrations/hashicorp/qemu",
+		"/cfg/plugins/github.com/vatesfr/xenserver/packer-plugin-xenserver_v0.11.4_x5.0_linux_amd64": "https://github.com/vatesfr/packer-plugin-xenserver",
+		"/usr/local/bin/packer-plugin-qemu": "",
+	} {
+		name := "qemu"
+		if strings.Contains(path, "xenserver") {
+			name = "xenserver"
+		}
+		if got := DocURL(&Plugin{Name: name, Path: path}); got != want {
+			t.Errorf("%s: %q, want %q", path, got, want)
+		}
+	}
+	for _, tt := range []struct{ source, name, want string }{
+		{"qemu", "ssh_username", "CONNECT ssh --user=<user>"},
+		{"qemu", "tags", ""},
+		{"xenorchestra", "tags", "LABEL"},
+		{"xenorchestra", "http_ip", "SERVE --addr=<ip>"},
+	} {
+		if got := Reserved(tt.source, tt.name); got != tt.want {
+			t.Errorf("Reserved(%s, %s) = %q, want %q", tt.source, tt.name, got, tt.want)
+		}
+	}
+}

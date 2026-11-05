@@ -72,12 +72,13 @@ Implemented (standard library `flag` package; move to cobra only if the CLI grow
 
 ```
 opendango build    [-f Dangofile] [--build-arg K=V]... [--target X] [-j N] [--no-cache] [--on-error=abort|keep|ask]
-opendango validate [-f Dangofile] [--build-arg K=V]...
+opendango validate [-f Dangofile] [--build-arg K=V]... [--offline]
 opendango fmt      [-f Dangofile] [-w | --check]
 opendango cache prune [--older-than=DURATION] [--dry-run]
 opendango plugin pull <name|github.com/owner/name>[@version]...
 opendango plugin search <term>
 opendango plugin list
+opendango plugin describe <source> [--search <text>]
 opendango plugin rm <name|github.com/owner/name>[@version]...
 opendango version
 ```
@@ -135,6 +136,7 @@ The Vates SDK (`xenorchestra-go-sdk`) was evaluated and not used: opendango need
 - **BOOT** is translated to `boot_command` (one entry per line, `${DANGO_HTTP_ADDR}` → `{{ .HTTPIP }}:{{ .HTTPPort }}`; setting `boot_command` as a flag is an error).
 - **CONNECT** is translated to `communicator=ssh`, `ssh_username`, `ssh_port`, `ssh_timeout` (setting these as flags is an error); without CONNECT, `communicator=none`.
 - **SERVE** is translated to `http_directory` (absolute path) and, with `--port`, `http_port_min` = `http_port_max` (setting these as flags is an error): the plugin serves the directory (it does not log the requests), and `boot_command` uses `{{ .HTTPIP }}:{{ .HTTPPort }}`. `RUN` gets `DANGO_HTTP_ADDR` from the hook data (`PackerHTTPAddr`); a warning when the plugin does not tell it. `--addr` needs a known builder with an `HTTPIP` setting (an error otherwise: vatesfr/xenserver has none). The credentials (`ssh_password`, `ssh_private_key_file`, …) are FROM flags, or the plugin's own (xenorchestra makes a temporary key).
+- **Discovering and checking the settings**: plugins describe their settings through `ConfigSpec` (HCL2 spec over RPC): names and types only, no description, nothing marked required (Prepare tells). `opendango plugin describe <source> [--search]` (`packer.Settings`) lists them without the `packer_*` ones, notes those an instruction sets (`packer.Reserved`), and links the docs (`packer.DocURL`: developer.hashicorp.com for `github.com/hashicorp/*`, the GitHub repository otherwise, from the install path). `opendango validate` runs `build.CheckPlugins` unless `--offline`: per plugin:// stage, flags missing from the spec are errors with the closest name (`didyoumean.NameSuggestion` of the SDK), then the builder's `Prepare` with the settings the build would pass (`stageSettings`, `coreSettings`; a placeholder for a parent's template), which by contract creates nothing; a plugin that is not installed is a warning. The SDK's `ConfigSpec` client panics on a spec it cannot decode: `packer.Settings` recovers. The test plugin builds its spec from its `mapstructure` tags.
 - **Hook data** (`packer.HookData`): the provision hook receives Packer's generated data, which the RPC delivers as `map[any]any`: `PackerHTTPAddr`, `Host`, `Port`, `User`, `SSHPrivateKey` (the SDK's `ERR_*` placeholders mean unset). While the instructions run, `BREAKPOINT` and `--on-error=ask` print the `ssh` command of that connection (the key in a temporary 0600 file, removed afterwards; no `-i` without a key).
 - **REBOOT** runs `reboot` as root through the plugin's communicator, then reads the boot ID until it changes (within the `CONNECT` timeout, one minute per attempt): the SDK's SSH communicator reconnects by itself when a command cannot open a session.
 - **Flow**: the plugin creates the machine and connects; when it calls the `packer_provision` hook, opendango runs the stage instructions through the plugin's communicator (`packer.Comm`); then the plugin shuts down and produces its artifact, which opendango prints.

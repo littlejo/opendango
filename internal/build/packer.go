@@ -71,41 +71,16 @@ func runPackerStage(ctx context.Context, p *plan.Plan, stage *plan.Stage, parent
 	}
 	e.say("Using %s", pl.Path)
 
-	// CONNECT becomes the plugin's communicator; the credentials are FROM
-	// flags.
-	settings := cfg.Settings
-	if c := e.connect; c != nil {
-		if e.user == "" {
-			e.user = c.User
-		}
-		settings["communicator"] = "ssh"
-		settings["ssh_username"] = c.User
-		settings["ssh_port"] = c.Port
-		settings["ssh_timeout"] = c.Timeout.String()
-	} else {
-		settings["communicator"] = "none"
+	if e.connect != nil && e.user == "" {
+		e.user = e.connect.User
 	}
-	// SERVE: the plugin serves the directory itself; boot_command reaches
-	// it at {{ .HTTPIP }}:{{ .HTTPPort }}.
-	if sv := stage.Serve; sv != nil {
-		dir, err := serveDir(opts.ContextDir, sv)
-		if err != nil {
-			return nil, &plan.Error{File: p.File, Line: sv.Line(), Err: err}
-		}
-		settings["http_directory"] = dir
-		if sv.Port != 0 {
-			settings["http_port_min"] = sv.Port
-			settings["http_port_max"] = sv.Port
-		}
+	parentID := ""
+	if parent != nil {
+		parentID = parent.artifact.ID()
 	}
-	// BOOT: the plugin types boot_command, where ${DANGO_HTTP_ADDR} is the
-	// address of its HTTP server.
-	if len(stage.Boot) > 0 {
-		var keys []string
-		for _, boot := range stage.Boot {
-			keys = append(keys, strings.ReplaceAll(boot.Keys, instructions.ServeAddrMarker, "{{ .HTTPIP }}:{{ .HTTPPort }}"))
-		}
-		settings["boot_command"] = keys
+	settings, err := stageSettings(p.File, stage, cfg, parentID, opts.ContextDir)
+	if err != nil {
+		return nil, err
 	}
 	// OUTPUT and LABEL become the settings of the builder's artifact; without
 	// OUTPUT --as=template, the artifact is deleted once built, like the VM
@@ -113,23 +88,9 @@ func runPackerStage(ctx context.Context, p *plan.Plan, stage *plan.Stage, parent
 	// stages start from it.
 	destroy, intermediate := false, false
 	if k := packer.Lookup(cfg.Component); k != nil {
-		if err := knownSettings(settings, k, stage, opts.ContextDir); err != nil {
-			return nil, err
-		}
 		source := flags[k.Source]
 		if parent != nil {
-			source = parent.artifact.ID()
-			settings[k.Source] = source
-		}
-		if sv := stage.Serve; sv != nil && sv.Addr != "" {
-			settings[k.HTTPIP] = sv.Addr
-		}
-		if len(stage.Boot) > 0 && k.BootWait != "" {
-			settings[k.BootWait] = "-1s"
-		}
-		// The cache tags of the source are not the machine's.
-		if k.DropInheritedTags != "" {
-			settings[k.DropInheritedTags] = []any{CacheTagPrefix, CreatedTagPrefix}
+			source = parentID
 		}
 
 		// The cache: a template tagged with the key, found by the plugin's
@@ -191,24 +152,7 @@ func runPackerStage(ctx context.Context, p *plan.Plan, stage *plan.Stage, parent
 			e.cached = true
 		}
 	}
-	// What the plugin does when a step fails (its own cleanup).
-	onError := "cleanup"
-	switch {
-	case opts.KeepOnError:
-		onError = "abort"
-	case opts.Ask:
-		onError = "ask"
-	}
-	core := map[string]any{
-		"packer_build_name":          stage.Name(),
-		"packer_builder_type":        cfg.Component,
-		"packer_core_version":        "opendango",
-		"packer_debug":               false,
-		"packer_force":               false,
-		"packer_on_error":            onError,
-		"packer_user_variables":      map[string]string{},
-		"packer_sensitive_variables": cfg.Secrets,
-	}
+	core := coreSettings(stage, cfg, opts)
 
 	ui := &packer.Ui{
 		Print:    func(line string) { e.say("%s", line) },
@@ -276,6 +220,94 @@ func runPackerStage(ctx context.Context, p *plan.Plan, stage *plan.Stage, parent
 	}
 	e.say("Stage finished")
 	return e, nil
+}
+
+// stageSettings returns the plugin settings of a stage: its FROM flags,
+// plus what CONNECT, SERVE and BOOT become, and for a builder of the table
+// OUTPUT, LABEL, SERVE --addr and the source (parentID, the parent's
+// artifact, for a stage that starts from another one). The cache tags and
+// the intermediate template name come on top, in runPackerStage.
+func stageSettings(file string, stage *plan.Stage, cfg *packer.Config, parentID, contextDir string) (map[string]any, error) {
+	settings := map[string]any{}
+	for k, v := range cfg.Settings {
+		settings[k] = v
+	}
+	// CONNECT becomes the plugin's communicator; the credentials are FROM
+	// flags.
+	if c := stage.Connect; c != nil {
+		settings["communicator"] = "ssh"
+		settings["ssh_username"] = c.User
+		settings["ssh_port"] = c.Port
+		settings["ssh_timeout"] = c.Timeout.String()
+	} else {
+		settings["communicator"] = "none"
+	}
+	// SERVE: the plugin serves the directory itself; boot_command reaches
+	// it at {{ .HTTPIP }}:{{ .HTTPPort }}.
+	if sv := stage.Serve; sv != nil {
+		dir, err := serveDir(contextDir, sv)
+		if err != nil {
+			return nil, &plan.Error{File: file, Line: sv.Line(), Err: err}
+		}
+		settings["http_directory"] = dir
+		if sv.Port != 0 {
+			settings["http_port_min"] = sv.Port
+			settings["http_port_max"] = sv.Port
+		}
+	}
+	// BOOT: the plugin types boot_command, where ${DANGO_HTTP_ADDR} is the
+	// address of its HTTP server.
+	if len(stage.Boot) > 0 {
+		var keys []string
+		for _, boot := range stage.Boot {
+			keys = append(keys, strings.ReplaceAll(boot.Keys, instructions.ServeAddrMarker, "{{ .HTTPIP }}:{{ .HTTPPort }}"))
+		}
+		settings["boot_command"] = keys
+	}
+	k := packer.Lookup(cfg.Component)
+	if k == nil {
+		return settings, nil
+	}
+	if err := knownSettings(settings, k, stage, contextDir); err != nil {
+		return nil, err
+	}
+	if parentID != "" {
+		settings[k.Source] = parentID
+	}
+	if sv := stage.Serve; sv != nil && sv.Addr != "" {
+		settings[k.HTTPIP] = sv.Addr
+	}
+	if len(stage.Boot) > 0 && k.BootWait != "" {
+		settings[k.BootWait] = "-1s"
+	}
+	// The cache tags of the source are not the machine's.
+	if k.DropInheritedTags != "" {
+		settings[k.DropInheritedTags] = []any{CacheTagPrefix, CreatedTagPrefix}
+	}
+	return settings, nil
+}
+
+// coreSettings returns the packer_* settings Packer's core passes to a
+// builder.
+func coreSettings(stage *plan.Stage, cfg *packer.Config, opts Options) map[string]any {
+	// What the plugin does when a step fails (its own cleanup).
+	onError := "cleanup"
+	switch {
+	case opts.KeepOnError:
+		onError = "abort"
+	case opts.Ask:
+		onError = "ask"
+	}
+	return map[string]any{
+		"packer_build_name":          stage.Name(),
+		"packer_builder_type":        cfg.Component,
+		"packer_core_version":        "opendango",
+		"packer_debug":               false,
+		"packer_force":               false,
+		"packer_on_error":            onError,
+		"packer_user_variables":      map[string]string{},
+		"packer_sensitive_variables": cfg.Secrets,
+	}
 }
 
 // packerTemplate is the artifact of a plugin:// stage that other stages

@@ -53,7 +53,7 @@ func TestUsage(t *testing.T) {
 	if code := run([]string{"cache", "prune", "--older-than=soon"}, &stdout, &stderr); code != 2 {
 		t.Errorf("cache prune --older-than=soon: exit %d", code)
 	}
-	for _, args := range [][]string{{"plugin"}, {"plugin", "search"}, {"plugin", "search", "a", "b"}, {"plugin", "pull"}, {"plugin", "rm"}, {"plugin", "list", "x"}, {"plugin", "nope"}} {
+	for _, args := range [][]string{{"plugin"}, {"plugin", "search"}, {"plugin", "search", "a", "b"}, {"plugin", "pull"}, {"plugin", "rm"}, {"plugin", "list", "x"}, {"plugin", "nope"}, {"plugin", "describe"}, {"plugin", "describe", "a", "b"}} {
 		if code := run(args, &stdout, &stderr); code != 2 {
 			t.Errorf("%q: exit %d", args, code)
 		}
@@ -124,5 +124,25 @@ func TestPlugin(t *testing.T) {
 	}
 	if _, err := os.Stat(bin); !os.IsNotExist(err) {
 		t.Errorf("rm left %s: %v", bin, err)
+	}
+}
+
+// TestValidatePlugins checks that validate reports a plugin that is not
+// installed as a warning, and that --offline does not look for it.
+func TestValidatePlugins(t *testing.T) {
+	t.Setenv("PACKER_CONFIG_DIR", t.TempDir())
+	t.Setenv("PACKER_PLUGIN_PATH", "")
+	t.Setenv("PATH", "")
+	f := filepath.Join(t.TempDir(), "Dangofile")
+	if err := os.WriteFile(f, []byte("FROM --memory=2048 plugin://qemu\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"validate", "-f", f}, &stdout, &stderr); code != 0 || !strings.Contains(stderr.String(), "warning: stage stage-0: plugin://qemu is not checked: plugin: no plugin for \"qemu\"") {
+		t.Errorf("exit %d, stderr %q", code, stderr.String())
+	}
+	stderr.Reset()
+	if code := run([]string{"validate", "--offline", "-f", f}, &stdout, &stderr); code != 0 || strings.Contains(stderr.String(), "not checked") {
+		t.Errorf("--offline: exit %d, stderr %q", code, stderr.String())
 	}
 }
