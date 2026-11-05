@@ -43,7 +43,7 @@ func testPlugin(t *testing.T) FindPluginFunc {
 	}
 	return func(_ context.Context, source string) (*packer.Plugin, string, error) {
 		// The tests of the table of known builders use the test plugin
-		// as packer://xenorchestra.
+		// as plugin://xenorchestra.
 		if source != "opendangotest-local" && source != "xenorchestra" {
 			return nil, "", fmt.Errorf("unexpected source %q", source)
 		}
@@ -55,7 +55,7 @@ func TestPackerStage(t *testing.T) {
 	root := t.TempDir()
 	ctxDir := t.TempDir()
 	os.WriteFile(filepath.Join(ctxDir, "a.txt"), []byte("A"), 0o644)
-	src := fmt.Sprintf(`FROM --root=%[1]s --count=2 --items='["x", "y"]' --password=s3cret packer://opendangotest-local AS golden
+	src := fmt.Sprintf(`FROM --root=%[1]s --count=2 --items='["x", "y"]' --password=s3cret plugin://opendangotest-local AS golden
 CONNECT ssh --user=tester --port=2222
 ENV GREETING=hello
 WORKDIR %[1]s/work
@@ -95,7 +95,7 @@ func TestPackerStageServe(t *testing.T) {
 		{"SERVE http", "==> stage-0: http: dir=" + filepath.Join(ctxDir, "http") + " ports=0-0"},
 	}
 	for _, tt := range tests {
-		src := fmt.Sprintf("FROM --root=%s packer://opendangotest-local\n%s\n", t.TempDir(), tt.serve)
+		src := fmt.Sprintf("FROM --root=%s plugin://opendangotest-local\n%s\n", t.TempDir(), tt.serve)
 		var log syncBuffer
 		if err := Run(context.Background(), mustPlan(t, src), Options{ContextDir: ctxDir, Out: &log, FindPlugin: testPlugin(t)}); err != nil {
 			t.Fatalf("%s: %v\n%s", tt.serve, err, log.String())
@@ -105,7 +105,7 @@ func TestPackerStageServe(t *testing.T) {
 		}
 	}
 
-	src := fmt.Sprintf("FROM --root=%s packer://opendangotest-local\nSERVE nope\n", t.TempDir())
+	src := fmt.Sprintf("FROM --root=%s plugin://opendangotest-local\nSERVE nope\n", t.TempDir())
 	err := Run(context.Background(), mustPlan(t, src), Options{ContextDir: ctxDir, FindPlugin: testPlugin(t)})
 	if err == nil || err.Error() != "Dangofile:2: SERVE: nope is not a directory" {
 		t.Errorf("err = %v", err)
@@ -114,7 +114,7 @@ func TestPackerStageServe(t *testing.T) {
 
 func TestPackerStageFailure(t *testing.T) {
 	src := func(root string) string {
-		return fmt.Sprintf("FROM --root=%s packer://opendangotest-local\nCONNECT ssh --user=tester\nRUN test -f marker || { touch marker; exit 3; }\n", root)
+		return fmt.Sprintf("FROM --root=%s plugin://opendangotest-local\nCONNECT ssh --user=tester\nRUN test -f marker || { touch marker; exit 3; }\n", root)
 	}
 
 	t.Run("abort", func(t *testing.T) {
@@ -173,7 +173,7 @@ func TestPackerKnownBuilder(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			root := t.TempDir()
 			ctxDir := t.TempDir()
-			src := fmt.Sprintf("FROM --root=%s packer://xenorchestra\nCONNECT ssh --user=tester\nRUN true\n%s", root, tt.lines)
+			src := fmt.Sprintf("FROM --root=%s plugin://xenorchestra\nCONNECT ssh --user=tester\nRUN true\n%s", root, tt.lines)
 			var log syncBuffer
 			if err := Run(context.Background(), mustPlan(t, src), Options{ContextDir: ctxDir, Out: &log, FindPlugin: testPlugin(t)}); err != nil {
 				t.Fatalf("%v\n%s", err, log.String())
@@ -199,7 +199,7 @@ func TestPackerKnownBuilder(t *testing.T) {
 // template, deleted at the end of the build through its plugin.
 func TestPackerMultiStage(t *testing.T) {
 	base, app, out := t.TempDir(), t.TempDir(), t.TempDir()
-	src := fmt.Sprintf(`FROM --root=%[1]s packer://xenorchestra AS base
+	src := fmt.Sprintf(`FROM --root=%[1]s plugin://xenorchestra AS base
 CONNECT ssh --user=tester
 ENV GREETING=hello
 WORKDIR %[1]s
@@ -237,7 +237,7 @@ OUTPUT --as=template app
 
 	// --target base: nobody starts from base, its artifact goes at once.
 	base = t.TempDir()
-	src = fmt.Sprintf("FROM --root=%s packer://xenorchestra AS base\nCONNECT ssh --user=tester\nRUN true\nFROM --root=%s base AS app\nRUN true\n", base, app)
+	src = fmt.Sprintf("FROM --root=%s plugin://xenorchestra AS base\nCONNECT ssh --user=tester\nRUN true\nFROM --root=%s base AS app\nRUN true\n", base, app)
 	var log2 syncBuffer
 	if err := Run(context.Background(), mustPlan(t, src), Options{ContextDir: t.TempDir(), Out: &log2, Target: "base", FindPlugin: testPlugin(t)}); err != nil {
 		t.Fatalf("%v\n%s", err, log2.String())

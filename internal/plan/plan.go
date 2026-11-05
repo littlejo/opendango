@@ -79,7 +79,7 @@ func (s *Stage) Root() *Stage {
 	return s
 }
 
-// PackerFlags returns the FROM flags of a packer:// stage: its own for a
+// PackerFlags returns the FROM flags of a plugin:// stage: its own for a
 // root stage; for a stage that starts from another one, also the flags it
 // inherits (packer.Known.StageFlags).
 func (s *Stage) PackerFlags() (map[string]string, error) {
@@ -88,7 +88,7 @@ func (s *Stage) PackerFlags() (map[string]string, error) {
 	}
 	k := s.known()
 	if k == nil || k.Source == "" {
-		return nil, fmt.Errorf("FROM %s: a stage cannot start from a packer://%s stage: its artifact is the plugin's (opendango knows the artifacts of packer://%s)", s.From.Stage, s.Root().From.Source, packer.KnownSources())
+		return nil, fmt.Errorf("FROM %s: a stage cannot start from a plugin://%s stage: its artifact is the plugin's (opendango knows the artifacts of plugin://%s)", s.From.Stage, s.Root().From.Source, packer.KnownSources())
 	}
 	parent, err := s.Parent.PackerFlags()
 	if err != nil {
@@ -111,8 +111,8 @@ func (s *Stage) known() *packer.Known {
 }
 
 // IsPacker tells whether a Packer plugin builds the stage
-// (FROM packer://...).
-func (s *Stage) IsPacker() bool { return s.Root().From.Builder == "packer" }
+// (FROM plugin://...).
+func (s *Stage) IsPacker() bool { return s.Root().From.Builder == "plugin" }
 
 // TemplateOutput returns the stage's OUTPUT --as=template, or nil.
 func (s *Stage) TemplateOutput() *instructions.Output {
@@ -316,7 +316,7 @@ func Build(file string, res *parser.Result, buildArgs map[string]string) (*Plan,
 				return fail(line, needsConnect(cmd.Keyword))
 			}
 			if cmd.Keyword == "REBOOT" && stage.IsPacker() {
-				return fail(line, fmt.Errorf("REBOOT is not supported in a packer:// stage yet: the plugin owns the connection"))
+				return fail(line, fmt.Errorf("REBOOT is not supported in a plugin:// stage yet: the plugin owns the connection"))
 			}
 			var (
 				step instructions.Instruction
@@ -354,7 +354,7 @@ func Build(file string, res *parser.Result, buildArgs map[string]string) (*Plan,
 				return fail(line, err)
 			}
 			if sv.Addr != "" && stage.IsPacker() {
-				return fail(line, fmt.Errorf("SERVE --addr is not supported in a packer:// stage: the plugin serves the directory and chooses its address"))
+				return fail(line, fmt.Errorf("SERVE --addr is not supported in a plugin:// stage: the plugin serves the directory and chooses its address"))
 			}
 			stage.Serve = sv
 
@@ -370,7 +370,7 @@ func Build(file string, res *parser.Result, buildArgs map[string]string) (*Plan,
 
 		case "LABEL":
 			if k := stage.known(); stage.IsPacker() && (k == nil || k.Tags == "") {
-				return fail(line, fmt.Errorf("LABEL is not supported in a packer://%s stage: the plugin configuration (FROM flags) sets its artifact (opendango maps LABEL for packer://%s)", stage.Root().From.Source, packer.KnownSources()))
+				return fail(line, fmt.Errorf("LABEL is not supported in a plugin://%s stage: the plugin configuration (FROM flags) sets its artifact (opendango maps LABEL for plugin://%s)", stage.Root().From.Source, packer.KnownSources()))
 			}
 			l, err := instructions.ParseLabel(cmd, expand)
 			if err != nil {
@@ -386,7 +386,7 @@ func Build(file string, res *parser.Result, buildArgs map[string]string) (*Plan,
 		case "OUTPUT":
 			k := stage.known()
 			if stage.IsPacker() && k == nil {
-				return fail(line, fmt.Errorf("OUTPUT has no meaning in a packer://%s stage: the plugin configuration (FROM flags) sets its artifact (opendango maps OUTPUT for packer://%s)", stage.Root().From.Source, packer.KnownSources()))
+				return fail(line, fmt.Errorf("OUTPUT has no meaning in a plugin://%s stage: the plugin configuration (FROM flags) sets its artifact (opendango maps OUTPUT for plugin://%s)", stage.Root().From.Source, packer.KnownSources()))
 			}
 			out, err := instructions.ParseOutput(cmd, expand)
 			if err != nil {
@@ -394,11 +394,11 @@ func Build(file string, res *parser.Result, buildArgs map[string]string) (*Plan,
 			}
 			if k != nil && out.Kind == instructions.OutputXVA {
 				if k.XVAOutput == "" {
-					return fail(line, fmt.Errorf("OUTPUT --format=xva is not supported by packer://%s", stage.Root().From.Source))
+					return fail(line, fmt.Errorf("OUTPUT --format=xva is not supported by plugin://%s", stage.Root().From.Source))
 				}
 				for _, prev := range stage.Outputs {
 					if prev.Kind == instructions.OutputXVA {
-						return fail(line, fmt.Errorf("packer://%s exports one XVA at most (already at line %d)", stage.Root().From.Source, prev.Line()))
+						return fail(line, fmt.Errorf("plugin://%s exports one XVA at most (already at line %d)", stage.Root().From.Source, prev.Line()))
 					}
 				}
 			}
@@ -487,7 +487,7 @@ func checkBuilder(s *Stage) error {
 			_, err = xo.ParseStageConfig(s.From.Flags)
 		}
 		return err
-	case "packer":
+	case "plugin":
 		flags, err := s.PackerFlags()
 		if err != nil {
 			return err
@@ -495,7 +495,7 @@ func checkBuilder(s *Stage) error {
 		_, err = packer.ParseConfig(root.Source, flags)
 		return err
 	default:
-		return fmt.Errorf("unknown builder %q (supported: xo, packer)", root.Builder)
+		return fmt.Errorf("unknown builder %q (supported: xo, plugin)", root.Builder)
 	}
 }
 

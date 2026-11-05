@@ -33,10 +33,10 @@ func FindPlugin(ctx context.Context, source string) (*packer.Plugin, string, err
 			return pl, builder, nil
 		}
 	}
-	return nil, "", fmt.Errorf("packer: %s has no builder %q (builders: %s)", pl.Path, builder, strings.Join(d.Builders, ", "))
+	return nil, "", fmt.Errorf("plugin: %s has no builder %q (builders: %s)", pl.Path, builder, strings.Join(d.Builders, ", "))
 }
 
-// runPackerStage builds a FROM packer://<source> stage, or a stage that
+// runPackerStage builds a FROM plugin://<source> stage, or a stage that
 // starts from one: the plugin creates the machine and connects to it, then
 // calls back to run the instructions through its communicator, then
 // produces its artifact. parent and needed are those of runStage.
@@ -109,7 +109,7 @@ func runPackerStage(ctx context.Context, p *plan.Plan, stage *plan.Stage, parent
 	// OUTPUT and LABEL become the settings of the builder's artifact; without
 	// OUTPUT --as=template, the artifact is deleted once built, like the VM
 	// of a native stage, or at the end of the build when other stages start
-	// from it (an intermediate template, like with --no-cache: packer://
+	// from it (an intermediate template, like with --no-cache: plugin://
 	// stages are not cached).
 	destroy, intermediate := false, false
 	if k := packer.Lookup(cfg.Component); k != nil {
@@ -173,7 +173,7 @@ func runPackerStage(ctx context.Context, p *plan.Plan, stage *plan.Stage, parent
 	}
 	if artifact == nil {
 		if needed {
-			return nil, fmt.Errorf("packer: %s produced no artifact for the stages that start from %s", pl.Name, stage.Name())
+			return nil, fmt.Errorf("plugin: %s produced no artifact for the stages that start from %s", pl.Name, stage.Name())
 		}
 		e.say("No artifact")
 		e.say("Stage finished")
@@ -185,7 +185,7 @@ func runPackerStage(ctx context.Context, p *plan.Plan, stage *plan.Stage, parent
 	return e, nil
 }
 
-// packerTemplate is the artifact of a packer:// stage that other stages
+// packerTemplate is the artifact of a plugin:// stage that other stages
 // start from.
 type packerTemplate struct{ a *packer.Artifact }
 
@@ -214,7 +214,7 @@ func knownSettings(settings map[string]any, k *packer.Known, stage *plan.Stage, 
 				settings[k.XVACompress] = out.Compress
 			}
 		default:
-			return fmt.Errorf("packer: unsupported output %q", out.Kind)
+			return fmt.Errorf("plugin: unsupported output %q", out.Kind)
 		}
 	}
 	if len(stage.Labels) > 0 {

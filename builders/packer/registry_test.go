@@ -235,7 +235,7 @@ func TestInstall(t *testing.T) {
 		if got := readFile(t, want+"_SHA256SUM"); got != hex.EncodeToString(h[:]) {
 			t.Errorf("_SHA256SUM = %q", got)
 		}
-		// Found by the discovery of packer:// stages.
+		// Found by the discovery of plugin:// stages.
 		found, _, err := Find(Discover([]string{reg.Dir}, nil), tt.name)
 		if err != nil || found.Path != want {
 			t.Errorf("Find(%s) = %+v, %v", tt.name, found, err)

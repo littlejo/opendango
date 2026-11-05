@@ -109,7 +109,7 @@ for the key names.
 
 ## Packer plugins
 
-`FROM packer://<plugin>-<builder>` runs the builder of a Packer plugin, such
+`FROM plugin://<plugin>-<builder>` runs the builder of a Packer plugin, such
 as [vatesfr/packer-plugin-xenserver](https://github.com/vatesfr/packer-plugin-xenserver).
 The plugin creates and boots the machine and connects to it; opendango runs
 the instructions through that connection; then the plugin produces its
@@ -120,7 +120,7 @@ ARG XAPI_PASSWORD
 FROM --remote_host=10.0.0.1 --remote_username=root --remote_password=${XAPI_PASSWORD} \
      --clone_template="Debian 13 Cloud-init (Hub)" --vm_name=golden --firmware=bios \
      --network_names='["LAN"]' --cd_files='["cidata/user-data", "cidata/meta-data"]' \
-     --ssh_private_key_file=key --format=xva packer://xenserver-xva
+     --ssh_private_key_file=key --format=xva plugin://xenserver-xva
 CONNECT ssh --user=debian
 RUN apt-get update && apt-get -y upgrade
 ```
@@ -141,16 +141,16 @@ opendango build --build-arg XAPI_PASSWORD="$XAPI_PASSWORD"
   `http_port_min` and `http_port_max`), and the `BOOT` lines its
   `boot_command`, with `${DANGO_HTTP_ADDR}` turned into
   `{{ .HTTPIP }}:{{ .HTTPPort }}`: the same Dangofile lines work with
-  `packer://xenserver-iso`. `SERVE --addr` is not available, nor
+  `plugin://xenserver-iso`. `SERVE --addr` is not available, nor
   `$DANGO_HTTP_ADDR` in `RUN`.
-- Only builders are supported. `REBOOT` is not available in a packer://
+- Only builders are supported. `REBOOT` is not available in a plugin://
   stage.
 - `OUTPUT` and `LABEL` work with the builders opendango knows, and only with
   them (the others set their artifact with their own flags):
 
   | Builder | `OUTPUT --as=template <name>` | `LABEL` | `OUTPUT --format=xva [--compress] <path>` |
   |---|---|---|---|
-  | `packer://xenorchestra` ([packer-plugin-xenorchestra](https://github.com/littlejo/packer-plugin-xenorchestra)) | `template_name` | `tags` | `xva_output`, `xva_compress` (one XVA) |
+  | `plugin://xenorchestra` ([packer-plugin-xenorchestra](https://github.com/littlejo/packer-plugin-xenorchestra)) | `template_name` | `tags` | `xva_output`, `xva_compress` (one XVA) |
 
   Like a native stage, a stage without `OUTPUT --as=template` deletes the
   plugin's artifact once built (an XVA stays). These settings cannot be FROM
@@ -163,7 +163,7 @@ opendango build --build-arg XAPI_PASSWORD="$XAPI_PASSWORD"
   (`opendango-tmp-<stage>-<time>`), deleted at the end of the build.
 
   ```dockerfile
-  FROM --template="Debian 13 Cloud-init (Hub)" --network=LAN packer://xenorchestra AS base
+  FROM --template="Debian 13 Cloud-init (Hub)" --network=LAN plugin://xenorchestra AS base
   CONNECT ssh --user=debian
   RUN apt-get update && apt-get -y upgrade
 
@@ -179,7 +179,7 @@ opendango plugin pull qemu                           # the official HashiCorp pl
 opendango plugin pull github.com/vatesfr/xenserver   # a plugin published on GitHub
 opendango plugin pull qemu@1.1.7                     # a given version
 opendango plugin search xenserver                    # official plugins, then GitHub repositories
-opendango plugin list                                # the plugins packer:// stages can use
+opendango plugin list                                # the plugins plugin:// stages can use
 opendango plugin rm qemu@1.1.7                       # remove an installed version
 ```
 

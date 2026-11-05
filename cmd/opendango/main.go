@@ -424,7 +424,7 @@ func pluginSearch(ctx context.Context, reg *packer.Registry, term string, stdout
 	return 0
 }
 
-// pluginList prints the plugins that a packer:// stage can use, in the
+// pluginList prints the plugins that a plugin:// stage can use, in the
 // order they are looked up.
 func pluginList(stdout io.Writer) int {
 	plugins := packer.Discover(packer.SearchDirs(), filepath.SplitList(os.Getenv("PATH")))

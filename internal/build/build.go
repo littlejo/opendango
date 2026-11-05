@@ -114,7 +114,7 @@ type Options struct {
 	// NoCache builds every stage, without looking up or storing templates
 	// in the cache.
 	NoCache bool
-	// FindPlugin finds the Packer plugin of the packer:// stages;
+	// FindPlugin finds the Packer plugin of the plugin:// stages;
 	// FindPlugin when nil.
 	FindPlugin FindPluginFunc
 }
@@ -610,7 +610,7 @@ type template interface {
 }
 
 // template returns the template the stage ended as: the builder's VM once
-// converted, or the artifact of a packer:// stage.
+// converted, or the artifact of a plugin:// stage.
 func (e *executor) template() template {
 	if e.artifact != nil {
 		return e.artifact
@@ -623,7 +623,7 @@ type executor struct {
 	name string
 	out  io.Writer
 	b    Builder
-	// artifact is the artifact of a packer:// stage (b is nil).
+	// artifact is the artifact of a plugin:// stage (b is nil).
 	artifact   *packerTemplate
 	comm       Communicator
 	connect    *instructions.Connect
@@ -1116,7 +1116,7 @@ func (e *executor) breakpoint(ctx context.Context, s *instructions.Breakpoint) e
 	defer e.console.mu.Unlock()
 	e.say("%s", title)
 	if e.key == nil {
-		// packer://: no ephemeral key, the FROM flags hold the credentials.
+		// plugin://: no ephemeral key, the FROM flags hold the credentials.
 		e.say("Build paused. The plugin owns the connection: log in with the credentials of the FROM flags")
 	} else {
 		e.say("Build paused. Connect to the VM with:")
@@ -1265,7 +1265,7 @@ func keep(err error, opts Options) bool {
 // dropped the previous one (REBOOT, sshd restarted by hand).
 func (e *executor) reconnect(ctx context.Context) error {
 	if e.b == nil {
-		// packer://: the plugin owns the connection.
+		// plugin://: the plugin owns the connection.
 		return nil
 	}
 	if e.comm != nil {

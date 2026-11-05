@@ -2,7 +2,7 @@
 
 package packer_test
 
-// End-to-end test of packer:// with vatesfr/packer-plugin-xenserver, which
+// End-to-end test of plugin:// with vatesfr/packer-plugin-xenserver, which
 // talks to XAPI directly.
 //
 // The plugin's xva builder clones a template but cannot change the network
@@ -105,7 +105,7 @@ func TestXenserverEndToEnd(t *testing.T) {
 	}
 
 	src := fmt.Sprintf(`ARG XAPI_PASSWORD
-FROM --remote_host=%s --remote_username=%s --remote_password=${XAPI_PASSWORD} --clone_template=%s --vm_name=%s --vm_memory=2048 --vcpus_max=2 --vcpus_atstartup=2 --firmware=bios --installtimeout=10m --network_names='[%q]' --cd_files='["cidata/user-data", "cidata/meta-data"]' --ssh_private_key_file=key --format=none --keep_vm=never packer://xenserver-xva AS golden
+FROM --remote_host=%s --remote_username=%s --remote_password=${XAPI_PASSWORD} --clone_template=%s --vm_name=%s --vm_memory=2048 --vcpus_max=2 --vcpus_atstartup=2 --firmware=bios --installtimeout=10m --network_names='[%q]' --cd_files='["cidata/user-data", "cidata/meta-data"]' --ssh_private_key_file=key --format=none --keep_vm=never plugin://xenserver-xva AS golden
 CONNECT ssh --user=%s --timeout=15m
 USER root
 WORKDIR /opt/opendango
