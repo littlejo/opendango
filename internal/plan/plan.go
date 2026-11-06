@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"path/filepath"
 	"slices"
 	"sort"
 	"strings"
@@ -24,6 +25,9 @@ type Plan struct {
 	// Stages are in file order: a stage always comes after its parent.
 	Stages   []*Stage
 	Warnings []string
+	// Builtins are the values of the builtin variables of this build
+	// (DANGO_TIMESTAMP…), --build-arg ones included.
+	Builtins map[string]string
 }
 
 // Stage is everything between a FROM and the next FROM (or the end of the
@@ -325,9 +329,17 @@ func BuildSettings(file string, res *parser.Result, buildArgs map[string]string,
 		return nil, &Error{File: file, Line: line, Err: err}
 	}
 
-	// Variables in scope for expansion. Before FROM: the global ARGs. In the
-	// stage: the stage ARGs, then ENV (Docker semantics).
-	global := map[string]string{}
+	// Variables in scope for expansion. Before FROM: the global ARGs, with
+	// the builtins (--build-arg replaces them). In the stage: the stage ARGs,
+	// then ENV (Docker semantics).
+	global := Builtins(filepath.Dir(file))
+	for name := range global {
+		if v, ok := buildArgs[name]; ok {
+			global[name] = v
+			usedArgs[name] = true
+		}
+	}
+	p.Builtins = maps.Clone(global)
 	scope := global
 	var stage *Stage
 	expand := func(word string) (string, error) {

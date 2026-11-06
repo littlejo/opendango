@@ -338,7 +338,12 @@ type manifestFiles struct {
 	Size int64  `json:"size"`
 }
 
-func newManifests() *manifests {
+// newManifests returns the manifest writer of a run: its UUID is the
+// build's DANGO_BUILD_ID, a new one when empty.
+func newManifests(runUUID string) *manifests {
+	if runUUID != "" {
+		return &manifests{runUUID: runUUID}
+	}
 	b := make([]byte, 16)
 	rand.Read(b)
 	b[6], b[8] = b[6]&0x0f|0x40, b[8]&0x3f|0x80

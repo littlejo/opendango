@@ -210,3 +210,18 @@ func TestCheckPostProcessors(t *testing.T) {
 		}
 	}
 }
+
+// TestManifestBuildID checks that the manifest's run UUID is the build's
+// DANGO_BUILD_ID.
+func TestManifestBuildID(t *testing.T) {
+	saved := plan.Builtins
+	t.Cleanup(func() { plan.Builtins = saved })
+	plan.Builtins = func(string) map[string]string { return map[string]string{plan.BuildIDVar: "build-42"} }
+	ctxDir := t.TempDir()
+	if err := Run(context.Background(), mustPlan(t, "FROM xo://t\nOUTPUT --format=manifest m.json\n"), Options{ContextDir: ctxDir, NoCache: true, NewBuilder: only(&fakeBuilder{})}); err != nil {
+		t.Fatal(err)
+	}
+	if got := readFile(t, filepath.Join(ctxDir, "m.json")); !strings.Contains(got, `"last_run_uuid": "build-42"`) {
+		t.Errorf("manifest:\n%s", got)
+	}
+}

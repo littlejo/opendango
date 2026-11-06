@@ -189,7 +189,7 @@ func Run(ctx context.Context, p *plan.Plan, opts Options) (err error) {
 	if opts.FindProvisioner == nil {
 		opts.FindProvisioner = FindProvisioner
 	}
-	opts.manifests = newManifests()
+	opts.manifests = newManifests(p.Builtins[plan.BuildIDVar])
 	if opts.NewBuilder == nil {
 		opts.NewBuilder = func(s *plan.Stage, parent string) (Builder, error) { return NewBuilder(s, parent, opts.Out) }
 	}
@@ -213,7 +213,7 @@ func Run(ctx context.Context, p *plan.Plan, opts Options) (err error) {
 	keys := map[*plan.Stage]string{}
 	if !opts.NoCache {
 		for _, s := range stages {
-			if keys[s], err = stageKey(p.File, s, keys, opts.ContextDir); err != nil {
+			if keys[s], err = stageKey(p.File, s, keys, opts.ContextDir, volatile(p)); err != nil {
 				return err
 			}
 		}
@@ -334,6 +334,18 @@ func Run(ctx context.Context, p *plan.Plan, opts Options) (err error) {
 	}
 	fmt.Fprintln(opts.Out, "==> Build finished")
 	return nil
+}
+
+// volatile returns the values of the builtins that change at every build,
+// which the cache keys leave out.
+func volatile(p *plan.Plan) map[string]string {
+	v := map[string]string{}
+	for _, name := range plan.Volatile {
+		if value := p.Builtins[name]; value != "" {
+			v[name] = value
+		}
+	}
+	return v
 }
 
 // nativeMade is what a native stage made, for the post-processors: its
