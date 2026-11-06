@@ -298,3 +298,30 @@ func TestCacheNotStoredAfterRetry(t *testing.T) {
 		t.Errorf("log = %q", got)
 	}
 }
+
+// TestCacheKeyBuiltins checks that the volatile builtins (a timestamp in a
+// name) do not change the cache key, while the git commit does.
+func TestCacheKeyBuiltins(t *testing.T) {
+	saved := plan.Builtins
+	t.Cleanup(func() { plan.Builtins = saved })
+	key := func(stamp, commit string) string {
+		t.Helper()
+		plan.Builtins = func(string) map[string]string {
+			return map[string]string{plan.TimestampVar: stamp, plan.DateVar: "2026" + stamp[:4], plan.TimeVar: "", plan.BuildIDVar: "id-" + stamp, plan.GitCommitVar: commit}
+		}
+		p := mustPlan(t, "FROM --memory=2G --pool=p-${DANGO_DATE} xo://t\nCONNECT ssh --user=u\nARG DANGO_TIMESTAMP\nARG DANGO_GIT_COMMIT\nRUN true\nOUTPUT --as=template golden-${DANGO_TIMESTAMP}-${DANGO_GIT_COMMIT}\n")
+		keys := map[*plan.Stage]string{}
+		k, err := stageKey(p.File, p.Stages[0], keys, t.TempDir(), volatile(p))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return k
+	}
+	a := key("1794000000", "abc1234")
+	if b := key("1794099999", "abc1234"); a != b {
+		t.Error("the timestamp changed the key")
+	}
+	if c := key("1794000000", "def5678"); a == c {
+		t.Error("the git commit did not change the key")
+	}
+}

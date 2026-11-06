@@ -201,7 +201,7 @@ func TestCopyFromCacheKey(t *testing.T) {
 		p := mustPlan(t, "FROM xo://t AS build\nCONNECT ssh --user=u\nRUN "+run+"\n\nFROM xo://t AS app\nCONNECT ssh --user=u\nCOPY --from=build /opt/app /usr/local/bin/\nOUTPUT --as=template app\n")
 		keys := map[*plan.Stage]string{}
 		for _, s := range p.Stages {
-			k, err := stageKey(p.File, s, keys, t.TempDir())
+			k, err := stageKey(p.File, s, keys, t.TempDir(), nil)
 			if err != nil {
 				t.Fatal(err)
 			}

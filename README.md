@@ -88,7 +88,7 @@ plugin attaches it as a CD, and the image is written to `dist/`.
 
 | Instruction | Example |
 |---|---|
-| `ARG` | `ARG DEBIAN=13` (before `FROM`: only usable in `FROM`, as in Docker) |
+| `ARG` | `ARG DEBIAN=13` (before `FROM`: only usable in `FROM`, as in Docker), `ARG DANGO_DATE` (see [Builtin variables](#builtin-variables)) |
 | `FROM` | `FROM --memory=2048 plugin://qemu AS golden`, `FROM golden AS app` (see [Multi-stage builds](#multi-stage-builds)) |
 | `CONNECT` | `CONNECT ssh --user=debian --port=22 --timeout=10m` (or `dango.connect` in [`dango.yaml`](#plugin-settings-file-dangoyaml)) |
 | `RUN` | `RUN apt-get update`, `RUN ["systemctl", "enable", "nginx"]`, `RUN <<EOF ... EOF` |
@@ -157,6 +157,37 @@ The [post-processors](#post-processors) work with every builder.
 
 `CMD`, `ENTRYPOINT`, `EXPOSE`, `HEALTHCHECK`, `VOLUME`, `ONBUILD` and
 `STOPSIGNAL` have no meaning for a VM image and are rejected.
+
+### Builtin variables
+
+opendango computes variables for each build, like the predefined ARGs of
+Docker:
+
+| Variable | Value |
+|---|---|
+| `DANGO_TIMESTAMP` | the start of the build, in Unix seconds (`1794000000`) |
+| `DANGO_DATE` | its date, UTC (`20261106`) |
+| `DANGO_TIME` | its time, UTC (`214510`) |
+| `DANGO_BUILD_ID` | a UUID, also the run UUID of the [manifest](#post-processors) |
+| `DANGO_GIT_COMMIT` | the short commit of the repository of the Dangofile (empty outside of git) |
+
+```dockerfile
+FROM --vm_name=golden-${DANGO_TIMESTAMP} plugin://xenorchestra AS golden
+ARG DANGO_DATE
+RUN echo "built on $DANGO_DATE" > /etc/build-date
+OUTPUT --as=template golden-${DANGO_DATE}
+```
+
+- They are the same in every stage of a build.
+- `FROM` lines and [`dango.yaml`](#plugin-settings-file-dangoyaml) see them;
+  a stage sees them once it declares them (`ARG DANGO_DATE`), like a global
+  ARG.
+- `--build-arg DANGO_DATE=…` replaces one (to rebuild an image with the same
+  name, for instance).
+- The time and the build id do not change the [cache](#cache) key: a name
+  with a timestamp does not build the image again, and a stage found in the
+  cache keeps the name it was built with. The git commit does change it.
+- The shell patterns of Docker apply: `${DANGO_GIT_COMMIT:-dev}`.
 
 ## Plugins
 
