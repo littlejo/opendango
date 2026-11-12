@@ -212,8 +212,11 @@ plugin. The source is the Packer source type: `qemu`, `proxmox-iso`,
   The credentials (`ssh_password`, `ssh_private_key_file`…) are flags, or the
   plugin's own temporary key when it makes one.
 - Secrets come from the environment: pass them with `ARG` and
-  `--build-arg NAME=value`. Values of flags named `*password*`, `*secret*` or
-  `*token*` are masked in the log.
+  `--build-arg NAME=value`, or `--build-arg NAME` for the value of the
+  environment variable `NAME` (like Docker; left unset when it is not set).
+  `--build-arg-file=<file>` reads `KEY=VALUE` lines (`#` comments, `KEY`
+  alone for the environment variable), which `--build-arg` overrides. Values
+  of flags named `*password*`, `*secret*` or `*token*` are masked in the log.
 - `SERVE <dir>` sets the plugin's `http_directory` (and `--port` its
   `http_port_min` and `http_port_max`): the plugin serves the directory. The
   `BOOT` lines become its `boot_command`, with `${DANGO_HTTP_ADDR}` turned
@@ -236,7 +239,7 @@ RUN apt-get update && apt-get -y upgrade
 ```
 
 ```sh
-opendango build --build-arg XAPI_PASSWORD="$XAPI_PASSWORD"
+opendango build --build-arg XAPI_PASSWORD
 ```
 
 ### Plugin settings file (`dango.yaml`)
@@ -560,6 +563,7 @@ opendango init [qemu ...]       # write a dango.yaml with the settings of the pl
 opendango validate -f Dangofile --build-arg K=V   # check without building (plugins check their flags)
 opendango validate --offline    # without asking the plugins
 opendango build -f Dangofile --build-arg K=V
+opendango build --build-arg TOKEN --build-arg-file=build.env   # from the environment, from a file
 opendango build --target nginx  # one stage and the stages it starts from
 opendango build -j 4            # up to 4 stages at the same time
 opendango build --no-cache      # ignore the cache
