@@ -409,9 +409,11 @@ func packerXVA(ctx context.Context, p *plan.Plan, stage *plan.Stage, pl *packer.
 			}
 		}
 		ui := &packer.Ui{Print: func(line string) { e.say("%s", line) }, Secrets: secrets}
-		if _, err := packer.PostProcess(ctx, pl, k.XVA.PostProcessor, opts.ContextDir, ui, packer.Input{ID: id}, cfg); err != nil {
+		o, err := packer.PostProcess(ctx, pl, k.XVA.PostProcessor, opts.ContextDir, ui, packer.Input{ID: id}, cfg)
+		if err != nil {
 			return &plan.Error{File: p.File, Line: out.Line(), Err: err}
 		}
+		o.Close()
 	}
 	return nil
 }

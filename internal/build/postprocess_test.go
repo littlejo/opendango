@@ -121,6 +121,53 @@ func TestPostProcessPlugin(t *testing.T) {
 	}
 }
 
+// TestPostProcessChain chains post-processors: each --chain one gets the
+// artifact of the previous one, which goes unless it keeps its input.
+func TestPostProcessChain(t *testing.T) {
+	root, ctxDir := t.TempDir(), t.TempDir()
+	src := fmt.Sprintf(`FROM --root=%[1]s plugin://opendangotest-local AS golden
+OUTPUT --output=%[2]s/a.txt plugin://opendangotest-inspect
+OUTPUT --chain --output=%[2]s/b.txt --keep=false plugin://opendangotest-inspect
+OUTPUT --chain --format=checksum SUMS
+OUTPUT --format=compress --chain all.tar
+OUTPUT --chain --output=%[2]s/c.txt --keep=false --keep_input_artifact=true plugin://opendangotest-inspect
+OUTPUT --output=%[2]s/d.txt plugin://opendangotest-inspect
+`, root, ctxDir)
+	p := mustPlan(t, src)
+	var log syncBuffer
+	find := testPlugin(t)
+	findPP := func(ctx context.Context, source string) (*packer.Plugin, string, error) {
+		pl, _, err := find(ctx, "opendangotest-local")
+		return pl, strings.TrimPrefix(source, "opendangotest-"), err
+	}
+	if err := Run(context.Background(), p, Options{ContextDir: ctxDir, Out: &log, FindPlugin: find, FindPostProcessor: findPP}); err != nil {
+		t.Fatalf("%v\n%s", err, log.String())
+	}
+	at := func(name string) string { return filepath.Join(ctxDir, name) }
+	// b.txt got a.txt, then deleted it (keep=false).
+	if got := readFile(t, at("b.txt")); !strings.Contains(got, "id=inspected:"+at("a.txt")+"\nbuilder=opendango.test.inspect\nfiles="+at("a.txt")+"\n") {
+		t.Errorf("b.txt = %q", got)
+	}
+	if _, err := os.Stat(at("a.txt")); !os.IsNotExist(err) {
+		t.Errorf("a.txt not deleted: %v", err)
+	}
+	// The checksum is b.txt's; the archive holds SUMS.
+	if got := readFile(t, at("SUMS")); !strings.HasSuffix(got, "  b.txt\n") {
+		t.Errorf("SUMS = %q", got)
+	}
+	// keep_input_artifact=true wins over the post-processor's keep=false.
+	if got := readFile(t, at("c.txt")); !strings.Contains(got, "files="+at("all.tar")+"\n") {
+		t.Errorf("c.txt = %q", got)
+	}
+	if _, err := os.Stat(at("all.tar")); err != nil {
+		t.Errorf("all.tar: %v", err)
+	}
+	// Without --chain, the stage's artifact.
+	if got := readFile(t, at("d.txt")); !strings.Contains(got, "id="+root+"\n") {
+		t.Errorf("d.txt = %q", got)
+	}
+}
+
 // TestPostProcessDestroyed checks that a known builder's artifact deleted
 // for lack of OUTPUT --as=template is post-processed before, and that a
 // checksum of an artifact without files is an error.

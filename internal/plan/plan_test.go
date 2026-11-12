@@ -143,6 +143,8 @@ func TestErrors(t *testing.T) {
 		{"FROM xo://t\nRUN x", "Dangofile:2: RUN needs a connection to the VM"},
 		{"FROM xo://t\nCOPY a b", "Dangofile:2: COPY needs a connection"},
 		{"FROM xo://t\nFETCH /a b", "Dangofile:2: FETCH needs a connection"},
+		{"FROM xo://t\nOUTPUT --as=template\nOUTPUT --chain --format=manifest m", "Dangofile:3: OUTPUT --chain needs an earlier post-processor"},
+		{"FROM xo://t\nOUTPUT --keep_input_artifact=x plugin://vagrant", "Dangofile:2: OUTPUT: invalid keep_input_artifact"},
 		{"FROM xo://t\nRUN --local x", "Dangofile:2: RUN needs a connection"},
 		{"FROM xo://t\nCONNECT ssh --user=u\nPROVISION --max_retries=x plugin://ansible", "Dangofile:3: PROVISION: invalid number of retries"},
 		{"FROM xo://t\nWORKDIR /a", "Dangofile:2: WORKDIR needs a connection"},

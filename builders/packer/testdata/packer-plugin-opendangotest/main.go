@@ -367,11 +367,13 @@ func (p *postProcessor) PostProcess(ctx context.Context, ui packersdk.Ui, a pack
 }
 
 // The "inspect" post-processor writes what it gets to its output: the id,
-// the builder id and the files of the artifact.
+// the builder id and the files of the artifact. Its artifact is the output
+// file; keep=false asks to delete its input artifact.
 type inspector struct {
 	config struct {
 		Output string `mapstructure:"output"`
 		Note   string `mapstructure:"note"`
+		Keep   string `mapstructure:"keep"`
 	}
 }
 
@@ -386,8 +388,18 @@ func (p *inspector) PostProcess(ctx context.Context, ui packersdk.Ui, a packersd
 	if err := os.WriteFile(p.config.Output, []byte(content), 0o644); err != nil {
 		return nil, true, false, err
 	}
-	return &artifact{root: filepath.Dir(p.config.Output)}, true, false, nil
+	return fileArtifact(p.config.Output), p.config.Keep != "false", false, nil
 }
+
+// fileArtifact is a file; Destroy removes it.
+type fileArtifact string
+
+func (a fileArtifact) BuilderId() string { return "opendango.test.inspect" }
+func (a fileArtifact) Files() []string   { return []string{string(a)} }
+func (a fileArtifact) Id() string        { return "inspected:" + string(a) }
+func (a fileArtifact) String() string    { return string(a) }
+func (a fileArtifact) State(string) any  { return nil }
+func (a fileArtifact) Destroy() error    { return os.Remove(string(a)) }
 
 // The "shell" provisioner runs command through the communicator, uploads
 // a file, downloads it back (alone and with its directory), and writes to

@@ -250,6 +250,12 @@ type Output struct {
 	// vagrant or docker-import; Settings are its flags.
 	Source   string
 	Settings map[string]string
+	// Chain is true when the post-processor gets the artifact of the
+	// previous one (OUTPUT --chain) rather than the stage's.
+	Chain bool
+	// KeepInput is the keep_input_artifact setting of a plugin's
+	// post-processor (OutputKeepInput): nil leaves the choice to it.
+	KeepInput *bool
 }
 
 // PostProcess tells whether an output runs once the artifact is made
@@ -783,10 +789,22 @@ func ParseOutput(cmd *parser.Command, expand Expander) (*Output, error) {
 	if len(args) == 1 && strings.HasPrefix(args[0], "plugin://") {
 		return parsePluginOutput(cmd, args[0], expand)
 	}
-	flags, err := parseFlags(cmd, expand, map[string]bool{"as": true, "format": true, "compress": true, "type": true})
+	flags, err := parseFlags(cmd, expand, map[string]bool{"as": true, "format": true, "compress": true, "type": true, "chain": false})
 	if err != nil {
 		return nil, err
 	}
+	out, err := parseOutput(cmd, args, flags)
+	if err != nil {
+		return nil, err
+	}
+	if _, out.Chain = flags["chain"]; out.Chain && !out.PostProcess() {
+		return nil, fmt.Errorf("OUTPUT: --chain is for the post-processors (manifest, checksum, compress, plugin://)")
+	}
+	return out, nil
+}
+
+// parseOutput reads the outputs other than a plugin's post-processor.
+func parseOutput(cmd *parser.Command, args []string, flags map[string]string) (*Output, error) {
 	as, hasAs := flags["as"]
 	format, hasFormat := flags["format"]
 	compress, hasCompress := flags["compress"]
@@ -851,9 +869,36 @@ func parsePluginOutput(cmd *parser.Command, source string, expand Expander) (*Ou
 	if out.Source == "" {
 		return nil, fmt.Errorf("OUTPUT: missing post-processor after plugin://")
 	}
+	// --chain is opendango's; the other flags are the settings.
+	c := *cmd
+	c.Flags = nil
+	for _, f := range cmd.Flags {
+		if f == "--chain" {
+			out.Chain = true
+			continue
+		}
+		c.Flags = append(c.Flags, f)
+	}
 	var err error
-	out.Settings, err = pluginSettings(cmd, expand)
+	out.Settings, err = pluginSettings(&c, expand)
 	return out, err
+}
+
+// OutputKeepInput moves the keep_input_artifact setting of a plugin's
+// post-processor, which belongs to opendango as it belongs to Packer's
+// core, from its settings to KeepInput.
+func OutputKeepInput(o *Output) error {
+	v, ok := o.Settings["keep_input_artifact"]
+	if !ok {
+		return nil
+	}
+	delete(o.Settings, "keep_input_artifact")
+	keep, err := strconv.ParseBool(v)
+	if err != nil {
+		return fmt.Errorf("OUTPUT: invalid keep_input_artifact %q (expected true or false)", v)
+	}
+	o.KeepInput = &keep
+	return nil
 }
 
 // ParseProvision parses PROVISION [--settings] plugin://<provisioner>: the
