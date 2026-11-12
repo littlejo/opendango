@@ -147,6 +147,9 @@ func runPackerStage(ctx context.Context, p *plan.Plan, stage *plan.Stage, parent
 		if err := parentSettings(settings, parent.artifact, stage, cfg.Component); err != nil {
 			return nil, err
 		}
+		if err := tableParent(settings, stage, parent.artifact, cfg.Component); err != nil {
+			return nil, err
+		}
 	}
 	if packer.Lookup(cfg.Component) == nil {
 		// Its own flags set the artifact (a file, an AMI…): it stays, also
@@ -158,7 +161,42 @@ func runPackerStage(ctx context.Context, p *plan.Plan, stage *plan.Stage, parent
 	// of a native stage, or ends as an intermediate template when other
 	// stages start from it.
 	destroy, intermediate := false, false
-	if k := packer.Lookup(cfg.Component); k != nil {
+	// outDir is the output directory opendango chose for an artifact made
+	// of files that other stages start from; cacheFiles tells that it goes
+	// to the images cache once built.
+	outDir, cacheFiles := "", false
+	if k := packer.Lookup(cfg.Component); k != nil && k.OutputDir != "" {
+		images := imagesCache(opts.ImagesCache)
+		if !needed {
+			// The settings place the artifact, which stays.
+		} else if key != "" && images != "" {
+			if files, ok := images.files(key); ok && (len(stage.Fetch) == 0 || e.files.has(key, stage.Fetch)) {
+				dir := filepath.Join(string(images), key)
+				e.say("Using the cached image %s (key %s)", dir, key[:12])
+				if len(stage.Fetch) > 0 {
+					e.fetchRoot = e.files.root(key)
+				}
+				e.cached = true
+				e.artifact = &packerTemplate{a: &packer.Artifact{ID: dir, Desc: "cached image " + dir, Files: files}}
+				e.replay(stage.Steps)
+				m := made{ID: dir, BuilderType: cfg.Component, Files: files}
+				if err := postProcess(ctx, p, stage, m, e, opts); err != nil {
+					return nil, err
+				}
+				e.say("Stage finished (cached)")
+				return e, nil
+			}
+			if outDir, err = images.tmp(key); err != nil {
+				return nil, err
+			}
+			cacheFiles = true
+		} else if outDir, err = newDirPath(os.TempDir(), "opendango-"+stage.Name()+"-"); err != nil {
+			return nil, err
+		}
+		if outDir != "" {
+			settings[k.OutputDir] = outDir
+		}
+	} else if k != nil {
 		source := flags[k.Source]
 		if parent != nil {
 			source = parentID
@@ -181,7 +219,7 @@ func runPackerStage(ctx context.Context, p *plan.Plan, stage *plan.Stage, parent
 			if found != nil {
 				e.say("Using the cached template %s (key %s)", found.ID, key[:12])
 				e.cached = true
-				e.artifact = &packerTemplate{found}
+				e.artifact = &packerTemplate{a: found}
 				// The child stages inherit the final USER, SHELL, WORKDIR and
 				// ENV.
 				e.replay(stage.Steps)
@@ -282,6 +320,9 @@ func runPackerStage(ctx context.Context, p *plan.Plan, stage *plan.Stage, parent
 	}
 	artifact, err := b.Run(ctx)
 	if err != nil {
+		if outDir != "" && !keep(err, opts) {
+			os.RemoveAll(outDir)
+		}
 		return nil, err
 	}
 	if artifact == nil {
@@ -292,7 +333,20 @@ func runPackerStage(ctx context.Context, p *plan.Plan, stage *plan.Stage, parent
 		e.say("Stage finished")
 		return e, nil
 	}
-	e.artifact = &packerTemplate{artifact}
+	e.artifact = &packerTemplate{a: artifact}
+	if outDir != "" {
+		e.artifact.dir = outDir
+		if cacheFiles && !e.retried {
+			files, err := imagesCache(opts.ImagesCache).commit(key, outDir, absFiles(artifact.Files, opts.ContextDir))
+			if err != nil {
+				os.RemoveAll(outDir)
+				return nil, fmt.Errorf("storing the image in the cache: %w", err)
+			}
+			dir := filepath.Join(opts.ImagesCache, key)
+			e.artifact = &packerTemplate{a: &packer.Artifact{ID: dir, Desc: "cached image " + dir, Files: files, BuilderID: artifact.BuilderID}}
+			e.cached = true
+		}
+	}
 	e.say("Artifact: %s", artifact.Desc)
 	if hasPostOutputs(stage) {
 		var err error
@@ -375,7 +429,7 @@ func stageSettings(file string, stage *plan.Stage, cfg *packer.Config, parentID,
 	if err := knownSettings(settings, k, stage, contextDir); err != nil {
 		return nil, err
 	}
-	if parentID != "" {
+	if parentID != "" && k.Source != "" {
 		settings[k.Source] = parentID
 	}
 	if sv := stage.Serve; sv != nil && sv.Addr != "" {
@@ -416,10 +470,22 @@ func coreSettings(stage *plan.Stage, cfg *packer.Config, opts Options) map[strin
 
 // packerTemplate is the artifact of a plugin:// stage that other stages
 // start from.
-type packerTemplate struct{ a *packer.Artifact }
+type packerTemplate struct {
+	a *packer.Artifact
+	// dir is the output directory of an artifact made of files, which
+	// Destroy removes (not the plugin).
+	dir string
+}
 
-func (t *packerTemplate) ID() string                        { return t.a.ID }
-func (t *packerTemplate) Destroy(ctx context.Context) error { return t.a.Destroy() }
+func (t *packerTemplate) ID() string { return t.a.ID }
+
+func (t *packerTemplate) Destroy(ctx context.Context) error {
+	if t.dir != "" {
+		t.a.Close()
+		return os.RemoveAll(t.dir)
+	}
+	return t.a.Destroy()
+}
 
 // close stops the plugin kept for Destroy.
 func (t *packerTemplate) close() { t.a.Close() }
@@ -453,6 +519,49 @@ func packerXVA(ctx context.Context, p *plan.Plan, stage *plan.Stage, pl *packer.
 		o.Close()
 	}
 	return nil
+}
+
+// tableParent sets the Parent settings of a builder of the table whose
+// artifact is files, for a stage that starts from another one without
+// dango.parent: the parent's disk is its largest file.
+func tableParent(settings map[string]any, stage *plan.Stage, parent *packerTemplate, source string) error {
+	k := packer.Lookup(source)
+	if k == nil || k.Parent == nil || stage.ParentFlags != nil {
+		return nil
+	}
+	file := largestFile(parent.a.Files)
+	if file == "" && len(parent.a.Files) > 0 {
+		file = parent.a.Files[0]
+	}
+	if file == "" {
+		return fmt.Errorf("the artifact of stage %s has no file to start from", stage.Parent.Name())
+	}
+	r := strings.NewReplacer(packer.ParentIDRef, parent.ID(), packer.ParentFileRef, file)
+	values := map[string]string{}
+	for name, v := range k.Parent {
+		values[name] = r.Replace(v)
+	}
+	cfg, err := packer.ParseConfig(source, values)
+	if err != nil {
+		return err
+	}
+	for name, v := range cfg.Settings {
+		settings[name] = v
+	}
+	return nil
+}
+
+// absFiles makes the files of an artifact absolute: relative ones are
+// relative to the plugin's directory, the Dangofile's.
+func absFiles(files []string, dir string) []string {
+	out := make([]string, len(files))
+	for i, f := range files {
+		if !filepath.IsAbs(f) {
+			f = filepath.Join(dir, f)
+		}
+		out[i] = f
+	}
+	return out
 }
 
 // parentSettings sets the dango.parent settings of a stage that starts from

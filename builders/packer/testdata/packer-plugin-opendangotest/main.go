@@ -62,6 +62,14 @@ type Config struct {
 	BootWait string `mapstructure:"boot_wait"`
 	// DropInheritedTags is printed, for the tests.
 	DropInheritedTags []string `mapstructure:"drop_inherited_tags"`
+
+	// The settings opendango maps for plugin://qemu, which the tests point
+	// to this plugin: the artifact is the files of OutputDir, which must
+	// not exist, and a stage starts from the disk of its parent (ISOURL).
+	OutputDir   string `mapstructure:"output_directory"`
+	ISOURL      string `mapstructure:"iso_url"`
+	ISOChecksum string `mapstructure:"iso_checksum"`
+	DiskImage   bool   `mapstructure:"disk_image"`
 }
 
 type Builder struct{ config Config }
@@ -165,12 +173,56 @@ func (b *Builder) Run(ctx context.Context, ui packersdk.Ui, hook packersdk.Hook)
 	if err := storeTags(c.Tags, c.Root); err != nil {
 		return nil, err
 	}
+	if c.OutputDir != "" {
+		return outputFiles(ui, c)
+	}
 	// The file of the artifact (Files), like a disk image.
 	if err := os.WriteFile(filepath.Join(c.Root, "image.qcow2"), []byte("image of "+c.Root), 0o644); err != nil {
 		return nil, err
 	}
 	return &artifact{root: c.Root}, nil
 }
+
+// outputFiles makes an artifact of files like the qemu builder: a disk
+// (the largest file) and a small firmware file, in an output directory
+// that must not exist.
+func outputFiles(ui packersdk.Ui, c Config) (packersdk.Artifact, error) {
+	ui.Say(fmt.Sprintf("disk: iso_url=%s iso_checksum=%s disk_image=%v", c.ISOURL, c.ISOChecksum, c.DiskImage))
+	if _, err := os.Stat(c.OutputDir); err == nil {
+		return nil, fmt.Errorf("output directory %s exists", c.OutputDir)
+	}
+	if err := os.MkdirAll(c.OutputDir, 0o755); err != nil {
+		return nil, err
+	}
+	disk := "disk of " + c.Root
+	if c.ISOURL != "" {
+		from, err := os.ReadFile(c.ISOURL)
+		if err != nil {
+			return nil, err
+		}
+		disk += " from [" + string(from) + "]"
+	}
+	files := []string{filepath.Join(c.OutputDir, "efivars.fd"), filepath.Join(c.OutputDir, "disk.qcow2")}
+	if err := os.WriteFile(files[0], []byte("x"), 0o644); err != nil {
+		return nil, err
+	}
+	if err := os.WriteFile(files[1], []byte(disk), 0o644); err != nil {
+		return nil, err
+	}
+	return &filesArtifact{dir: c.OutputDir, files: files}, nil
+}
+
+type filesArtifact struct {
+	dir   string
+	files []string
+}
+
+func (a *filesArtifact) BuilderId() string { return "transcend.qemu" }
+func (a *filesArtifact) Files() []string   { return a.files }
+func (a *filesArtifact) Id() string        { return "VM" }
+func (a *filesArtifact) String() string    { return "files in " + a.dir }
+func (a *filesArtifact) State(string) any  { return nil }
+func (a *filesArtifact) Destroy() error    { return os.RemoveAll(a.dir) }
 
 // comm runs commands with /bin/sh in root.
 type comm struct{ root string }

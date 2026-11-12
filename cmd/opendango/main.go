@@ -399,41 +399,65 @@ func cmdCache(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
-	client, err := xo.NewClientFromEnv()
-	if err != nil {
-		fmt.Fprintln(stderr, err)
-		return 1
+	verb := "Deleting"
+	if *dryRun {
+		verb = "Would delete"
 	}
-	entries, err := xo.ListCache(ctx, client)
-	if err != nil {
-		fmt.Fprintln(stderr, err)
-		return 1
-	}
-	// Only the intermediate templates: the OUTPUT templates are never
-	// deleted.
 	deleted := 0
-	for _, e := range entries {
-		if time.Since(e.Created) < *olderThan {
+	// The images of this machine (plugin://qemu).
+	images, err := build.ListImages("")
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
+	}
+	for _, e := range images {
+		if time.Since(e.Made) < *olderThan {
 			continue
 		}
-		verb := "Deleting"
-		if *dryRun {
-			verb = "Would delete"
-		}
-		fmt.Fprintf(stdout, "%s %s (%s), created %s\n", verb, e.Name, e.ID, e.Created.Format(time.RFC3339))
+		fmt.Fprintf(stdout, "%s the image %s, made %s\n", verb, e.Dir, e.Made.Format(time.RFC3339))
 		if *dryRun {
 			continue
 		}
-		if err := xo.DeleteCache(ctx, client, e.ID); err != nil {
+		if err := build.DeleteImage(e); err != nil {
 			fmt.Fprintln(stderr, err)
 			return 1
 		}
 		deleted++
 	}
+
+	// The intermediate templates of Xen Orchestra, when it is configured.
+	if os.Getenv("XOA_ENDPOINT") != "" {
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer stop()
+		client, err := xo.NewClientFromEnv()
+		if err != nil {
+			fmt.Fprintln(stderr, err)
+			return 1
+		}
+		entries, err := xo.ListCache(ctx, client)
+		if err != nil {
+			fmt.Fprintln(stderr, err)
+			return 1
+		}
+		// Only the intermediate templates: the OUTPUT templates are never
+		// deleted.
+		for _, e := range entries {
+			if time.Since(e.Created) < *olderThan {
+				continue
+			}
+			fmt.Fprintf(stdout, "%s %s (%s), created %s\n", verb, e.Name, e.ID, e.Created.Format(time.RFC3339))
+			if *dryRun {
+				continue
+			}
+			if err := xo.DeleteCache(ctx, client, e.ID); err != nil {
+				fmt.Fprintln(stderr, err)
+				return 1
+			}
+			deleted++
+		}
+	}
 	if !*dryRun {
-		fmt.Fprintf(stdout, "%d cache template(s) deleted\n", deleted)
+		fmt.Fprintf(stdout, "%d cache entries deleted\n", deleted)
 	}
 	return 0
 }

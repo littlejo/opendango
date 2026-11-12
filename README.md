@@ -412,8 +412,8 @@ plugins:
 
 A plugin sets its artifact with its own settings, which opendango does not
 interpret. For the builders of this table, opendango knows the artifact (a
-template), so their stages get everything a stage can do: `OUTPUT`, `LABEL`,
-`SERVE --addr`, multi-stage builds and the cache.
+template, or files), so their stages get multi-stage builds and the cache,
+and for a template `OUTPUT`, `LABEL` and `SERVE --addr`.
 
 | | `plugin://xenorchestra` ([packer-plugin-xenorchestra](https://github.com/littlejo/packer-plugin-xenorchestra)) |
 |---|---|
@@ -427,6 +427,17 @@ template), so their stages get everything a stage can do: `OUTPUT`, `LABEL`,
 These settings cannot be FROM flags. A stage without `OUTPUT --as=template`
 deletes the plugin's template once built (an XVA stays), or at the end of the
 build when other stages start from it.
+
+| | `plugin://qemu` ([packer-plugin-qemu](https://developer.hashicorp.com/packer/integrations/hashicorp/qemu)) |
+|---|---|
+| artifact | the files of `output_directory`; the disk is the largest one |
+| `FROM <stage>` | `iso_url` = the parent's disk, `iso_checksum=none`, `disk_image=true`; the hardware, firmware, `ssh_password`, `ssh_private_key_file` and `shutdown_command` are inherited; `iso_url`, `iso_urls`, `iso_checksum` and `disk_image` cannot be set |
+| a stage others start from | `output_directory` is opendango's (a `FROM` flag is an error, the value of `dango.yaml` is for the other stages): the images cache (`~/.cache/opendango/images/<key>`), or a temporary directory deleted at the end of the build |
+| cache | the images cache of this machine |
+| `OUTPUT --as=template`, `LABEL`, `OUTPUT --format=xva` | errors: the settings place the files (`output_directory`, `vm_name`, `format`) |
+
+The artifact of a qemu stage that no stage starts from stays where its
+settings put it, also without `OUTPUT`; the post-processors work on its files.
 
 The other plugins: `OUTPUT` and `LABEL` are errors and they are not cached;
 a stage can start from theirs with `dango.parent` (see
@@ -446,23 +457,12 @@ RUN apt-get install -y nginx
 ```
 
 The child stage builds with the plugin of its parent, from the parent's
-artifact. How the plugin starts from an artifact depends on the plugin: tell
-it in `dango.parent`, with `${DANGO_PARENT_ID}` (the id of the parent's
-artifact) and `${DANGO_PARENT_FILE}` (its first file):
+artifact. opendango knows how the [builders of its table](#builders-opendango-knows)
+do it (qemu starts from the parent's disk). For another plugin, tell it in
+`dango.parent`, with `${DANGO_PARENT_ID}` (the id of the parent's artifact)
+and `${DANGO_PARENT_FILE}` (its first file):
 
 ```yaml
-qemu:
-  dango:
-    connect: ssh --user=debian
-    parent:                           # over the section, for FROM <stage>
-      iso_url: ${DANGO_PARENT_FILE}   # the parent's image
-      iso_checksum: none
-  iso_url: https://cloud.debian.org/images/cloud/trixie/latest/debian-13-genericcloud-amd64.qcow2
-  iso_checksum: file:https://cloud.debian.org/images/cloud/trixie/latest/SHA512SUMS
-  disk_image: true
-  output_directory: dist/base
-  vm_name: base.qcow2
-
 amazon-ebs:
   dango:
     parent:
@@ -473,8 +473,8 @@ amazon-ebs:
   the parent's artifact: the shell patterns of Docker work
   (`${DANGO_PARENT_ID#*:}`).
 - The [builders opendango knows](#builders-opendango-knows) need no
-  `dango.parent` (xenorchestra starts from the parent's template); with
-  one, it replaces their own way.
+  `dango.parent` (xenorchestra starts from the parent's template, qemu from
+  its disk); with one, it replaces their own way.
 - With another plugin, the parent's artifact is the plugin's own (a file, an
   AMI): it is kept. With a known builder, a parent without
   `OUTPUT --as=template` gets an intermediate template, deleted at the end of
@@ -625,12 +625,15 @@ opendango cache prune --dry-run          # list them
 ```
 
 The cached templates are tagged `opendango-cache:<key>`; the files of
-`COPY --from` are kept in `~/.cache/opendango/files/<key>`, which can be
-deleted at any time. `cache prune` works
-on Xen Orchestra (`XOA_*` variables) and never deletes the `OUTPUT`
-templates. Not cached: the stages of plugins opendango
-does not know, a stage with a `BREAKPOINT`, a stage with an `ADD` of a URL
-without `--checksum` (and their children). The base template is identified by
+`COPY --from` are kept in `~/.cache/opendango/files/<key>`, and the images of
+the qemu stages that others start from in `~/.cache/opendango/images/<key>`:
+both can be deleted at any time. `cache prune` deletes the images of this
+machine and, when the `XOA_*` variables are set, the intermediate templates
+of Xen Orchestra; it never deletes the `OUTPUT` templates. Not cached: the
+stages of plugins opendango does not know, a stage with a `BREAKPOINT`, a
+stage with an `ADD` of a URL without `--checksum` (and their children), a
+stage with a `FETCH` or a `RUN --local` (always built; its children can be
+cached). The base template is identified by
 the name in `FROM`: after replacing it under the same name, use `--no-cache`.
 In a cached plugin stage, `--on-error=ask` does not offer to retry an
 instruction: use `--no-cache` to fix a build by hand.
