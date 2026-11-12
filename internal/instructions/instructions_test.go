@@ -27,7 +27,7 @@ func parse(t *testing.T, src string) *parser.Command {
 // expander expands with V=val and removes quotes, like the plan does.
 func expander() Expander {
 	lex := shell.NewLex('\\')
-	env := shell.EnvsFromSlice([]string{"V=val"})
+	env := shell.EnvsFromSlice([]string{"V=val", "N=2"})
 	return func(w string) (string, error) {
 		res, err := lex.ProcessWordWithMatches(w, env)
 		return res.Result, err
@@ -195,12 +195,60 @@ func TestParseRun(t *testing.T) {
 		{"RUN <<EOF\necho a\necho b\nEOF", "echo a\necho b\n", false, ""},
 		{"RUN cat > /f <<EOF\nx\nEOF", "cat > /f <<EOF\nx\nEOF\n", false, ""},
 		{"RUN --mount=type=cache echo", "", false, "unknown flag"},
+		{"RUN --retries=x echo", "", false, "invalid number of retries"},
+		{"RUN --retries=-1 echo", "", false, "invalid number of retries"},
+		{"RUN --timeout=0s echo", "", false, "invalid timeout"},
+		{"RUN --local=yes echo", "", false, "takes no value"},
 	}
 	for _, tt := range tests {
-		got, err := ParseRun(parse(t, tt.src))
+		got, err := ParseRun(parse(t, tt.src), expander())
 		if checkErr(t, tt.src, err, tt.err) && (got.Script != tt.want || got.Exec != tt.exec) {
 			t.Errorf("%q: got script %q (exec %v), want %q (exec %v)", tt.src, got.Script, got.Exec, tt.want, tt.exec)
 		}
+	}
+	got, err := ParseRun(parse(t, "RUN --local --retries=${N} --timeout=90s ./notify.sh"), expander())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := (Run{Pos: Pos{1}, Script: "./notify.sh", Local: true, Retry: Retry{Retries: 2, Timeout: 90 * time.Second}}); !reflect.DeepEqual(*got, want) {
+		t.Errorf("got %+v, want %+v", *got, want)
+	}
+}
+
+func TestParseFetch(t *testing.T) {
+	tests := []struct {
+		src  string
+		want *Fetch
+		err  string
+	}{
+		{"FETCH /var/log/a.log logs/", &Fetch{Pos{1}, []string{"/var/log/a.log"}, "logs/"}, ""},
+		{"FETCH etc/os-release ../x/../${V} out", &Fetch{Pos{1}, []string{"/etc/os-release", "/val"}, "out"}, ""},
+		{"FETCH /a /tmp/out", &Fetch{Pos{1}, []string{"/a"}, "/tmp/out"}, ""},
+		{"FETCH /a .", &Fetch{Pos{1}, []string{"/a"}, "."}, ""},
+		{"FETCH /a", nil, "at least one source"},
+		{"FETCH /var/*.log out", nil, "patterns are not supported"},
+		{"FETCH / out", nil, "whole machine"},
+		{"FETCH /a ../out", nil, "outside the Dangofile directory"},
+		{"FETCH --x /a out", nil, "unknown flag"},
+	}
+	for _, tt := range tests {
+		got, err := ParseFetch(parse(t, tt.src), expander())
+		if checkErr(t, tt.src, err, tt.err) && !reflect.DeepEqual(got, tt.want) {
+			t.Errorf("%q: got %+v, want %+v", tt.src, got, tt.want)
+		}
+	}
+}
+
+func TestProvisionRetry(t *testing.T) {
+	p := &Provision{Settings: map[string]string{"playbook_file": "p.yml", "max_retries": "3", "timeout": "5m"}}
+	if err := ProvisionRetry(p); err != nil {
+		t.Fatal(err)
+	}
+	if want := (Retry{Retries: 3, Timeout: 5 * time.Minute}); p.Retry != want || len(p.Settings) != 1 {
+		t.Errorf("got %+v, settings %v", p.Retry, p.Settings)
+	}
+	if err := ProvisionRetry(&Provision{Settings: map[string]string{"timeout": "soon"}}); err == nil || !strings.Contains(err.Error(), "PROVISION: invalid timeout") {
+		t.Errorf("error = %v", err)
 	}
 }
 

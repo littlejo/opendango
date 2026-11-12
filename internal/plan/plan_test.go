@@ -5,6 +5,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/littlejo/opendango/internal/instructions"
 	"github.com/littlejo/opendango/internal/parser"
@@ -141,6 +142,9 @@ func TestErrors(t *testing.T) {
 		{"FROM --ram=1G xo://t", "Dangofile:1: xo: unknown flag --ram"},
 		{"FROM xo://t\nRUN x", "Dangofile:2: RUN needs a connection to the VM"},
 		{"FROM xo://t\nCOPY a b", "Dangofile:2: COPY needs a connection"},
+		{"FROM xo://t\nFETCH /a b", "Dangofile:2: FETCH needs a connection"},
+		{"FROM xo://t\nRUN --local x", "Dangofile:2: RUN needs a connection"},
+		{"FROM xo://t\nCONNECT ssh --user=u\nPROVISION --max_retries=x plugin://ansible", "Dangofile:3: PROVISION: invalid number of retries"},
 		{"FROM xo://t\nWORKDIR /a", "Dangofile:2: WORKDIR needs a connection"},
 		{"FROM xo://t\nREBOOT", "Dangofile:2: REBOOT needs a connection"},
 		{"FROM xo://t\nBREAKPOINT", "Dangofile:2: BREAKPOINT needs a connection"},
@@ -420,11 +424,11 @@ func TestPostProcessors(t *testing.T) {
 // TestProvision checks the planning of PROVISION: a step that needs the
 // connection, with its dango.yaml section under its flags.
 func TestProvision(t *testing.T) {
-	settings, err := LoadSettings(writeSettings(t, "ansible:\n  user: root\n  playbook_file: default.yml\n"))
+	settings, err := LoadSettings(writeSettings(t, "ansible:\n  user: root\n  playbook_file: default.yml\n  max_retries: 2\n"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	res, err := parser.Parse(strings.NewReader("FROM xo://t\nCONNECT ssh --user=u\nPROVISION --playbook_file=site.yml plugin://ansible\n"))
+	res, err := parser.Parse(strings.NewReader("FROM xo://t\nCONNECT ssh --user=u\nPROVISION --playbook_file=site.yml --timeout=1m plugin://ansible\n"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -435,6 +439,10 @@ func TestProvision(t *testing.T) {
 	pr, ok := p.Stages[0].Steps[0].(*instructions.Provision)
 	if !ok || !reflect.DeepEqual(pr.Settings, map[string]string{"user": "root", "playbook_file": "site.yml"}) {
 		t.Errorf("steps %+v", p.Stages[0].Steps)
+	}
+	// max_retries and timeout are opendango's, also from dango.yaml.
+	if want := (instructions.Retry{Retries: 2, Timeout: time.Minute}); pr.Retry != want {
+		t.Errorf("retry %+v, want %+v", pr.Retry, want)
 	}
 	if _, err := build(t, "FROM plugin://qemu\nPROVISION plugin://ansible\n", nil); err == nil || !strings.Contains(err.Error(), "PROVISION needs a connection") {
 		t.Errorf("no connection: %v", err)

@@ -105,6 +105,27 @@ type Run struct {
 	Script string
 	// Exec is true for the exec (JSON) form, which SHELL does not change.
 	Exec bool
+	// Local runs the script on the machine that runs opendango, in the
+	// Dangofile directory (RUN --local), rather than in the VM.
+	Local bool
+	Retry
+}
+
+// Retry is how a step that fails is run again: up to Retries more times,
+// each attempt stopped after Timeout (0: no limit).
+type Retry struct {
+	Retries int
+	Timeout time.Duration
+}
+
+// Fetch copies files from the VM to the Dangofile directory:
+// FETCH <src>... <dest>.
+type Fetch struct {
+	Pos
+	// Sources are absolute paths in the VM.
+	Sources []string
+	// Dest is relative to the Dangofile directory (or absolute).
+	Dest string
 }
 
 // Label attaches metadata to the image: tags key=value on the template of
@@ -149,6 +170,9 @@ type Provision struct {
 	// Settings are its flags.
 	Source   string
 	Settings map[string]string
+	// Retry comes from the max_retries and timeout settings, which belong
+	// to opendango (Packer's core), not to the provisioner (ProvisionRetry).
+	Retry
 }
 
 // Reboot reboots the VM and waits for the connection to come back.
@@ -415,15 +439,21 @@ func ParseWorkdir(cmd *parser.Command, expand Expander) (*Workdir, error) {
 	return &Workdir{Pos: pos(cmd), Path: p}, nil
 }
 
-// ParseRun parses the shell, exec (JSON) and heredoc forms of RUN.
-func ParseRun(cmd *parser.Command) (*Run, error) {
-	if err := noFlags(cmd); err != nil {
+// ParseRun parses the shell, exec (JSON) and heredoc forms of
+// `RUN [--local] [--retries=N] [--timeout=DURATION]`.
+func ParseRun(cmd *parser.Command, expand Expander) (*Run, error) {
+	flags, err := parseFlags(cmd, expand, map[string]bool{"local": false, "retries": true, "timeout": true})
+	if err != nil {
 		return nil, err
 	}
 	if len(cmd.Args) == 0 {
 		return nil, fmt.Errorf("RUN requires a command")
 	}
 	run := &Run{Pos: pos(cmd)}
+	_, run.Local = flags["local"]
+	if run.Retry, err = parseRetry("RUN", flags["retries"], flags["timeout"]); err != nil {
+		return nil, err
+	}
 	switch {
 	case cmd.JSON:
 		quoted := make([]string, len(cmd.Args))
@@ -452,6 +482,70 @@ func ParseRun(cmd *parser.Command) (*Run, error) {
 		run.Script = cmd.Args[0]
 	}
 	return run, nil
+}
+
+// parseRetry reads a number of retries and a timeout; empty means none.
+func parseRetry(kw, retries, timeout string) (Retry, error) {
+	var r Retry
+	if retries != "" {
+		n, err := strconv.Atoi(retries)
+		if err != nil || n < 0 {
+			return r, fmt.Errorf("%s: invalid number of retries %q", kw, retries)
+		}
+		r.Retries = n
+	}
+	if timeout != "" {
+		d, err := time.ParseDuration(timeout)
+		if err != nil || d <= 0 {
+			return r, fmt.Errorf("%s: invalid timeout %q", kw, timeout)
+		}
+		r.Timeout = d
+	}
+	return r, nil
+}
+
+// ProvisionRetry moves the max_retries and timeout settings of a
+// PROVISION, which belong to opendango as they belong to Packer's core, from
+// its settings to its Retry.
+func ProvisionRetry(p *Provision) error {
+	retries, timeout := p.Settings["max_retries"], p.Settings["timeout"]
+	delete(p.Settings, "max_retries")
+	delete(p.Settings, "timeout")
+	var err error
+	p.Retry, err = parseRetry("PROVISION", retries, timeout)
+	return err
+}
+
+// ParseFetch parses `FETCH <src>... <dest>`: paths in the VM (from its
+// root, like COPY --from) to a path of the Dangofile directory.
+func ParseFetch(cmd *parser.Command, expand Expander) (*Fetch, error) {
+	if err := noFlags(cmd); err != nil {
+		return nil, err
+	}
+	args, err := expandAll(cmd.Args, expand)
+	if err != nil {
+		return nil, fmt.Errorf("FETCH: %w", err)
+	}
+	if len(args) < 2 {
+		return nil, fmt.Errorf("FETCH requires at least one source and a destination")
+	}
+	f := &Fetch{Pos: pos(cmd), Sources: args[:len(args)-1], Dest: args[len(args)-1]}
+	for i, src := range f.Sources {
+		if strings.ContainsAny(src, "*?[") {
+			return nil, fmt.Errorf("FETCH: %s: patterns are not supported, give the paths", src)
+		}
+		f.Sources[i] = path.Clean("/" + src)
+		if f.Sources[i] == "/" {
+			return nil, fmt.Errorf("FETCH: the whole machine (/) cannot be fetched")
+		}
+	}
+	if f.Dest == "" {
+		return nil, fmt.Errorf("FETCH: empty destination")
+	}
+	if !filepath.IsAbs(f.Dest) && !filepath.IsLocal(filepath.FromSlash(strings.TrimSuffix(f.Dest, "/"))) && strings.TrimSuffix(f.Dest, "/") != "." {
+		return nil, fmt.Errorf("FETCH: %q is outside the Dangofile directory (use an absolute path)", f.Dest)
+	}
+	return f, nil
 }
 
 // LabelReservedPrefix starts the cache tags: no label key may start with it.

@@ -59,7 +59,7 @@ type Stage struct {
 	// nil when no instruction needs a connection.
 	Connect *instructions.Connect
 	// Steps run in order: *Arg, *Env, *User, *Shell, *Workdir, *Run, *Copy,
-	// *Add, *Reboot, *Breakpoint.
+	// *Add, *Fetch, *Reboot, *Breakpoint, *Provision.
 	Steps []instructions.Instruction
 	// Outputs run after all steps, once the VM is stopped.
 	Outputs []*instructions.Output
@@ -253,6 +253,23 @@ func (s *Stage) known() *packer.Known {
 // IsPacker tells whether a Packer plugin builds the stage
 // (FROM plugin://...).
 func (s *Stage) IsPacker() bool { return s.Root().From.Builder == "plugin" }
+
+// HostEffects tells whether the stage changes the machine that runs
+// opendango (RUN --local, FETCH): such a stage is always built, the cache
+// would skip them.
+func (s *Stage) HostEffects() bool {
+	for _, step := range s.Steps {
+		switch st := step.(type) {
+		case *instructions.Run:
+			if st.Local {
+				return true
+			}
+		case *instructions.Fetch:
+			return true
+		}
+	}
+	return false
+}
 
 // TemplateOutput returns the stage's OUTPUT --as=template, or nil.
 func (s *Stage) TemplateOutput() *instructions.Output {
@@ -522,7 +539,7 @@ func BuildSettings(file string, res *parser.Result, buildArgs map[string]string,
 			}
 			stage.Steps = append(stage.Steps, sh)
 
-		case "WORKDIR", "RUN", "COPY", "ADD", "REBOOT", "BREAKPOINT", "PROVISION":
+		case "WORKDIR", "RUN", "COPY", "ADD", "FETCH", "REBOOT", "BREAKPOINT", "PROVISION":
 			if stage.Connect == nil {
 				return fail(line, needsConnect(cmd.Keyword, stage))
 			}
@@ -534,7 +551,7 @@ func BuildSettings(file string, res *parser.Result, buildArgs map[string]string,
 			case "WORKDIR":
 				step, err = instructions.ParseWorkdir(cmd, expand)
 			case "RUN":
-				step, err = instructions.ParseRun(cmd)
+				step, err = instructions.ParseRun(cmd, expand)
 			case "COPY":
 				var c *instructions.Copy
 				if c, err = instructions.ParseCopy(cmd, expand); err == nil && c.From != "" {
@@ -543,6 +560,8 @@ func BuildSettings(file string, res *parser.Result, buildArgs map[string]string,
 				step = c
 			case "ADD":
 				step, err = instructions.ParseAdd(cmd, expand)
+			case "FETCH":
+				step, err = instructions.ParseFetch(cmd, expand)
 			case "REBOOT":
 				step, err = instructions.ParseReboot(cmd)
 			case "BREAKPOINT":
@@ -551,6 +570,9 @@ func BuildSettings(file string, res *parser.Result, buildArgs map[string]string,
 				var pr *instructions.Provision
 				if pr, err = instructions.ParseProvision(cmd, expand); err == nil {
 					pr.Settings, err = withSection(settings, usedSections, pr.Source, pr.Settings, res.EscapeToken, expand)
+				}
+				if err == nil {
+					err = instructions.ProvisionRetry(pr)
 				}
 				step = pr
 			}

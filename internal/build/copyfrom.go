@@ -18,16 +18,25 @@ import (
 )
 
 // fetch copies the paths that later stages COPY --from this one out of the
-// machine, before it stops: tar runs as root in the machine and its stream
-// is extracted under root (the machine's / is root). The same code works
-// through SSH and through a plugin's communicator.
+// machine, before it stops, under root (the machine's / is root).
 func (e *executor) fetch(ctx context.Context, stage *plan.Stage, root string) error {
 	if len(stage.Fetch) == 0 {
 		return nil
 	}
 	e.say("Fetching %s for COPY --from=%s", strings.Join(stage.Fetch, " "), stage.Name())
-	rel := make([]string, len(stage.Fetch))
-	for i, p := range stage.Fetch {
+	if err := e.tarFrom(ctx, stage.Fetch, root); err != nil {
+		return fmt.Errorf("fetching %s for COPY --from: %w", strings.Join(stage.Fetch, " "), err)
+	}
+	return nil
+}
+
+// tarFrom copies absolute paths out of the machine: tar runs as root in
+// the machine and its stream is extracted under root (the machine's / is
+// root). The same code works through SSH and through a plugin's
+// communicator.
+func (e *executor) tarFrom(ctx context.Context, paths []string, root string) error {
+	rel := make([]string, len(paths))
+	for i, p := range paths {
 		rel[i] = instructions.ShellQuote(strings.TrimPrefix(p, "/"))
 	}
 	cmd := e.asRoot("tar -C / -cf - -- " + strings.Join(rel, " "))
@@ -50,10 +59,7 @@ func (e *executor) fetch(ctx context.Context, stage *plan.Stage, root string) er
 	if xerr := <-extracted; err == nil {
 		err = xerr
 	}
-	if err != nil {
-		return fmt.Errorf("fetching %s for COPY --from: %w", strings.Join(stage.Fetch, " "), err)
-	}
-	return nil
+	return err
 }
 
 // untar extracts a tar stream under root: directories, regular files and
