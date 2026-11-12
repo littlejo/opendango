@@ -2,9 +2,7 @@ package packer
 
 import (
 	"fmt"
-	"path/filepath"
 	"sort"
-	"strings"
 
 	"github.com/hashicorp/hcl/v2/hcldec"
 )
@@ -90,15 +88,13 @@ func Reserved(source, name string) string {
 // layout (github.com/<owner>/<name>/): developer.hashicorp.com for the
 // official plugins, the GitHub repository for the others; "" otherwise.
 func DocURL(pl *Plugin) string {
-	parts := strings.Split(filepath.ToSlash(pl.Path), "/")
-	for i := 0; i+3 < len(parts); i++ {
-		if parts[i] != "github.com" || parts[i+2] != pl.Name {
-			continue
-		}
-		if parts[i+1] == "hashicorp" {
-			return "https://developer.hashicorp.com/packer/integrations/hashicorp/" + pl.Name
-		}
-		return "https://github.com/" + parts[i+1] + "/packer-plugin-" + pl.Name
+	src, ok := SourceOf(pl)
+	switch {
+	case !ok:
+		return ""
+	case src.Owner == "hashicorp":
+		return "https://developer.hashicorp.com/packer/integrations/hashicorp/" + pl.Name
+	default:
+		return "https://github.com/" + src.repo()
 	}
-	return ""
 }

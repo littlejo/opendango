@@ -69,7 +69,7 @@ go install github.com/littlejo/opendango/cmd/opendango@latest
 Then, next to the Dangofile:
 
 ```sh
-opendango plugin pull qemu    # install the official QEMU plugin
+opendango plugin pull         # install the plugins of the Dangofile (QEMU), their versions in dango.lock
 opendango init                # write dango.yaml with every setting of its plugins, commented out
 $EDITOR dango.yaml            # uncomment and fill what you need
 opendango validate            # the plugin checks the settings, without building
@@ -372,6 +372,42 @@ opendango plugin rm qemu@1.1.7                       # remove an installed versi
   forks). Without a token, the GitHub search API allows 10 requests a minute:
   set `GITHUB_TOKEN` to raise the limits.
 
+#### Locking the versions (`dango.lock`)
+
+```sh
+opendango plugin pull                # install the plugins of the Dangofile, write dango.lock
+opendango plugin pull --upgrade      # move them to their latest release
+```
+
+Without a name, `plugin pull` installs the plugins that the Dangofile uses
+(`FROM`, `PROVISION`, `OUTPUT` and `DATA` with `plugin://`) and writes their
+versions to `dango.lock`, next to the Dangofile:
+
+```yaml
+plugins:
+  qemu:
+    source: github.com/hashicorp/qemu
+    version: 1.1.4
+    hashes:
+      linux_amd64: 3f2a…
+```
+
+- Commit it. While it exists, `build` and `validate` only use the plugins it
+  lists, at their version, and check the sha256 of their binary: a plugin
+  that is missing, at another version or modified is an error that says to
+  run `opendango plugin pull`.
+- A locked plugin stays at its version; a new one gets its latest release;
+  `--upgrade` moves all of them to their latest release. A plugin the
+  Dangofile does not use anymore leaves the file.
+- The hashes are those of the binaries, one per platform (`linux_amd64`,
+  `darwin_arm64`): run `opendango plugin pull` once on each platform that
+  builds, and commit the result.
+- The plugin of a source type (`amazon-ebs`) is the installed one, or else
+  the registry's plugin of the longest name it starts with (`amazon-ebs`,
+  then `amazon`). For a plugin with an unusual name, pull its source first
+  (`opendango plugin pull github.com/<owner>/<name>`), then `opendango plugin
+  pull`.
+
 ### Builders opendango knows
 
 A plugin sets its artifact with its own settings, which opendango does not
@@ -641,6 +677,7 @@ opendango build --on-error=ask  # on failure: retry the instruction, clean up or
 opendango fmt -w                # rewrite the Dangofile in its canonical layout
 opendango fmt --check           # exit 1 if it is not formatted (CI)
 opendango plugin pull|search|list|describe|rm
+opendango plugin pull [--upgrade]  # the plugins of the Dangofile, versions in dango.lock
 opendango cache prune [--older-than=DURATION] [--dry-run]
 ```
 

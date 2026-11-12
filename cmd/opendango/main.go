@@ -166,6 +166,11 @@ func (c *commonFlags) allBuildArgs() (buildArgs, error) {
 	return args, nil
 }
 
+// lockPath is the dango.lock next to the Dangofile.
+func lockPath(c *commonFlags) string {
+	return filepath.Join(filepath.Dir(c.file), packer.LockFile)
+}
+
 // loadSettings reads --config, or dango.yaml next to the Dangofile when it
 // exists (nil otherwise).
 func loadSettings(c *commonFlags) (*plan.Settings, error) {
@@ -212,10 +217,16 @@ func cmdValidate(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "opendango validate: unexpected argument %q\n", fs.Arg(0))
 		return 2
 	}
+	lock, err := packer.ReadLock(lockPath(c))
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
+	}
+	finders := build.NewFinders(lock)
 	var data plan.DataFunc
 	if !*offline {
 		// The data sources read, they create nothing.
-		data = build.Data(context.Background(), filepath.Dir(c.file), stderr, nil)
+		data = build.Data(context.Background(), filepath.Dir(c.file), stderr, finders.Datasource)
 	}
 	p, err := loadPlan(c, data)
 	if err != nil {
@@ -227,7 +238,7 @@ func cmdValidate(args []string, stdout, stderr io.Writer) int {
 	}
 	if !*offline {
 		// The plugins check their settings (Prepare creates nothing).
-		warnings, err := build.CheckPlugins(context.Background(), p, filepath.Dir(c.file), nil)
+		warnings, err := build.CheckPlugins(context.Background(), p, filepath.Dir(c.file), finders)
 		for _, w := range warnings {
 			fmt.Fprintf(stderr, "warning: %s\n", w)
 		}
@@ -267,9 +278,15 @@ func cmdBuild(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "opendango build: --on-error=ask needs a terminal\n")
 		return 2
 	}
+	lock, err := packer.ReadLock(lockPath(c))
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
+	}
+	finders := build.NewFinders(lock)
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	p, err := loadPlan(c, build.Data(ctx, filepath.Dir(c.file), stdout, nil))
+	p, err := loadPlan(c, build.Data(ctx, filepath.Dir(c.file), stdout, finders.Datasource))
 	if err != nil {
 		fmt.Fprintln(stderr, err)
 		return 1
@@ -286,6 +303,10 @@ func cmdBuild(args []string, stdout, stderr io.Writer) int {
 		Jobs:        *jobs,
 		NoCache:     *noCache,
 		Out:         stdout,
+
+		FindPlugin:        finders.Builder,
+		FindProvisioner:   finders.Provisioner,
+		FindPostProcessor: finders.PostProcessor,
 	}
 	// BREAKPOINT and --on-error=ask wait for input only when someone can
 	// type it.
@@ -418,11 +439,16 @@ func cmdCache(args []string, stdout, stderr io.Writer) int {
 }
 
 const pluginUsage = `Usage:
+  opendango plugin pull [-f Dangofile] [--config=dango.yaml] [--upgrade]
   opendango plugin pull <name|github.com/owner/name>[@version]...
   opendango plugin search <term>
   opendango plugin list
   opendango plugin describe <source> [--search <text>]
   opendango plugin rm <name|github.com/owner/name>[@version]...
+
+Without a name, pull installs the plugins of the Dangofile and writes their
+versions to ` + packer.LockFile + ` next to it: the builds then use these versions
+only. --upgrade moves them to the latest release.
 
 A name is the official HashiCorp plugin of that name, or else the only
 GitHub repository named packer-plugin-<name>. Plugins are installed in
@@ -449,6 +475,8 @@ func cmdPlugin(args []string, stdout, stderr io.Writer) int {
 	case cmd == "describe":
 		return pluginDescribe(args, stdout, stderr)
 	case cmd == "search" && len(args) == 1:
+	case cmd == "pull" && (len(args) == 0 || strings.HasPrefix(args[0], "-")):
+		return pluginPullLock(args, stdout, stderr)
 	case (cmd == "pull" || cmd == "rm") && len(args) > 0:
 	default:
 		fmt.Fprint(stderr, pluginUsage)
@@ -473,6 +501,51 @@ func cmdPlugin(args []string, stdout, stderr io.Writer) int {
 			return 1
 		}
 	}
+	return 0
+}
+
+// pluginPullLock installs the plugins of a Dangofile and writes its lock
+// file.
+func pluginPullLock(args []string, stdout, stderr io.Writer) int {
+	fs, c := newFlagSet("plugin pull", stderr)
+	upgrade := fs.Bool("upgrade", false, "install the latest version of every plugin, not the locked one")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if fs.NArg() > 0 {
+		fmt.Fprintf(stderr, "opendango plugin pull: give plugin names or flags, not both\n")
+		return 2
+	}
+	p, err := loadPlan(c, nil)
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
+	}
+	lock, err := packer.ReadLock(lockPath(c))
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
+	}
+	if lock == nil {
+		lock = &packer.Lock{File: lockPath(c)}
+	}
+	reg, err := packer.NewRegistry()
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	installed := packer.Discover(packer.SearchDirs(), filepath.SplitList(os.Getenv("PATH")))
+	if err := reg.Pull(ctx, lock, p.Plugins(), *upgrade, installed, stdout); err != nil {
+		fmt.Fprintf(stderr, "opendango plugin pull: %v\n", err)
+		return 1
+	}
+	if err := lock.Write(); err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
+	}
+	fmt.Fprintf(stdout, "Wrote %s\n", lock.File)
 	return 0
 }
 

@@ -4,9 +4,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"os"
-	"path/filepath"
-	"slices"
 	"sort"
 	"strings"
 
@@ -18,19 +15,7 @@ import (
 // FindDatasource looks for the plugin of a data source type (amazon-ami,
 // http) like FindPlugin, and checks that it has it.
 func FindDatasource(ctx context.Context, source string) (*packer.Plugin, string, error) {
-	plugins := packer.Discover(packer.SearchDirs(), filepath.SplitList(os.Getenv("PATH")))
-	pl, name, err := packer.Find(plugins, source)
-	if err != nil {
-		return nil, "", err
-	}
-	d, err := pl.Describe(ctx)
-	if err != nil {
-		return nil, "", err
-	}
-	if !slices.Contains(d.Datasources, name) {
-		return nil, "", fmt.Errorf("plugin: %s has no data source %q (data sources: %s)", pl.Path, name, strings.Join(d.Datasources, ", "))
-	}
-	return pl, name, nil
+	return findComponent(ctx, nil, "data source", source)
 }
 
 // Data returns the plan.DataFunc that runs the DATA instructions with the

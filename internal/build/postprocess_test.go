@@ -248,7 +248,7 @@ func TestCheckPostProcessors(t *testing.T) {
 		{"OUTPUT --output=x plugin://opendangotest-nothing", ""},
 	} {
 		p := mustPlan(t, "FROM xo://t\n"+tt.out+"\n")
-		warnings, err := CheckPlugins(context.Background(), p, t.TempDir(), nil)
+		warnings, err := CheckPlugins(context.Background(), p, t.TempDir(), Finders{})
 		if (tt.err == "") != (err == nil) || (err != nil && !strings.Contains(err.Error(), tt.err)) {
 			t.Errorf("%s: err = %v, want %q", tt.out, err, tt.err)
 		}

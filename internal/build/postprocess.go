@@ -18,7 +18,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -41,19 +40,7 @@ type made struct {
 // FindPostProcessor looks for the plugin of a post-processor type (vagrant,
 // docker-import) like FindPlugin, and checks that it has it.
 func FindPostProcessor(ctx context.Context, source string) (*packer.Plugin, string, error) {
-	plugins := packer.Discover(packer.SearchDirs(), filepath.SplitList(os.Getenv("PATH")))
-	pl, name, err := packer.Find(plugins, source)
-	if err != nil {
-		return nil, "", err
-	}
-	d, err := pl.Describe(ctx)
-	if err != nil {
-		return nil, "", err
-	}
-	if !slices.Contains(d.PostProcessors, name) {
-		return nil, "", fmt.Errorf("plugin: %s has no post-processor %q (post-processors: %s)", pl.Path, name, strings.Join(d.PostProcessors, ", "))
-	}
-	return pl, name, nil
+	return findComponent(ctx, nil, "post-processor", source)
 }
 
 // postProcess runs the post-processors of a stage, in the order of the

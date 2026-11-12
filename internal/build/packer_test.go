@@ -400,7 +400,7 @@ func TestCheckPlugins(t *testing.T) {
 		{"child", "FROM --root=" + root + " plugin://xenorchestra AS base\nFROM --root=" + root + " base AS app\n", "", ""},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			warnings, err := CheckPlugins(context.Background(), mustPlan(t, tt.src), t.TempDir(), find)
+			warnings, err := CheckPlugins(context.Background(), mustPlan(t, tt.src), t.TempDir(), Finders{Builder: find})
 			if (tt.err == "") != (err == nil) || (err != nil && !strings.Contains(err.Error(), tt.err)) {
 				t.Errorf("err = %v, want %q", err, tt.err)
 			}
@@ -487,7 +487,7 @@ func TestPackerParentSettings(t *testing.T) {
 	}
 
 	// validate checks the child with placeholders.
-	if _, err := CheckPlugins(context.Background(), p, ctxDir, testPlugin(t)); err != nil {
+	if _, err := CheckPlugins(context.Background(), p, ctxDir, Finders{Builder: testPlugin(t)}); err != nil {
 		t.Errorf("CheckPlugins: %v", err)
 	}
 }

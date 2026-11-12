@@ -18,9 +18,16 @@ import (
 // (with the closest one), then the builder's Prepare, which checks the
 // configuration without creating anything. A plugin that is not installed
 // only gives a warning: the stage is not checked.
-func CheckPlugins(ctx context.Context, p *plan.Plan, contextDir string, find FindPluginFunc) (warnings []string, err error) {
+func CheckPlugins(ctx context.Context, p *plan.Plan, contextDir string, f Finders) (warnings []string, err error) {
+	find := f.Builder
 	if find == nil {
 		find = FindPlugin
+	}
+	if f.PostProcessor == nil {
+		f.PostProcessor = FindPostProcessor
+	}
+	if f.Provisioner == nil {
+		f.Provisioner = FindProvisioner
 	}
 	specs := map[string]map[string]bool{}
 	var errs []error
@@ -32,7 +39,7 @@ func CheckPlugins(ctx context.Context, p *plan.Plan, contextDir string, find Fin
 			}
 			cfg, err := packer.ParseConfig(out.Source, out.Settings)
 			if err == nil {
-				pl, name, ferr := FindPostProcessor(ctx, cfg.Component)
+				pl, name, ferr := f.PostProcessor(ctx, cfg.Component)
 				if ferr != nil {
 					warnings = append(warnings, fmt.Sprintf("stage %s: plugin://%s is not checked: %v", stage.Name(), cfg.Component, ferr))
 					continue
@@ -52,7 +59,7 @@ func CheckPlugins(ctx context.Context, p *plan.Plan, contextDir string, find Fin
 			}
 			cfg, err := packer.ParseConfig(pr.Source, pr.Settings)
 			if err == nil {
-				pl, name, ferr := FindProvisioner(ctx, cfg.Component)
+				pl, name, ferr := f.Provisioner(ctx, cfg.Component)
 				if ferr != nil {
 					warnings = append(warnings, fmt.Sprintf("stage %s: plugin://%s is not checked: %v", stage.Name(), cfg.Component, ferr))
 					continue
