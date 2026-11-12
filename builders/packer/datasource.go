@@ -4,10 +4,13 @@ import (
 	"fmt"
 
 	"github.com/zclconf/go-cty/cty"
+	ctyjson "github.com/zclconf/go-cty/cty/json"
 )
 
 // Datasource runs a data source of a plugin (Configure, then Execute) and
-// returns the string attributes of its output object.
+// returns the attributes of its output object as text: strings as they
+// are, numbers and booleans as written in HCL, lists, maps and objects as
+// JSON. Null and unknown attributes are left out.
 func Datasource(pl *Plugin, name, dir string, configs ...map[string]any) (map[string]string, error) {
 	p, err := start(pl, "datasource", name, dir)
 	if err != nil {
@@ -31,8 +34,22 @@ func Datasource(pl *Plugin, name, dir string, configs ...map[string]any) (map[st
 	}
 	out := map[string]string{}
 	for k, attr := range v.AsValueMap() {
-		if attr.IsKnown() && !attr.IsNull() && attr.Type() == cty.String {
+		if !attr.IsWhollyKnown() || attr.IsNull() {
+			continue
+		}
+		switch attr.Type() {
+		case cty.String:
 			out[k] = attr.AsString()
+		case cty.Number:
+			out[k] = attr.AsBigFloat().Text('f', -1)
+		case cty.Bool:
+			out[k] = fmt.Sprint(attr.True())
+		default:
+			b, err := ctyjson.Marshal(attr, attr.Type())
+			if err != nil {
+				return nil, fmt.Errorf("plugin: %s datasource %s: output %s: %w", pl.Name, name, k, err)
+			}
+			out[k] = string(b)
 		}
 	}
 	return out, nil

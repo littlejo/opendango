@@ -143,6 +143,9 @@ func TestErrors(t *testing.T) {
 		{"FROM xo://t\nRUN x", "Dangofile:2: RUN needs a connection to the VM"},
 		{"FROM xo://t\nCOPY a b", "Dangofile:2: COPY needs a connection"},
 		{"FROM xo://t\nFETCH /a b", "Dangofile:2: FETCH needs a connection"},
+		{"FROM xo://t\nDATA plugin://http AS p", "Dangofile:2: DATA must come before the first FROM"},
+		{"DATA plugin://http AS p\nDATA plugin://http AS p\nFROM xo://t", "Dangofile:2: DATA p already defined at line 1"},
+		{"RUN x\nFROM xo://t", "Dangofile:1: RUN before FROM: only ARG and DATA"},
 		{"FROM xo://t\nOUTPUT --as=template\nOUTPUT --chain --format=manifest m", "Dangofile:3: OUTPUT --chain needs an earlier post-processor"},
 		{"FROM xo://t\nOUTPUT --keep_input_artifact=x plugin://vagrant", "Dangofile:2: OUTPUT: invalid keep_input_artifact"},
 		{"FROM xo://t\nRUN --local x", "Dangofile:2: RUN needs a connection"},
@@ -420,6 +423,39 @@ func TestPostProcessors(t *testing.T) {
 	}
 	if got := p.Stages[0].Outputs[0].Settings; !reflect.DeepEqual(got, map[string]string{"compression_level": "9", "output": "dist/.box"}) {
 		t.Errorf("settings %v", got)
+	}
+}
+
+// TestData checks that the outputs of DATA are global ARGs, and that
+// without a DataFunc they are unset with a warning.
+func TestData(t *testing.T) {
+	src := "DATA --url=https://x plugin://http AS page\nFROM xo://t-${page_body}\nARG page_body\n"
+	res, err := parser.Parse(strings.NewReader(src))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got *instructions.Data
+	data := func(d *instructions.Data) (map[string]string, error) {
+		got = d
+		return map[string]string{"body": "tmpl"}, nil
+	}
+	p, err := BuildData("Dangofile", res, nil, nil, data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got == nil || got.Source != "http" || got.Settings["url"] != "https://x" || got.Name != "page" {
+		t.Errorf("data got %+v", got)
+	}
+	if s := p.Stages[0]; s.From.Source != "t-tmpl" || s.Steps[0].(*instructions.Arg).Value != "tmpl" {
+		t.Errorf("stage %+v %+v", s.From, s.Steps[0])
+	}
+	// Offline: not run.
+	p, err = BuildData("Dangofile", res, nil, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(p.Warnings) == 0 || !strings.Contains(p.Warnings[0], "Dangofile:1: DATA plugin://http is not run: the page_* variables are unset") {
+		t.Errorf("warnings %q", p.Warnings)
 	}
 }
 

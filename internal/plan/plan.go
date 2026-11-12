@@ -28,6 +28,8 @@ type Plan struct {
 	// Builtins are the values of the builtin variables of this build
 	// (DANGO_TIMESTAMP…), --build-arg ones included.
 	Builtins map[string]string
+	// Data are the DATA instructions, in file order.
+	Data []*instructions.Data
 }
 
 // Stage is everything between a FROM and the next FROM (or the end of the
@@ -336,8 +338,19 @@ func Build(file string, res *parser.Result, buildArgs map[string]string) (*Plan,
 }
 
 // BuildSettings is Build with the plugin settings of a dango.yaml file
-// (nil for none).
+// (nil for none). The DATA instructions are not run.
 func BuildSettings(file string, res *parser.Result, buildArgs map[string]string, settings *Settings) (*Plan, error) {
+	return BuildData(file, res, buildArgs, settings, nil)
+}
+
+// DataFunc runs the data source of a DATA instruction and returns its
+// outputs by name (lists and maps as JSON).
+type DataFunc func(d *instructions.Data) (map[string]string, error)
+
+// BuildData is BuildSettings that runs the DATA instructions with data: their
+// outputs become global ARGs. With a nil data, they are not run and their
+// variables are unset (validate --offline).
+func BuildData(file string, res *parser.Result, buildArgs map[string]string, settings *Settings, data DataFunc) (*Plan, error) {
 	p := &Plan{File: file}
 	usedSections := map[string]bool{}
 	lex := shell.NewLex(res.EscapeToken)
@@ -386,6 +399,7 @@ func BuildSettings(file string, res *parser.Result, buildArgs map[string]string,
 	}
 
 	byName := map[string]*Stage{}
+	dataNames := map[string]int{}
 	for _, cmd := range res.Commands {
 		line := cmd.StartLine
 		switch {
@@ -395,8 +409,8 @@ func BuildSettings(file string, res *parser.Result, buildArgs map[string]string,
 			return fail(line, fmt.Errorf("%s is not supported yet", cmd.Keyword))
 		}
 
-		if stage == nil && cmd.Keyword != "ARG" && cmd.Keyword != "FROM" {
-			return fail(line, fmt.Errorf("%s before FROM: only ARG can come before the first FROM", cmd.Keyword))
+		if stage == nil && cmd.Keyword != "ARG" && cmd.Keyword != "FROM" && cmd.Keyword != "DATA" {
+			return fail(line, fmt.Errorf("%s before FROM: only ARG and DATA can come before the first FROM", cmd.Keyword))
 		}
 
 		switch cmd.Keyword {
@@ -420,6 +434,40 @@ func BuildSettings(file string, res *parser.Result, buildArgs map[string]string,
 				if stage != nil {
 					stage.Steps = append(stage.Steps, a)
 				}
+			}
+
+		case "DATA":
+			if stage != nil {
+				return fail(line, fmt.Errorf("DATA must come before the first FROM: the data sources run before the build"))
+			}
+			d, err := instructions.ParseData(cmd, expand)
+			if err == nil {
+				d.Settings, err = withSection(settings, usedSections, d.Source, d.Settings, res.EscapeToken, expand)
+			}
+			if err != nil {
+				return fail(line, err)
+			}
+			if prev, dup := dataNames[d.Name]; dup {
+				return fail(line, fmt.Errorf("DATA %s already defined at line %d", d.Name, prev))
+			}
+			dataNames[d.Name] = line
+			p.Data = append(p.Data, d)
+			if data == nil {
+				p.Warnings = append(p.Warnings, fmt.Sprintf("%s:%d: DATA plugin://%s is not run: the %s_* variables are unset", file, line, d.Source, d.Name))
+				continue
+			}
+			outputs, err := data(d)
+			if err != nil {
+				return fail(line, fmt.Errorf("DATA plugin://%s: %w", d.Source, err))
+			}
+			for name, v := range outputs {
+				name = instructions.DataVar(d.Name, name)
+				if _, ok := buildArgs[name]; ok {
+					// --build-arg replaces it, like a builtin.
+					usedArgs[name] = true
+					v = buildArgs[name]
+				}
+				global[name] = v
 			}
 
 		case "FROM":

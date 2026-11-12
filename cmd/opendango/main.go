@@ -179,7 +179,9 @@ func loadSettings(c *commonFlags) (*plan.Settings, error) {
 	return plan.LoadSettings(path)
 }
 
-func loadPlan(c *commonFlags) (*plan.Plan, error) {
+// loadPlan reads the Dangofile and its settings; data runs the DATA
+// instructions (nil: not run).
+func loadPlan(c *commonFlags, data plan.DataFunc) (*plan.Plan, error) {
 	f, err := os.Open(c.file)
 	if err != nil {
 		return nil, err
@@ -197,12 +199,12 @@ func loadPlan(c *commonFlags) (*plan.Plan, error) {
 	if err != nil {
 		return nil, err
 	}
-	return plan.BuildSettings(c.file, res, args, settings)
+	return plan.BuildData(c.file, res, args, settings, data)
 }
 
 func cmdValidate(args []string, stdout, stderr io.Writer) int {
 	fs, c := newFlagSet("validate", stderr)
-	offline := fs.Bool("offline", false, "do not check the FROM flags of plugin:// stages with their plugins")
+	offline := fs.Bool("offline", false, "do not run the DATA instructions nor check the plugin settings with their plugins")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -210,7 +212,12 @@ func cmdValidate(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "opendango validate: unexpected argument %q\n", fs.Arg(0))
 		return 2
 	}
-	p, err := loadPlan(c)
+	var data plan.DataFunc
+	if !*offline {
+		// The data sources read, they create nothing.
+		data = build.Data(context.Background(), filepath.Dir(c.file), stderr, nil)
+	}
+	p, err := loadPlan(c, data)
 	if err != nil {
 		fmt.Fprintln(stderr, err)
 		return 1
@@ -260,7 +267,9 @@ func cmdBuild(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "opendango build: --on-error=ask needs a terminal\n")
 		return 2
 	}
-	p, err := loadPlan(c)
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	p, err := loadPlan(c, build.Data(ctx, filepath.Dir(c.file), stdout, nil))
 	if err != nil {
 		fmt.Fprintln(stderr, err)
 		return 1
@@ -284,8 +293,6 @@ func cmdBuild(args []string, stdout, stderr io.Writer) int {
 		opts.Stdin = os.Stdin
 	}
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
 	err = build.Run(ctx, p, opts)
 	if err != nil {
 		if errors.Is(err, context.Canceled) {
@@ -633,7 +640,7 @@ func cmdInit(args []string, stdout, stderr io.Writer) int {
 	}
 	if len(sources) == 0 {
 		// The plugin:// sources of the Dangofile.
-		p, err := loadPlan(c)
+		p, err := loadPlan(c, nil)
 		if err != nil {
 			fmt.Fprintln(stderr, err)
 			return 1

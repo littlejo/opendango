@@ -493,6 +493,27 @@ func TestParseProvision(t *testing.T) {
 	}
 }
 
+func TestParseData(t *testing.T) {
+	tests := []struct {
+		src  string
+		want *Data
+		err  string
+	}{
+		{`DATA --owners='["136693071363"]' --most_recent=true plugin://amazon-ami AS debian`, &Data{Pos: Pos{1}, Source: "amazon-ami", Name: "debian", Settings: map[string]string{"owners": `["136693071363"]`, "most_recent": "true"}}, ""},
+		{"DATA plugin://http --url=https://x/${V} as page", &Data{Pos: Pos{1}, Source: "http", Name: "page", Settings: map[string]string{"url": "https://x/val"}}, ""},
+		{"DATA plugin://http", nil, "requires plugin://<data source> AS <name>"},
+		{"DATA http AS x", nil, "requires plugin://<data source> AS <name>"},
+		{"DATA plugin://http AS my-page", nil, "invalid name"},
+		{"DATA --url plugin://http AS x", nil, "flag --url requires a value"},
+	}
+	for _, tt := range tests {
+		got, err := ParseData(parse(t, tt.src), expander())
+		if checkErr(t, tt.src, err, tt.err) && !reflect.DeepEqual(got, tt.want) {
+			t.Errorf("%q: got %+v, want %+v", tt.src, got, tt.want)
+		}
+	}
+}
+
 func TestShellQuote(t *testing.T) {
 	if got := ShellQuote("it's"); got != `'it'\''s'` {
 		t.Errorf("got %s", got)

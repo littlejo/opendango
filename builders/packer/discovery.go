@@ -166,6 +166,7 @@ type Description struct {
 	Builders       []string `json:"builders"`
 	PostProcessors []string `json:"post_processors"`
 	Provisioners   []string `json:"provisioners"`
+	Datasources    []string `json:"datasources"`
 }
 
 // Describe runs the plugin's describe command.
