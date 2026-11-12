@@ -110,7 +110,7 @@ func TestCheckProvisioners(t *testing.T) {
 		{"PROVISION --command=true plugin://opendangotest-shell", "Dangofile:3: plugin://opendangotest-shell: report is required"},
 	} {
 		p := mustPlan(t, "FROM xo://t\nCONNECT ssh --user=u\n"+tt.step+"\n")
-		_, err := CheckPlugins(context.Background(), p, t.TempDir(), nil)
+		_, err := CheckPlugins(context.Background(), p, t.TempDir(), Finders{})
 		if (tt.err == "") != (err == nil) || (err != nil && !strings.Contains(err.Error(), tt.err)) {
 			t.Errorf("%s: err = %v, want %q", tt.step, err, tt.err)
 		}

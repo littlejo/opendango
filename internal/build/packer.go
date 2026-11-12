@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -20,8 +21,35 @@ type FindPluginFunc func(ctx context.Context, source string) (*packer.Plugin, st
 // FindPlugin looks for the plugin in packer.SearchDirs and PATH, and checks
 // that it has the builder.
 func FindPlugin(ctx context.Context, source string) (*packer.Plugin, string, error) {
+	return findComponent(ctx, nil, "builder", source)
+}
+
+// Finders find the plugins of the components of a build. NewFinders(nil)
+// looks in the plugin directories and PATH; with a lock file, only at the
+// versions it gives, checking their hash.
+type Finders struct {
+	Builder, Provisioner, PostProcessor, Datasource FindPluginFunc
+}
+
+// NewFinders returns the Finders of a lock file (nil for none).
+func NewFinders(lock *packer.Lock) Finders {
+	f := func(kind string) FindPluginFunc {
+		return func(ctx context.Context, source string) (*packer.Plugin, string, error) {
+			return findComponent(ctx, lock, kind, source)
+		}
+	}
+	return Finders{Builder: f("builder"), Provisioner: f("provisioner"), PostProcessor: f("post-processor"), Datasource: f("data source")}
+}
+
+// findComponent finds the plugin of a source type (xenserver-iso, ansible)
+// and checks with describe that it has the component of that kind.
+func findComponent(ctx context.Context, lock *packer.Lock, kind, source string) (*packer.Plugin, string, error) {
 	plugins := packer.Discover(packer.SearchDirs(), filepath.SplitList(os.Getenv("PATH")))
-	pl, builder, err := packer.Find(plugins, source)
+	find := packer.Find
+	if lock != nil {
+		find = lock.Find
+	}
+	pl, name, err := find(plugins, source)
 	if err != nil {
 		return nil, "", err
 	}
@@ -29,12 +57,21 @@ func FindPlugin(ctx context.Context, source string) (*packer.Plugin, string, err
 	if err != nil {
 		return nil, "", err
 	}
-	for _, b := range d.Builders {
-		if b == builder {
-			return pl, builder, nil
-		}
+	var have []string
+	switch kind {
+	case "builder":
+		have = d.Builders
+	case "provisioner":
+		have = d.Provisioners
+	case "post-processor":
+		have = d.PostProcessors
+	case "data source":
+		have = d.Datasources
 	}
-	return nil, "", fmt.Errorf("plugin: %s has no builder %q (builders: %s)", pl.Path, builder, strings.Join(d.Builders, ", "))
+	if !slices.Contains(have, name) {
+		return nil, "", fmt.Errorf("plugin: %s has no %s %q (%ss: %s)", pl.Path, kind, name, kind, strings.Join(have, ", "))
+	}
+	return pl, name, nil
 }
 
 // runPackerStage builds a FROM plugin://<source> stage, or a stage that

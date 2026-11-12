@@ -9,7 +9,6 @@ import (
 	"os"
 	"path"
 	"path/filepath"
-	"slices"
 	"strings"
 
 	packersdk "github.com/hashicorp/packer-plugin-sdk/packer"
@@ -23,19 +22,7 @@ import (
 // FindProvisioner looks for the plugin of a provisioner type (ansible,
 // ansible-local) like FindPlugin, and checks that it has it.
 func FindProvisioner(ctx context.Context, source string) (*packer.Plugin, string, error) {
-	plugins := packer.Discover(packer.SearchDirs(), filepath.SplitList(os.Getenv("PATH")))
-	pl, name, err := packer.Find(plugins, source)
-	if err != nil {
-		return nil, "", err
-	}
-	d, err := pl.Describe(ctx)
-	if err != nil {
-		return nil, "", err
-	}
-	if !slices.Contains(d.Provisioners, name) {
-		return nil, "", fmt.Errorf("plugin: %s has no provisioner %q (provisioners: %s)", pl.Path, name, strings.Join(d.Provisioners, ", "))
-	}
-	return pl, name, nil
+	return findComponent(ctx, nil, "provisioner", source)
 }
 
 // provision runs PROVISION: a plugin's provisioner with the connection of

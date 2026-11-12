@@ -54,7 +54,7 @@ func TestUsage(t *testing.T) {
 	if code := run([]string{"cache", "prune", "--older-than=soon"}, &stdout, &stderr); code != 2 {
 		t.Errorf("cache prune --older-than=soon: exit %d", code)
 	}
-	for _, args := range [][]string{{"plugin"}, {"plugin", "search"}, {"plugin", "search", "a", "b"}, {"plugin", "pull"}, {"plugin", "rm"}, {"plugin", "list", "x"}, {"plugin", "nope"}, {"plugin", "describe"}, {"plugin", "describe", "a", "b"}} {
+	for _, args := range [][]string{{"plugin"}, {"plugin", "search"}, {"plugin", "search", "a", "b"}, {"plugin", "pull", "--nope"}, {"plugin", "pull", "--upgrade", "x"}, {"plugin", "rm"}, {"plugin", "list", "x"}, {"plugin", "nope"}, {"plugin", "describe"}, {"plugin", "describe", "a", "b"}} {
 		if code := run(args, &stdout, &stderr); code != 2 {
 			t.Errorf("%q: exit %d", args, code)
 		}

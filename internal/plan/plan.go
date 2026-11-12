@@ -256,6 +256,36 @@ func (s *Stage) known() *packer.Known {
 // (FROM plugin://...).
 func (s *Stage) IsPacker() bool { return s.Root().From.Builder == "plugin" }
 
+// Plugins returns the plugin source types of the plan (FROM plugin://,
+// PROVISION, OUTPUT plugin://, DATA), once each, in file order.
+func (p *Plan) Plugins() []string {
+	var sources []string
+	add := func(s string) {
+		if !slices.Contains(sources, s) {
+			sources = append(sources, s)
+		}
+	}
+	for _, d := range p.Data {
+		add(d.Source)
+	}
+	for _, s := range p.Stages {
+		if s.Parent == nil && s.IsPacker() {
+			add(s.From.Source)
+		}
+		for _, step := range s.Steps {
+			if pr, ok := step.(*instructions.Provision); ok {
+				add(pr.Source)
+			}
+		}
+		for _, out := range s.Outputs {
+			if out.Kind == instructions.OutputPlugin {
+				add(out.Source)
+			}
+		}
+	}
+	return sources
+}
+
 // HostEffects tells whether the stage changes the machine that runs
 // opendango (RUN --local, FETCH): such a stage is always built, the cache
 // would skip them.

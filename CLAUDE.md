@@ -112,6 +112,7 @@ opendango build    [-f Dangofile] [--config=dango.yaml] [--build-arg K[=V]]... [
 opendango validate [-f Dangofile] [--config=dango.yaml] [--build-arg K[=V]]... [--build-arg-file=F]... [--offline]
 opendango fmt      [-f Dangofile] [-w | --check]
 opendango cache prune [--older-than=DURATION] [--dry-run]
+opendango plugin pull [-f Dangofile] [--config=dango.yaml] [--upgrade]
 opendango plugin pull <name|github.com/owner/name>[@version]...
 opendango plugin search <term>
 opendango plugin list
@@ -132,6 +133,7 @@ opendango version
 - **Layout**: Packer's plugin directory (`PluginDir`: `$PACKER_CONFIG_DIR/plugins`, or `~/.config/packer/plugins`), `github.com/<owner>/<name>/`, like `packer plugins install`: the discovery finds them, and Packer and opendango share them. An installed version is kept as is. `rm` only touches that directory.
 - **search**: the official plugins whose name contains the term, then the GitHub repositories (`packer-plugin <term> fork:true in:name`) named `packer-plugin-*` with the term in the name, the most starred first; archived repositories and forks without a star are left out.
 - `GITHUB_TOKEN` is sent to the GitHub API only (never to the downloads). Without it, the search API allows 10 requests a minute: the error says so.
+- **Lock file** (`builders/packer/lock.go`): `plugin pull` without a name (`pluginPullLock`) collects the source types of the plan (`Plan.Plugins`: DATA, root `FROM plugin://`, PROVISION, `OUTPUT plugin://`; the plan is built without running DATA), maps each to a plugin (`Registry.sourceOf`: the locked plugin whose name it starts with, else the installed one with a source in Packer's layout (`SourceOf`), else `Resolve` of the longest `-`-prefix that exists, `ErrNoPlugin` meaning try shorter), installs it at its locked version (the latest when new or with `--upgrade`) and writes `dango.lock` next to the Dangofile: `plugins.<name>.{source, version, hashes.<os>_<arch>}`, the sha256 of the binary per platform (the other platforms' hashes stay while the version and source do). Plugins no source type uses leave it. When the file exists, `build` and `validate` find the plugins with `build.NewFinders(lock)` (`Lock.Find`): the plugin must be locked, installed at that version, with this platform's hash matching (computed once per path). `build.Finders` gather the four lookups (builder, provisioner, post-processor, data source: `findComponent` checks `describe`); `CheckPlugins` takes them.
 
 ## Architecture
 
@@ -143,7 +145,7 @@ internal/plan/              ARG/ENV scoping, variable expansion, stage-level rul
 internal/format/            opendango fmt: canonical layout of a Dangofile
 internal/build/             executor: runs a Plan with a Builder and a Communicator
 internal/communicator/ssh/  SSH commands and SFTP uploads
-builders/packer/            Packer plugins (plugin://): discovery, installation, protocol, known builders, data sources, post-processors
+builders/packer/            Packer plugins (plugin://): discovery, installation, lock file, protocol, known builders, data sources, post-processors
 builders/xo/                native Xen Orchestra builder (xo://)
 ```
 

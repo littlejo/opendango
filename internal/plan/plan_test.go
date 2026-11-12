@@ -596,3 +596,15 @@ func TestUnusedStageWarning(t *testing.T) {
 		t.Errorf("base is used by app, no warning expected: %q", p.Warnings)
 	}
 }
+
+func TestPlugins(t *testing.T) {
+	src := "DATA plugin://amazon-ami AS a\nFROM plugin://amazon-ebs AS b\nCONNECT ssh --user=u\nPROVISION plugin://ansible\nOUTPUT plugin://vagrant\n" +
+		"FROM xo://t\nCONNECT ssh --user=u\nPROVISION plugin://ansible\nOUTPUT plugin://amazon-import\n"
+	p, err := build(t, src, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := p.Plugins(), []string{"amazon-ami", "amazon-ebs", "ansible", "vagrant", "amazon-import"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}

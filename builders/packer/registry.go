@@ -92,6 +92,9 @@ func ParseRef(ref string) (name string, src *Source, version string, err error) 
 	return parts[2], &Source{Owner: parts[1], Name: parts[2]}, version, nil
 }
 
+// ErrNoPlugin is the error of Resolve when no plugin has the name.
+var ErrNoPlugin = errors.New("no plugin named")
+
 // Resolve returns the source of a plugin name: the official HashiCorp
 // plugin of that name, or else the only GitHub repository named
 // packer-plugin-<name> that is not a fork.
@@ -115,7 +118,7 @@ func (r *Registry) Resolve(ctx context.Context, name string) (Source, error) {
 	}
 	switch len(found) {
 	case 0:
-		return Source{}, fmt.Errorf("no plugin named %q: look for one with `opendango plugin search`", name)
+		return Source{}, fmt.Errorf("%w %q: look for one with `opendango plugin search`", ErrNoPlugin, name)
 	case 1:
 		return found[0], nil
 	}
