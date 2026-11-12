@@ -89,6 +89,7 @@ plugin attaches it as a CD, and the image is written to `dist/`.
 | Instruction | Example |
 |---|---|
 | `ARG` | `ARG DEBIAN=13` (before `FROM`: only usable in `FROM`, as in Docker), `ARG DANGO_DATE` (see [Builtin variables](#builtin-variables)) |
+| `DATA` | `DATA --filters='{"name": "debian-13-*"}' plugin://amazon-ami AS debian` (before `FROM`, see [Data sources](#data-sources)) |
 | `FROM` | `FROM --memory=2048 plugin://qemu AS golden`, `FROM golden AS app` (see [Multi-stage builds](#multi-stage-builds)) |
 | `CONNECT` | `CONNECT ssh --user=debian --port=22 --timeout=10m` (or `dango.connect` in [`dango.yaml`](#plugin-settings-file-dangoyaml)) |
 | `RUN` | `RUN apt-get update`, `RUN ["systemctl", "enable", "nginx"]`, `RUN <<EOF ... EOF`, `RUN --retries=3 --timeout=10m apt-get update`, `RUN --local ./notify.sh` |
@@ -175,6 +176,35 @@ The [post-processors](#post-processors) work with every builder.
 
 `CMD`, `ENTRYPOINT`, `EXPOSE`, `HEALTHCHECK`, `VOLUME`, `ONBUILD` and
 `STOPSIGNAL` have no meaning for a VM image and are rejected.
+
+### Data sources
+
+`DATA [--settings] plugin://<data source> AS <name>` runs the data source of
+a Packer plugin before the build, like a `data` block of Packer: each output
+becomes a global ARG `<name>_<output>`. Strings stay as they are, numbers and
+booleans are written as text, lists and maps as JSON.
+
+```dockerfile
+DATA --owners='["136693071363"]' --filters='{"name": "debian-13-amd64-*"}' \
+     --most_recent=true --region=eu-west-3 plugin://amazon-ami AS debian
+
+FROM --source_ami=${debian_id} --ami_name=golden plugin://amazon-ebs AS golden
+ARG debian_name
+RUN echo "built from $debian_name" | sudo tee /etc/base-image
+```
+
+- `DATA` comes before the first `FROM`. Its settings are the flags, by their
+  Packer names, over its section of
+  [`dango.yaml`](#plugin-settings-file-dangoyaml) (`amazon-ami:`); the
+  variables declared before (`ARG`, an earlier `DATA`) are expanded in them.
+- Like the global ARGs, `FROM` lines and `dango.yaml` see the outputs, and a
+  stage sees one once it declares it (`ARG debian_name`). `--build-arg
+  debian_id=…` replaces one.
+- `opendango build` and `opendango validate` run the data sources (they read,
+  they create nothing) and print the names of the variables, not their
+  values. `opendango validate --offline` does not: the variables are unset.
+- An output that changes changes the [cache](#cache) key of the stages that
+  use it.
 
 ### Builtin variables
 
@@ -599,8 +629,8 @@ from the cloud-config drive) and the guest tools (the IP address).
 
 ```sh
 opendango init [qemu ...]       # write a dango.yaml with the settings of the plugins
-opendango validate -f Dangofile --build-arg K=V   # check without building (plugins check their flags)
-opendango validate --offline    # without asking the plugins
+opendango validate -f Dangofile --build-arg K=V   # check without building (plugins check their flags, DATA runs)
+opendango validate --offline    # without asking the plugins nor running DATA
 opendango build -f Dangofile --build-arg K=V
 opendango build --build-arg TOKEN --build-arg-file=build.env   # from the environment, from a file
 opendango build --target nginx  # one stage and the stages it starts from

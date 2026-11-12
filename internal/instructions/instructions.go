@@ -175,6 +175,18 @@ type Provision struct {
 	Retry
 }
 
+// Data runs a data source of a plugin before the build:
+// DATA [--settings] plugin://<data source> AS <name>. Its outputs become the
+// global ARGs <name>_<output>.
+type Data struct {
+	Pos
+	// Source is the data source type, such as amazon-ami; Settings are its
+	// flags.
+	Source   string
+	Settings map[string]string
+	Name     string
+}
+
 // Reboot reboots the VM and waits for the connection to come back.
 type Reboot struct {
 	Pos
@@ -915,6 +927,27 @@ func ParseProvision(cmd *parser.Command, expand Expander) (*Provision, error) {
 	p.Settings, err = pluginSettings(cmd, expand)
 	return p, err
 }
+
+// ParseData parses DATA [--settings] plugin://<data source> AS <name>: the
+// flags are the data source's settings, by their Packer names.
+func ParseData(cmd *parser.Command, expand Expander) (*Data, error) {
+	args, err := expandAll(cmd.Args, expand)
+	if err != nil {
+		return nil, fmt.Errorf("DATA: %w", err)
+	}
+	if len(args) != 3 || !strings.HasPrefix(args[0], "plugin://") || args[0] == "plugin://" || !strings.EqualFold(args[1], "AS") {
+		return nil, fmt.Errorf("DATA requires plugin://<data source> AS <name>, such as DATA plugin://amazon-ami AS debian")
+	}
+	d := &Data{Pos: pos(cmd), Source: strings.TrimPrefix(args[0], "plugin://"), Name: args[2]}
+	if !varName.MatchString(d.Name) {
+		return nil, fmt.Errorf("DATA: invalid name %q (letters, digits and _: it starts the variable names)", d.Name)
+	}
+	d.Settings, err = pluginSettings(cmd, expand)
+	return d, err
+}
+
+// DataVar is the variable of an output of a DATA: <name>_<output>.
+func DataVar(name, output string) string { return name + "_" + output }
 
 // pluginSettings reads the flags of a plugin component as its settings:
 // every flag has a value.

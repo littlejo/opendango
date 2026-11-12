@@ -295,8 +295,10 @@ func (d *datasource) ConfigSpec() hcldec.ObjectSpec { return hcldec.ObjectSpec{}
 
 func (d *datasource) OutputSpec() hcldec.ObjectSpec {
 	return hcldec.ObjectSpec{
-		"id":   &hcldec.AttrSpec{Name: "id", Type: cty.String},
-		"name": &hcldec.AttrSpec{Name: "name", Type: cty.String},
+		"id":    &hcldec.AttrSpec{Name: "id", Type: cty.String},
+		"name":  &hcldec.AttrSpec{Name: "name", Type: cty.String},
+		"tags":  &hcldec.AttrSpec{Name: "tags", Type: cty.List(cty.String)},
+		"count": &hcldec.AttrSpec{Name: "count", Type: cty.Number},
 	}
 }
 
@@ -317,7 +319,20 @@ func (d *datasource) Execute() (cty.Value, error) {
 	if id == "" && !d.config.AllowMissing {
 		return cty.NilVal, fmt.Errorf("no artifact with the tags %q", d.config.Tags)
 	}
-	return cty.ObjectVal(map[string]cty.Value{"id": cty.StringVal(id), "name": cty.StringVal("lookup from " + d.config.SamePoolAs)}), nil
+	tags := cty.ListValEmpty(cty.String)
+	if len(d.config.Tags) > 0 {
+		var vals []cty.Value
+		for _, t := range d.config.Tags {
+			vals = append(vals, cty.StringVal(t))
+		}
+		tags = cty.ListVal(vals)
+	}
+	return cty.ObjectVal(map[string]cty.Value{
+		"id":    cty.StringVal(id),
+		"name":  cty.StringVal("lookup from " + d.config.SamePoolAs),
+		"tags":  tags,
+		"count": cty.NumberIntVal(int64(len(d.config.Tags))),
+	}), nil
 }
 
 // storeTags records the tags of an artifact in the store, when the test set
