@@ -81,3 +81,48 @@ jobs:
         with:
           version: '~> v2'
           args: check
+
+  # plugin://qemu end to end, on the runner's KVM: a stage starts from the
+  # disk of another (the images cache), FETCH brings files back.
+  qemu:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+
+      - uses: actions/setup-go@v7
+        with:
+          # Same version as mise.toml.
+          go-version: '1.27.3'
+          cache: true
+
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Install QEMU
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends qemu-system-x86 qemu-utils xorriso
+
+      - name: Install the qemu plugin
+        run: go run ./cmd/opendango plugin pull qemu
+
+      - name: Cache the Debian image
+        id: image
+        uses: actions/cache@v4
+        with:
+          path: ~/debian-12-genericcloud-amd64.qcow2
+          key: debian-12-genericcloud-amd64
+
+      - name: Download the Debian image
+        if: steps.image.outputs.cache-hit != 'true'
+        run: curl -fsSL -o ~/debian-12-genericcloud-amd64.qcow2 https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-genericcloud-amd64.qcow2
+
+      - name: Test (qemu end to end)
+        env:
+          OPENDANGO_TEST_QEMU_IMAGE: /home/runner/debian-12-genericcloud-amd64.qcow2
+        run: go test -tags integration -count=1 -timeout 45m -v -run TestQemuEndToEnd ./builders/packer/

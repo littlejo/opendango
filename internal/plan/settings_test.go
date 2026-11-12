@@ -165,7 +165,7 @@ qemu:
 // flags; the variables are reserved.
 func TestParentSettings(t *testing.T) {
 	settings, err := LoadSettings(writeSettings(t, `
-qemu:
+libvirt:
   dango:
     parent:
       iso_url: ${DANGO_PARENT_FILE}
@@ -185,7 +185,7 @@ qemu:
 		}
 		return BuildSettings("Dangofile", res, nil, settings)
 	}
-	p, err := build("ARG REGION=eu\nFROM plugin://qemu AS base\nFROM --memory=4096 --iso_checksum=sha256:abc base AS app\n")
+	p, err := build("ARG REGION=eu\nFROM plugin://libvirt AS base\nFROM --memory=4096 --iso_checksum=sha256:abc base AS app\n")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -200,15 +200,15 @@ qemu:
 	}
 
 	for _, tt := range []struct{ src, err string }{
-		{"ARG DANGO_PARENT_ID=x\nFROM plugin://qemu\n", "DANGO_PARENT_ID is reserved: dango.parent in dango.yaml sets it"},
-		{"FROM plugin://qemu\nENV DANGO_PARENT_FILE=x\n", "DANGO_PARENT_FILE is reserved"},
+		{"ARG DANGO_PARENT_ID=x\nFROM plugin://libvirt\n", "DANGO_PARENT_ID is reserved: dango.parent in dango.yaml sets it"},
+		{"FROM plugin://libvirt\nENV DANGO_PARENT_FILE=x\n", "DANGO_PARENT_FILE is reserved"},
 		{"FROM plugin://other AS a\nFROM a\n", "opendango does not know how plugin://other starts from the artifact of a stage: set dango.parent in the other section"},
 	} {
 		if _, err := build(tt.src); err == nil || !strings.Contains(err.Error(), tt.err) {
 			t.Errorf("%q: err = %v, want %q", tt.src, err, tt.err)
 		}
 	}
-	if _, err := LoadSettings(writeSettings(t, "qemu:\n  dango:\n    parent:\n      ssh_password: x\n")); err == nil || !strings.Contains(err.Error(), "parent.ssh_password: no secret") {
+	if _, err := LoadSettings(writeSettings(t, "libvirt:\n  dango:\n    parent:\n      ssh_password: x\n")); err == nil || !strings.Contains(err.Error(), "parent.ssh_password: no secret") {
 		t.Errorf("secret in parent: %v", err)
 	}
 }
@@ -224,7 +224,7 @@ amazon-ebs:
       source_ami: ${DANGO_PARENT_ID#*:}
       ami_description: from ${DANGO_PARENT_ID} in ${REGION}
   region: eu-west-3
-qemu:
+libvirt:
   dango:
     parent:
       iso_url: ${DANGO_PARENT_FILE}
@@ -232,7 +232,7 @@ qemu:
 	if err != nil {
 		t.Fatal(err)
 	}
-	res, err := parser.Parse(strings.NewReader("ARG REGION=eu-west-3\nFROM plugin://amazon-ebs AS base\nFROM base AS app\nFROM plugin://qemu AS q\nFROM q AS q2\n"))
+	res, err := parser.Parse(strings.NewReader("ARG REGION=eu-west-3\nFROM plugin://amazon-ebs AS base\nFROM base AS app\nFROM plugin://libvirt AS q\nFROM q AS q2\n"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -244,10 +244,10 @@ qemu:
 	if want := map[string]string{"source_ami": "ami-0abc", "ami_description": "from eu-west-3:ami-0abc in eu-west-3"}; err != nil || !reflect.DeepEqual(got, want) {
 		t.Errorf("amazon-ebs: %v, %v; want %v", got, err, want)
 	}
-	if _, err := p.Stages[3].ExpandParent("id", ""); err == nil || !strings.Contains(err.Error(), "qemu.dango.parent.iso_url: ${DANGO_PARENT_FILE}: the artifact of stage q has no file") {
-		t.Errorf("qemu without a file: %v", err)
+	if _, err := p.Stages[3].ExpandParent("id", ""); err == nil || !strings.Contains(err.Error(), "libvirt.dango.parent.iso_url: ${DANGO_PARENT_FILE}: the artifact of stage q has no file") {
+		t.Errorf("libvirt without a file: %v", err)
 	}
 	if got, err := p.Stages[3].ExpandParent("id", "/out/q.qcow2"); err != nil || got["iso_url"] != "/out/q.qcow2" {
-		t.Errorf("qemu: %v, %v", got, err)
+		t.Errorf("libvirt: %v, %v", got, err)
 	}
 }

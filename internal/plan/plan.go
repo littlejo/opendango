@@ -121,7 +121,7 @@ func (s *Stage) PackerFlags() (map[string]string, error) {
 		return own, nil
 	}
 	k := s.known()
-	if s.ParentFlags == nil && (k == nil || k.Source == "") {
+	if s.ParentFlags == nil && (k == nil || !k.CanBeParent()) {
 		return nil, fmt.Errorf("FROM %s: opendango does not know how plugin://%s starts from the artifact of a stage: set dango.parent in the %s section of %s (with ${%s} or ${%s})", s.From.Stage, s.Root().From.Source, s.Root().From.Source, SettingsFile, ParentIDVar, ParentFileVar)
 	}
 	flags := own
@@ -688,7 +688,7 @@ func BuildData(file string, res *parser.Result, buildArgs map[string]string, set
 
 		case "LABEL":
 			if k := stage.known(); stage.IsPacker() && (k == nil || k.Tags == "") {
-				return fail(line, fmt.Errorf("LABEL is not supported in a plugin://%s stage: the plugin configuration (FROM flags) sets its artifact (opendango maps LABEL for plugin://%s)", stage.Root().From.Source, packer.KnownSources()))
+				return fail(line, fmt.Errorf("LABEL is not supported in a plugin://%s stage: the plugin configuration (FROM flags) sets its artifact (opendango maps LABEL for plugin://%s)", stage.Root().From.Source, packer.KnownSources(func(k *packer.Known) bool { return k.Tags != "" })))
 			}
 			l, err := instructions.ParseLabel(cmd, expand)
 			if err != nil {
@@ -710,10 +710,13 @@ func BuildData(file string, res *parser.Result, buildArgs map[string]string, set
 			// The artifact itself (template, XVA) needs a builder opendango
 			// knows; the post-processors work with any.
 			if stage.IsPacker() && k == nil && !out.PostProcess() {
-				return fail(line, fmt.Errorf("OUTPUT --%s has no meaning in a plugin://%s stage: the plugin configuration (FROM flags) sets its artifact (opendango maps it for plugin://%s)", outputFlag(out), stage.Root().From.Source, packer.KnownSources()))
+				return fail(line, fmt.Errorf("OUTPUT --%s has no meaning in a plugin://%s stage: the plugin configuration (FROM flags) sets its artifact (opendango maps it for plugin://%s)", outputFlag(out), stage.Root().From.Source, packer.KnownSources(func(k *packer.Known) bool { return k.TemplateName != "" })))
 			}
 			if k != nil && out.Kind == instructions.OutputXVA && k.XVA == nil {
 				return fail(line, fmt.Errorf("OUTPUT --format=xva is not supported by plugin://%s", stage.Root().From.Source))
+			}
+			if k != nil && out.Kind == instructions.OutputTemplate && k.TemplateName == "" {
+				return fail(line, fmt.Errorf("OUTPUT --as=template has no meaning in a plugin://%s stage: its artifact is files, which its settings place (%s)", stage.Root().From.Source, k.OutputDir))
 			}
 			for _, prev := range stage.Outputs {
 				if out.Kind == instructions.OutputTemplate && prev.Kind == instructions.OutputTemplate {
@@ -747,6 +750,18 @@ func BuildData(file string, res *parser.Result, buildArgs map[string]string, set
 	if stage == nil {
 		return nil, &Error{File: file, Line: 1, Err: fmt.Errorf("no FROM instruction")}
 	}
+	// The artifact of a stage that others start from goes to the cache or
+	// to a temporary directory: its FROM line cannot place it (dango.yaml's
+	// value is for the other stages).
+	for _, s := range p.Stages {
+		k := s.known()
+		if k == nil || k.OutputDir == "" || len(s.Children) == 0 {
+			continue
+		}
+		if _, ok := s.From.Flags[k.OutputDir]; ok {
+			return fail(s.From.Line(), fmt.Errorf("--%s cannot be set for stage %s: other stages start from it, opendango places its artifact (in the cache or a temporary directory)", k.OutputDir, s.Name()))
+		}
+	}
 	for _, s := range p.Stages {
 		if s.labelLine != 0 && s.TemplateOutput() == nil {
 			return fail(s.labelLine, fmt.Errorf("LABEL needs OUTPUT --as=template: the labels become tags of the template"))
@@ -757,7 +772,7 @@ func BuildData(file string, res *parser.Result, buildArgs map[string]string, set
 		case len(s.Outputs) > 0 || len(s.Children) > 0 || len(s.Fetch) > 0:
 		case !s.IsPacker():
 			p.Warnings = append(p.Warnings, fmt.Sprintf("stage %s has no OUTPUT and no stage starts from it: its VM will be destroyed at the end of the build", s.Name()))
-		case s.known() != nil:
+		case s.known() != nil && s.known().OutputDir == "":
 			p.Warnings = append(p.Warnings, fmt.Sprintf("stage %s has no OUTPUT and no stage starts from it: the plugin's artifact will be deleted at the end of the stage", s.Name()))
 		}
 	}

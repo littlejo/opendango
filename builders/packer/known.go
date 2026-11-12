@@ -32,8 +32,19 @@ type Known struct {
 
 	// Source is the setting that FROM <stage> sets to the id of the parent
 	// stage's artifact, empty when a stage cannot start from this builder's
-	// artifact.
+	// artifact by its id.
 	Source string
+	// Parent are the settings of a stage that starts from another one when
+	// the artifact is files (a disk image) rather than an id: values with
+	// ${DANGO_PARENT_ID} and ${DANGO_PARENT_FILE} (the largest file of the
+	// parent's artifact, its disk), like dango.parent.
+	Parent map[string]string
+	// OutputDir is the setting of the directory of an artifact made of
+	// files. opendango sets it for a stage that other stages start from (a
+	// cache entry on this machine, or a temporary directory); the artifact
+	// of another stage stays where the stage's settings put it, also
+	// without OUTPUT.
+	OutputDir string
 	// RootOnly are the settings that only a root stage sets: they choose
 	// what the VM starts from, which FROM <stage> does.
 	RootOnly []string
@@ -82,8 +93,31 @@ type CacheLookup struct {
 	ID, Name string
 }
 
+// Parent markers in Known.Parent, replaced by the parent's artifact.
+const (
+	ParentIDRef   = "${DANGO_PARENT_ID}"
+	ParentFileRef = "${DANGO_PARENT_FILE}"
+)
+
 // known lists the builders by source type.
 var known = map[string]*Known{
+	// github.com/hashicorp/qemu: the artifact is the files of
+	// output_directory, the disk image first in size.
+	"qemu": {
+		Parent: map[string]string{
+			"iso_url":      ParentFileRef,
+			"iso_checksum": "none",
+			"disk_image":   "true",
+		},
+		RootOnly: []string{"iso_url", "iso_urls", "iso_checksum", "disk_image"},
+		Inherited: []string{
+			"accelerator", "qemu_binary", "machine_type", "cpu_model", "firmware",
+			"efi_boot", "efi_firmware_code", "efi_firmware_vars", "format",
+			"disk_interface", "net_device", "cpus", "memory", "headless",
+			"ssh_password", "ssh_private_key_file", "shutdown_command",
+		},
+		OutputDir: "output_directory",
+	},
 	// github.com/littlejo/packer-plugin-xenorchestra: the artifact is a
 	// template.
 	"xenorchestra": {
@@ -118,11 +152,14 @@ var known = map[string]*Known{
 // nil.
 func Lookup(source string) *Known { return known[source] }
 
-// KnownSources lists the source types of the table.
-func KnownSources() string {
+// KnownSources lists the source types of the table that have a feature
+// (all of them when has is nil).
+func KnownSources(has func(*Known) bool) string {
 	var names []string
-	for name := range known {
-		names = append(names, name)
+	for name, k := range known {
+		if has == nil || has(k) {
+			names = append(names, name)
+		}
 	}
 	slices.Sort(names)
 	return strings.Join(names, ", ")
@@ -150,6 +187,10 @@ func (k *Known) settings() map[string]string {
 	return m
 }
 
+// CanBeParent tells whether a stage can start from the artifact of this
+// builder: by its id (Source) or by its files (Parent).
+func (k *Known) CanBeParent() bool { return k.Source != "" || k.Parent != nil }
+
 // checkFlags fails when a FROM flag sets a setting of the table.
 func (k *Known) checkFlags(flags map[string]string) error {
 	for name, instead := range k.settings() {
@@ -165,11 +206,11 @@ func (k *Known) checkFlags(flags map[string]string) error {
 // the parent it does not set. parent are the parent's flags, with its own
 // inherited ones.
 func (k *Known) StageFlags(parent, own map[string]string) (map[string]string, error) {
-	if k.Source == "" {
+	if !k.CanBeParent() {
 		return nil, errors.New("its artifact cannot be the source of another stage")
 	}
 	for _, name := range append([]string{k.Source}, k.RootOnly...) {
-		if _, ok := own[name]; ok {
+		if _, ok := own[name]; ok && name != "" {
 			return nil, fmt.Errorf("plugin: --%s cannot be set when starting from another stage", name)
 		}
 	}

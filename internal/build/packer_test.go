@@ -48,7 +48,7 @@ func testPlugin(t *testing.T) FindPluginFunc {
 	return func(_ context.Context, source string) (*packer.Plugin, string, error) {
 		// The tests of the table of known builders use the test plugin
 		// as plugin://xenorchestra.
-		if source != "opendangotest-local" && source != "xenorchestra" {
+		if source != "opendangotest-local" && source != "xenorchestra" && source != "qemu" {
 			return nil, "", fmt.Errorf("unexpected source %q", source)
 		}
 		return &packer.Plugin{Name: "opendangotest", Path: pluginPath}, "local", nil

@@ -93,6 +93,10 @@ type Options struct {
 	// FilesCache is the directory of the files cache of COPY --from;
 	// empty: ~/.cache/opendango/files (unless NoCache).
 	FilesCache string
+	// ImagesCache is the directory of the images cache (the artifacts made
+	// of files of the stages others start from); empty:
+	// ~/.cache/opendango/images (unless NoCache).
+	ImagesCache string
 	// FindPostProcessor finds the plugin of the post-processors
 	// (OUTPUT plugin://...); FindPostProcessor when nil.
 	FindPostProcessor FindPluginFunc
@@ -227,9 +231,10 @@ func Run(ctx context.Context, p *plan.Plan, opts Options) (err error) {
 	defer os.RemoveAll(filesDir)
 	opts.filesDir = filesDir
 	if opts.FilesCache == "" && !opts.NoCache {
-		if dir, err := os.UserCacheDir(); err == nil {
-			opts.FilesCache = filepath.Join(dir, "opendango", "files")
-		}
+		opts.FilesCache = defaultCacheDir("files")
+	}
+	if opts.ImagesCache == "" && !opts.NoCache {
+		opts.ImagesCache = defaultCacheDir("images")
 	}
 
 	done := map[*plan.Stage]*executor{}

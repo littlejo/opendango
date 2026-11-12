@@ -120,7 +120,7 @@ func CheckPlugins(ctx context.Context, p *plan.Plan, contextDir string, f Finder
 		tableSource := ""
 		if stage.Parent != nil {
 			name := stage.Parent.Name()
-			parent = &packerTemplate{&packer.Artifact{ID: "<artifact of stage " + name + ">", Files: []string{"<file of stage " + name + ">"}}}
+			parent = &packerTemplate{a: &packer.Artifact{ID: "<artifact of stage " + name + ">", Files: []string{"<file of stage " + name + ">"}}}
 			if stage.ParentFlags == nil {
 				tableSource = parent.ID()
 			}
@@ -131,7 +131,11 @@ func CheckPlugins(ctx context.Context, p *plan.Plan, contextDir string, f Finder
 			continue
 		}
 		if parent != nil {
-			if err := parentSettings(settings, parent, stage, cfg.Component); err != nil {
+			err := parentSettings(settings, parent, stage, cfg.Component)
+			if err == nil {
+				err = tableParent(settings, stage, parent, cfg.Component)
+			}
+			if err != nil {
 				fail(err)
 				continue
 			}
