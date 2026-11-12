@@ -105,8 +105,8 @@ Implemented (standard library `flag` package; move to cobra only if the CLI grow
 
 ```
 opendango init     [-f Dangofile] [--config=dango.yaml] [--force] [<source>...]
-opendango build    [-f Dangofile] [--config=dango.yaml] [--build-arg K=V]... [--target X] [-j N] [--no-cache] [--on-error=abort|keep|ask]
-opendango validate [-f Dangofile] [--config=dango.yaml] [--build-arg K=V]... [--offline]
+opendango build    [-f Dangofile] [--config=dango.yaml] [--build-arg K[=V]]... [--build-arg-file=F]... [--target X] [-j N] [--no-cache] [--on-error=abort|keep|ask]
+opendango validate [-f Dangofile] [--config=dango.yaml] [--build-arg K[=V]]... [--build-arg-file=F]... [--offline]
 opendango fmt      [-f Dangofile] [-w | --check]
 opendango cache prune [--older-than=DURATION] [--dry-run]
 opendango plugin pull <name|github.com/owner/name>[@version]...
@@ -116,6 +116,8 @@ opendango plugin describe <source> [--search <text>]
 opendango plugin rm <name|github.com/owner/name>[@version]...
 opendango version
 ```
+
+`--build-arg K` (no `=`) takes the value of the environment variable `K`, and leaves the ARG unset when it is not set, like Docker. `--build-arg-file=F` (repeatable, in order) reads `KEY=VALUE` lines (the value as written, no quote removal), `KEY` alone (the environment), `#` comments and blank lines; `--build-arg` takes precedence (`commonFlags.allBuildArgs`).
 
 `--on-error=ask` needs a terminal on stdin (checked with `golang.org/x/term`; `opendango build` exits with code 2 otherwise). When an instruction fails, it prints the `ssh` command (if the VM was reached and the key is still installed) and asks `[r]` retry the instruction (after a new connection), `[c]` clean up (like `abort`) or `[k]` keep (like `keep`). Failures outside the instructions (start, connection, stop, `OUTPUT`, a later stage's builder) offer only `c` and `k`. End of input and Ctrl+C mean `c`. The returned error is the instruction's, whatever the answer.
 

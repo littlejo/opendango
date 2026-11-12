@@ -86,19 +86,58 @@ type buildArgs map[string]string
 
 func (b buildArgs) String() string { return "" }
 
+// Set reads KEY=VALUE, or KEY alone for the value of the environment
+// variable KEY (left unset when the variable is not set, like Docker).
 func (b buildArgs) Set(s string) error {
 	k, v, ok := strings.Cut(s, "=")
-	if !ok || k == "" {
-		return fmt.Errorf("expected KEY=VALUE, got %q", s)
+	if k == "" {
+		return fmt.Errorf("expected KEY=VALUE or KEY, got %q", s)
+	}
+	if !ok {
+		if v, ok = os.LookupEnv(k); !ok {
+			return nil
+		}
 	}
 	b[k] = v
 	return nil
 }
 
+// stringList collects a repeated flag.
+type stringList []string
+
+func (l *stringList) String() string { return strings.Join(*l, ",") }
+
+func (l *stringList) Set(s string) error {
+	*l = append(*l, s)
+	return nil
+}
+
+// readBuildArgFile reads a file of build variables: KEY=VALUE lines (the
+// value as written, no quote removal), KEY alone for the environment
+// variable KEY, blank lines and lines starting with # ignored. Like an
+// --env-file of Docker.
+func readBuildArgFile(path string, into buildArgs) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	for i, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(strings.TrimSuffix(line, "\r"))
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		if err := into.Set(line); err != nil {
+			return fmt.Errorf("%s:%d: %w", path, i+1, err)
+		}
+	}
+	return nil
+}
+
 type commonFlags struct {
-	file      string
-	config    string
-	buildArgs buildArgs
+	file          string
+	config        string
+	buildArgs     buildArgs
+	buildArgFiles stringList
 }
 
 func newFlagSet(name string, stderr io.Writer) (*flag.FlagSet, *commonFlags) {
@@ -106,9 +145,25 @@ func newFlagSet(name string, stderr io.Writer) (*flag.FlagSet, *commonFlags) {
 	fs.SetOutput(stderr)
 	c := &commonFlags{buildArgs: buildArgs{}}
 	fs.StringVar(&c.file, "f", "Dangofile", "path to the Dangofile")
-	fs.Var(c.buildArgs, "build-arg", "set a build variable, KEY=VALUE (repeatable)")
+	fs.Var(c.buildArgs, "build-arg", "set a build variable, KEY=VALUE, or KEY for the environment variable KEY (repeatable)")
+	fs.Var(&c.buildArgFiles, "build-arg-file", "read build variables from a file of KEY=VALUE lines (repeatable; --build-arg takes precedence)")
 	fs.StringVar(&c.config, "config", "", "plugin settings file (default: "+plan.SettingsFile+" next to the Dangofile, when it exists)")
 	return fs, c
+}
+
+// allBuildArgs returns the values of the --build-arg-file files, in order,
+// under the --build-arg ones.
+func (c *commonFlags) allBuildArgs() (buildArgs, error) {
+	args := buildArgs{}
+	for _, f := range c.buildArgFiles {
+		if err := readBuildArgFile(f, args); err != nil {
+			return nil, err
+		}
+	}
+	for k, v := range c.buildArgs {
+		args[k] = v
+	}
+	return args, nil
 }
 
 // loadSettings reads --config, or dango.yaml next to the Dangofile when it
@@ -138,7 +193,11 @@ func loadPlan(c *commonFlags) (*plan.Plan, error) {
 	if err != nil {
 		return nil, err
 	}
-	return plan.BuildSettings(c.file, res, c.buildArgs, settings)
+	args, err := c.allBuildArgs()
+	if err != nil {
+		return nil, err
+	}
+	return plan.BuildSettings(c.file, res, args, settings)
 }
 
 func cmdValidate(args []string, stdout, stderr io.Writer) int {

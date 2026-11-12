@@ -209,3 +209,39 @@ func readTestFile(t *testing.T, p string) string {
 	}
 	return string(b)
 }
+
+func TestBuildArgs(t *testing.T) {
+	t.Setenv("FROM_ENV", "env")
+	dir := t.TempDir()
+	file := filepath.Join(dir, "args")
+	content := "# comment\n\nA=file\nB=file=with=equals\nFROM_ENV\nUNSET_IN_ENV\n"
+	if err := os.WriteFile(file, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	c := &commonFlags{buildArgs: buildArgs{}, buildArgFiles: stringList{file}}
+	for _, s := range []string{"A=flag", "FROM_ENV", "UNSET_IN_ENV"} {
+		if err := c.buildArgs.Set(s); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := c.allBuildArgs()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := buildArgs{"A": "flag", "B": "file=with=equals", "FROM_ENV": "env"}
+	if len(got) != len(want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+	for k, v := range want {
+		if got[k] != v {
+			t.Errorf("%s = %q, want %q", k, got[k], v)
+		}
+	}
+	if err := c.buildArgs.Set("=x"); err == nil {
+		t.Error("an empty name is accepted")
+	}
+	os.WriteFile(file, []byte("=bad\n"), 0o644)
+	if _, err := c.allBuildArgs(); err == nil || !strings.Contains(err.Error(), file+":1:") {
+		t.Errorf("error = %v", err)
+	}
+}
