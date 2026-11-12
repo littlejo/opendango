@@ -293,6 +293,11 @@ func Run(ctx context.Context, p *plan.Plan, opts Options) (err error) {
 			if !needed && s.TemplateOutput() == nil && len(s.Fetch) == 0 {
 				key = ""
 			}
+			// RUN --local and FETCH act on this machine: the stage is
+			// always built (its children keep their keys).
+			if s.HostEffects() {
+				key = ""
+			}
 			running++
 			// The files of the stages it COPY --from.
 			from := map[string]string{}
@@ -889,6 +894,13 @@ func (e *executor) step(ctx context.Context, step instructions.Instruction) erro
 		e.workdir = dir
 		return nil
 	case *instructions.Run:
+		if s.Local {
+			e.say("RUN --local %s", firstLine(s.Script))
+			if err := e.retry(ctx, "RUN", s.Retry, func(ctx context.Context) error { return e.runLocal(ctx, s.Script) }); err != nil {
+				return fmt.Errorf("RUN --local: %w", err)
+			}
+			return nil
+		}
 		e.say("RUN %s", firstLine(s.Script))
 		script := s.Script
 		if e.shell != nil && !s.Exec {
@@ -896,8 +908,14 @@ func (e *executor) step(ctx context.Context, step instructions.Instruction) erro
 			// SHELL with the script as its last argument.
 			script = "exec " + quoteAll(e.shell) + " " + q(script)
 		}
-		if err := e.run(ctx, e.wrap(script)); err != nil {
+		if err := e.retry(ctx, "RUN", s.Retry, func(ctx context.Context) error { return e.run(ctx, e.wrap(script)) }); err != nil {
 			return fmt.Errorf("RUN: %w", err)
+		}
+		return nil
+	case *instructions.Fetch:
+		e.say("FETCH %s %s", strings.Join(s.Sources, " "), s.Dest)
+		if err := e.fetchHost(ctx, s); err != nil {
+			return fmt.Errorf("FETCH: %w", err)
 		}
 		return nil
 	case *instructions.Copy:
@@ -927,7 +945,7 @@ func (e *executor) step(ctx context.Context, step instructions.Instruction) erro
 		return nil
 	case *instructions.Provision:
 		e.say("PROVISION plugin://%s", s.Source)
-		if err := e.provision(ctx, s); err != nil {
+		if err := e.retry(ctx, "PROVISION", s.Retry, func(ctx context.Context) error { return e.provision(ctx, s) }); err != nil {
 			return fmt.Errorf("PROVISION: %w", err)
 		}
 		return nil

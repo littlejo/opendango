@@ -91,23 +91,24 @@ plugin attaches it as a CD, and the image is written to `dist/`.
 | `ARG` | `ARG DEBIAN=13` (before `FROM`: only usable in `FROM`, as in Docker), `ARG DANGO_DATE` (see [Builtin variables](#builtin-variables)) |
 | `FROM` | `FROM --memory=2048 plugin://qemu AS golden`, `FROM golden AS app` (see [Multi-stage builds](#multi-stage-builds)) |
 | `CONNECT` | `CONNECT ssh --user=debian --port=22 --timeout=10m` (or `dango.connect` in [`dango.yaml`](#plugin-settings-file-dangoyaml)) |
-| `RUN` | `RUN apt-get update`, `RUN ["systemctl", "enable", "nginx"]`, `RUN <<EOF ... EOF` |
+| `RUN` | `RUN apt-get update`, `RUN ["systemctl", "enable", "nginx"]`, `RUN <<EOF ... EOF`, `RUN --retries=3 --timeout=10m apt-get update`, `RUN --local ./notify.sh` |
 | `SHELL` | `SHELL ["/bin/bash", "-o", "pipefail", "-c"]` |
 | `COPY` | `COPY --chmod=0644 --chown=www-data site/ /var/www/html/`, `COPY --from=build /opt/app /usr/local/bin/` (see [Copying from another stage](#copying-from-another-stage)) |
 | `ADD` | `ADD --checksum=sha256:<hex> https://example.org/tool.tar.gz /opt/` |
+| `FETCH` | `FETCH /var/log/cloud-init.log logs/` (from the machine to the Dangofile directory) |
 | `ENV` | `ENV DEBIAN_FRONTEND=noninteractive`, `ENV --persist APP_ENV=prod` |
 | `USER` | `USER root` (through `sudo`) |
 | `WORKDIR` | `WORKDIR /opt/app` |
 | `REBOOT` | `REBOOT` |
 | `BREAKPOINT` | `BREAKPOINT "check nginx"` |
-| `PROVISION` | `PROVISION --playbook_file=site.yml plugin://ansible` (see [Provisioners](#provisioners)) |
+| `PROVISION` | `PROVISION --playbook_file=site.yml --max_retries=2 plugin://ansible` (see [Provisioners](#provisioners)) |
 | `SERVE` | `SERVE --port=8080 http/` (before `CONNECT`) |
 | `BOOT` | `BOOT <wait10><esc>auto url=http://${DANGO_HTTP_ADDR}/preseed.cfg<enter>` (before `CONNECT`) |
 | `LABEL` | `LABEL org.opencontainers.image.version=1.2 team=web` (with `OUTPUT --as=template`) |
 | `OUTPUT` | `OUTPUT --as=template "name"`, `OUTPUT --format=xva --compress=zstd ./out.xva`, `OUTPUT --format=manifest dist/manifest.json`, `OUTPUT --output=dist/app.box plugin://vagrant` (see [Post-processors](#post-processors)) |
 
 `CONNECT` is required before the instructions that need the machine (`RUN`,
-`COPY`, `ADD`, `WORKDIR`, `REBOOT`, `BREAKPOINT`, `PROVISION`, `ENV --persist`), unless
+`COPY`, `ADD`, `FETCH`, `WORKDIR`, `REBOOT`, `BREAKPOINT`, `PROVISION`, `ENV --persist`), unless
 `dango.yaml` gives it (`dango.connect`) or the parent stage has one.
 
 `ENV` values only exist during the build; add `--persist` to write them to
@@ -116,6 +117,23 @@ Dangofile directory.
 
 `USER` other than the `CONNECT` user runs through `sudo -n`: the connection
 user needs passwordless sudo.
+
+`RUN --retries=N` runs a failed `RUN` again, up to N more times (Packer's
+`max_retries`); `--timeout=10m` stops each attempt after that time. Neither
+is part of the cache key. `RUN --local` runs the script on the machine that
+runs opendango (Packer's `shell-local`), with `/bin/sh` in the Dangofile
+directory and the `ARG` and `ENV` values (and `DANGO_HTTP_ADDR`) in its
+environment; `USER`, `WORKDIR` and `SHELL` are the machine's and do not
+apply. It runs among the other instructions, while the machine is up.
+
+`FETCH <src>... <dest>` copies files and directories of the machine (absolute
+paths, read as root with `tar`, which the machine needs) to the Dangofile
+directory (or an absolute path), like `COPY` the other way: a directory
+copies its contents, the destination is a directory when it ends with `/` or
+when there are several sources, symbolic links stay links. A stage with a
+`FETCH` or a `RUN --local` is always built: the [cache](#cache) would skip
+what they do on this machine (the stages that start from it can still come
+from the cache).
 
 `REBOOT` reboots the machine and waits until it is back (a new boot ID),
 within the `CONNECT` timeout.
@@ -459,7 +477,9 @@ opendango plugin pull ansible    # ansible (remote) and ansible-local
 
 - The settings are the provisioner's, by their Packer names (lists and maps
   in JSON), over its section of [`dango.yaml`](#plugin-settings-file-dangoyaml)
-  (`ansible:`).
+  (`ansible:`). `max_retries` and `timeout` are opendango's, as they are
+  Packer's: run it again up to `max_retries` more times after a failure,
+  each attempt stopped after `timeout`.
 - The provisioner gets the stage's connection, like with Packer: the
   plugin's in a `plugin://` stage, opendango's own with `xo://`, and its
   data (host, port, user, key). `plugin://ansible` runs `ansible-playbook`

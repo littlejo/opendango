@@ -105,7 +105,14 @@ func stageKey(file string, s *plan.Stage, keys map[*plan.Stage]string, contextDi
 		case *instructions.Workdir:
 			w.printf("WORKDIR %q\n", st.Path)
 		case *instructions.Run:
+			// Not the retries and the timeout: the image is the same.
+			if st.Local {
+				w.printf("RUN --local %q\n", st.Script)
+				continue
+			}
 			w.printf("RUN %q\n", st.Script)
+		case *instructions.Fetch:
+			w.printf("FETCH %q %q\n", st.Sources, st.Dest)
 		case *instructions.Provision:
 			if err := hashProvision(w, contextDir, st); err != nil {
 				return "", &plan.Error{File: file, Line: st.Line(), Err: fmt.Errorf("PROVISION: %w", err)}
