@@ -57,13 +57,34 @@ func FindPostProcessor(ctx context.Context, source string) (*packer.Plugin, stri
 }
 
 // postProcess runs the post-processors of a stage, in the order of the
-// Dangofile, on what it made.
+// Dangofile, on what it made; OUTPUT --chain gets what the previous one
+// made instead. The artifact of a post-processor that a chained one
+// consumes is deleted afterwards, unless the chained one keeps its input
+// (Packer's keep_input_artifact). The stage's artifact is never deleted
+// here: OUTPUT --as=template decides.
 func postProcess(ctx context.Context, p *plan.Plan, stage *plan.Stage, m made, e *executor, opts Options) error {
+	var prev *postArtifact
+	var outputs []*postArtifact
+	defer func() {
+		for _, o := range outputs {
+			o.close()
+		}
+	}()
 	for _, out := range stage.Outputs {
 		if !out.PostProcess() {
 			continue
 		}
-		var err error
+		in := m
+		if out.Chain {
+			if prev == nil || !prev.made {
+				return &plan.Error{File: p.File, Line: out.Line(), Err: errors.New("OUTPUT --chain: the previous post-processor made no artifact")}
+			}
+			in = prev.m
+		}
+		var (
+			a   *postArtifact
+			err error
+		)
 		path := out.Path
 		if path != "" && !filepath.IsAbs(path) {
 			path = filepath.Join(opts.ContextDir, path)
@@ -71,21 +92,73 @@ func postProcess(ctx context.Context, p *plan.Plan, stage *plan.Stage, m made, e
 		switch out.Kind {
 		case instructions.OutputManifest:
 			e.say("Adding the build to the manifest %s", out.Path)
-			err = opts.manifests.add(path, manifestBuild(stage, m, opts))
+			if err = opts.manifests.add(path, manifestBuild(stage, in, opts)); err == nil {
+				a = fileArtifact(path, "packer.post-processor.manifest")
+			}
 		case instructions.OutputChecksum:
 			e.say("Writing the %s checksums to %s", out.Type, out.Path)
-			err = writeChecksums(path, out.Type, stage, m)
+			if err = writeChecksums(path, out.Type, stage, in); err == nil {
+				a = fileArtifact(path, "packer.post-processor.checksum")
+			}
 		case instructions.OutputArchive:
 			e.say("Compressing the files to %s", out.Path)
-			err = writeArchive(path, stage, m)
+			if err = writeArchive(path, stage, in); err == nil {
+				a = fileArtifact(path, "packer.post-processor.compress")
+			}
 		case instructions.OutputPlugin:
-			err = pluginPostProcess(ctx, stage, out, m, e, opts)
+			a, err = pluginPostProcess(ctx, stage, out, in, e, opts)
 		}
 		if err != nil {
 			return &plan.Error{File: p.File, Line: out.Line(), Err: fmt.Errorf("OUTPUT: %w", err)}
 		}
+		outputs = append(outputs, a)
+		if out.Chain && !a.keepInput(out) {
+			e.say("Deleting the artifact of the previous post-processor (%s)", prev.m.ID)
+			if err := prev.destroy(); err != nil {
+				return &plan.Error{File: p.File, Line: out.Line(), Err: fmt.Errorf("OUTPUT: deleting the input artifact: %w", err)}
+			}
+		}
+		prev = a
 	}
 	return nil
+}
+
+// postArtifact is what a post-processor made.
+type postArtifact struct {
+	made bool
+	m    made
+	// keep is the post-processor's choice for its input, force tells that
+	// keep_input_artifact cannot change it.
+	keep, force bool
+	destroy     func() error
+	close       func()
+}
+
+// keepInput tells whether the input of a chained post-processor stays:
+// its keep_input_artifact setting, unless the post-processor forces its
+// choice; opendango's own post-processors keep it.
+func (a *postArtifact) keepInput(out *instructions.Output) bool {
+	if out.KeepInput != nil && !a.force {
+		return *out.KeepInput
+	}
+	return a.keep
+}
+
+// fileArtifact is the artifact of opendango's post-processors: the file
+// they wrote. They keep their input.
+func fileArtifact(path, builderID string) *postArtifact {
+	return &postArtifact{
+		made: true,
+		m:    made{ID: path, BuilderID: builderID, Files: []string{path}},
+		keep: true,
+		destroy: func() error {
+			if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+				return err
+			}
+			return nil
+		},
+		close: func() {},
+	}
 }
 
 // noFiles is the error of a post-processor that needs files when the
@@ -278,16 +351,16 @@ func writeFile(path string, data []byte) error {
 }
 
 // pluginPostProcess runs a plugin's post-processor (OUTPUT plugin://...) on
-// what the stage made.
-func pluginPostProcess(ctx context.Context, stage *plan.Stage, out *instructions.Output, m made, e *executor, opts Options) error {
+// an artifact.
+func pluginPostProcess(ctx context.Context, stage *plan.Stage, out *instructions.Output, m made, e *executor, opts Options) (*postArtifact, error) {
 	cfg, err := packer.ParseConfig(out.Source, out.Settings)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	e.say("Looking for the post-processor %s", cfg.Component)
 	pl, name, err := opts.FindPostProcessor(ctx, cfg.Component)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	core := map[string]any{
 		"packer_build_name":          stage.Name(),
@@ -300,14 +373,29 @@ func pluginPostProcess(ctx context.Context, stage *plan.Stage, out *instructions
 		"packer_sensitive_variables": cfg.Secrets,
 	}
 	ui := &packer.Ui{Print: func(line string) { e.say("%s", line) }, Secrets: cfg.Secrets}
-	files, err := packer.PostProcess(ctx, pl, name, opts.ContextDir, ui, packer.Input{ID: m.ID, BuilderID: m.BuilderID, Files: m.Files}, cfg.Settings, core)
+	o, err := packer.PostProcess(ctx, pl, name, opts.ContextDir, ui, packer.Input{ID: m.ID, BuilderID: m.BuilderID, Files: m.Files}, cfg.Settings, core)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	if len(files) > 0 {
-		e.say("Post-processor %s made %s", cfg.Component, strings.Join(files, ", "))
+	if len(o.Files) > 0 {
+		e.say("Post-processor %s made %s", cfg.Component, strings.Join(o.Files, ", "))
 	}
-	return nil
+	// The plugin's files are relative to its directory, the Dangofile's.
+	files := make([]string, len(o.Files))
+	for i, f := range o.Files {
+		if !filepath.IsAbs(f) {
+			f = filepath.Join(opts.ContextDir, f)
+		}
+		files[i] = f
+	}
+	return &postArtifact{
+		made:    o.Made,
+		m:       made{ID: o.ID, BuilderID: o.BuilderID, BuilderType: m.BuilderType, Files: files},
+		keep:    o.Keep,
+		force:   o.ForceOverride,
+		destroy: o.Destroy,
+		close:   o.Close,
+	}, nil
 }
 
 // manifests writes the manifest files of a build: a stage adds its build

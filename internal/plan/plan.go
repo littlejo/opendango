@@ -651,6 +651,13 @@ func BuildSettings(file string, res *parser.Result, buildArgs map[string]string,
 				if out.Settings, err = withSection(settings, usedSections, out.Source, out.Settings, res.EscapeToken, expand); err != nil {
 					return nil, err
 				}
+				if err := instructions.OutputKeepInput(out); err != nil {
+					return fail(line, err)
+				}
+			}
+			// --chain takes the artifact of the previous post-processor.
+			if out.Chain && !slices.ContainsFunc(stage.Outputs, (*instructions.Output).PostProcess) {
+				return fail(line, fmt.Errorf("OUTPUT --chain needs an earlier post-processor in the stage, whose artifact it gets"))
 			}
 			stage.Outputs = append(stage.Outputs, out)
 

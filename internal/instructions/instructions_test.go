@@ -445,12 +445,30 @@ func TestParseOutput(t *testing.T) {
 		{"OUTPUT --format=manifest", nil, "requires exactly one destination path"},
 		{"OUTPUT --keep plugin://vagrant", nil, "flag --keep requires a value"},
 		{"OUTPUT plugin://", nil, "missing post-processor"},
+		{"OUTPUT --chain --format=manifest m.json", &Output{Pos: Pos{1}, Kind: OutputManifest, Path: "m.json", Chain: true}, ""},
+		{"OUTPUT --chain --box_tag=a/b plugin://vagrant-registry", &Output{Pos: Pos{1}, Kind: OutputPlugin, Source: "vagrant-registry", Settings: map[string]string{"box_tag": "a/b"}, Chain: true}, ""},
+		{"OUTPUT --chain --as=template", nil, "--chain is for the post-processors"},
+		{"OUTPUT --chain=1 --format=manifest m.json", nil, "takes no value"},
 	}
 	for _, tt := range tests {
 		got, err := ParseOutput(parse(t, tt.src), expander())
 		if checkErr(t, tt.src, err, tt.err) && !reflect.DeepEqual(got, tt.want) {
 			t.Errorf("%q: got %+v, want %+v", tt.src, got, tt.want)
 		}
+	}
+}
+
+func TestOutputKeepInput(t *testing.T) {
+	o := &Output{Kind: OutputPlugin, Settings: map[string]string{"keep_input_artifact": "true", "x": "1"}}
+	if err := OutputKeepInput(o); err != nil || o.KeepInput == nil || !*o.KeepInput || len(o.Settings) != 1 {
+		t.Errorf("%+v, %v", o, err)
+	}
+	o = &Output{Kind: OutputPlugin, Settings: map[string]string{}}
+	if err := OutputKeepInput(o); err != nil || o.KeepInput != nil {
+		t.Errorf("%+v, %v", o, err)
+	}
+	if err := OutputKeepInput(&Output{Settings: map[string]string{"keep_input_artifact": "maybe"}}); err == nil {
+		t.Error("keep_input_artifact=maybe accepted")
 	}
 }
 

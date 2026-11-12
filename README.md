@@ -105,7 +105,7 @@ plugin attaches it as a CD, and the image is written to `dist/`.
 | `SERVE` | `SERVE --port=8080 http/` (before `CONNECT`) |
 | `BOOT` | `BOOT <wait10><esc>auto url=http://${DANGO_HTTP_ADDR}/preseed.cfg<enter>` (before `CONNECT`) |
 | `LABEL` | `LABEL org.opencontainers.image.version=1.2 team=web` (with `OUTPUT --as=template`) |
-| `OUTPUT` | `OUTPUT --as=template "name"`, `OUTPUT --format=xva --compress=zstd ./out.xva`, `OUTPUT --format=manifest dist/manifest.json`, `OUTPUT --output=dist/app.box plugin://vagrant` (see [Post-processors](#post-processors)) |
+| `OUTPUT` | `OUTPUT --as=template "name"`, `OUTPUT --format=xva --compress=zstd ./out.xva`, `OUTPUT --format=manifest dist/manifest.json`, `OUTPUT --output=dist/app.box plugin://vagrant`, `OUTPUT --chain plugin://vagrant-registry` (see [Post-processors](#post-processors)) |
 
 `CONNECT` is required before the instructions that need the machine (`RUN`,
 `COPY`, `ADD`, `FETCH`, `WORKDIR`, `REBOOT`, `BREAKPOINT`, `PROVISION`, `ENV --persist`), unless
@@ -524,7 +524,26 @@ OUTPUT --output=dist/golden.box plugin://vagrant
   settings.
 - `manifest`, `checksum` and `compress` are written by opendango (Packer's
   are part of Packer); the plugins' post-processors are the same as with
-  Packer. They process the artifact of the build: they are not chained.
+  Packer.
+
+`OUTPUT --chain` processes the artifact of the previous post-processor
+rather than the stage's, like a sequence of Packer post-processors:
+
+```dockerfile
+OUTPUT --output=dist/golden.box plugin://vagrant
+OUTPUT --chain --box_tag=acme/golden --version=1.0.${DANGO_DATE} plugin://vagrant-registry
+OUTPUT --format=checksum dist/SHA256SUMS
+```
+
+- The artifact of `manifest`, `checksum` and `compress` is the file they
+  wrote; a plugin's is what it returns. An `OUTPUT` without `--chain` gets
+  the stage's artifact again.
+- Once a chained post-processor has run, the artifact it got is deleted
+  (through its plugin, or its file removed) when the post-processor says so,
+  as in Packer; `--keep_input_artifact=true` keeps it (`false` deletes it),
+  unless the post-processor forces its choice. opendango's own
+  post-processors keep it. The stage's artifact is never deleted this way
+  (`OUTPUT --as=template` decides).
 
 ## Cache
 
