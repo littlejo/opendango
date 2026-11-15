@@ -245,3 +245,77 @@ func TestBuildArgs(t *testing.T) {
 		t.Errorf("error = %v", err)
 	}
 }
+
+func TestMatrix(t *testing.T) {
+	c := &commonFlags{file: filepath.Join(t.TempDir(), "Dangofile"), buildArgs: buildArgs{"OTHER": "x"}}
+	for _, s := range []string{"SOURCE=plugin://qemu,xo://debian", "DEBIAN=12,13"} {
+		if err := c.matrix.Set(s); err != nil {
+			t.Fatal(err)
+		}
+	}
+	vs, err := c.variants()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	for _, v := range vs {
+		names = append(names, v.name)
+		if v.args["OTHER"] != "x" || v.args["DEBIAN"] != v.values["DEBIAN"] || v.args["SOURCE"] != v.values["SOURCE"] {
+			t.Errorf("%s: args %v, values %v", v.name, v.args, v.values)
+		}
+		// One build: the same builtins in every variant.
+		if v.args["DANGO_BUILD_ID"] == "" || v.args["DANGO_BUILD_ID"] != vs[0].args["DANGO_BUILD_ID"] {
+			t.Errorf("%s: DANGO_BUILD_ID %q", v.name, v.args["DANGO_BUILD_ID"])
+		}
+	}
+	want := "SOURCE=plugin://qemu DEBIAN=12|SOURCE=plugin://qemu DEBIAN=13|SOURCE=xo://debian DEBIAN=12|SOURCE=xo://debian DEBIAN=13"
+	if got := strings.Join(names, "|"); got != want {
+		t.Errorf("variants %s", got)
+	}
+
+	for s, want := range map[string]string{
+		"DEBIAN=14": "--matrix DEBIAN is set twice",
+		"X":         "expected NAME=VALUE1,VALUE2...",
+		"=a":        "expected NAME=VALUE1,VALUE2...",
+		"X=a,,b":    `--matrix X: empty value in "a,,b"`,
+		"Y=":        `--matrix Y: empty value in ""`,
+	} {
+		if err := c.matrix.Set(s); err == nil || !strings.HasPrefix(err.Error(), want) {
+			t.Errorf("%q: error %v, want %q", s, err, want)
+		}
+	}
+	c.buildArgs["DEBIAN"] = "11"
+	if _, err := c.variants(); err == nil || err.Error() != "DEBIAN is set by both --matrix and --build-arg" {
+		t.Errorf("error = %v", err)
+	}
+}
+
+// TestValidateMatrix validates every variant: the error names it.
+func TestValidateMatrix(t *testing.T) {
+	file := filepath.Join(t.TempDir(), "Dangofile")
+	os.WriteFile(file, []byte("ARG SOURCE\nFROM ${SOURCE}\n"), 0o644)
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"validate", "--offline", "-f", file, "--matrix", "SOURCE=xo://debian,nope://x"}, &stdout, &stderr)
+	if code != 1 || !strings.Contains(stderr.String(), "[SOURCE=nope://x] "+file+":2: unknown builder") {
+		t.Errorf("exit %d, stderr %q", code, stderr.String())
+	}
+	stderr.Reset()
+	if code := run([]string{"validate", "--offline", "-f", file, "--matrix", "SOURCE=xo://debian,xo://ubuntu"}, &stdout, &stderr); code != 0 {
+		t.Errorf("exit %d, stderr %q", code, stderr.String())
+	}
+
+	// A section of dango.yaml one variant uses is not unused; a warning of
+	// some variants only names them.
+	os.WriteFile(filepath.Join(filepath.Dir(file), "dango.yaml"), []byte("qemu:\n  headless: true\nxenorchestra: {}\nvsphere-iso: {}\n"), 0o644)
+	os.WriteFile(file, []byte("ARG SOURCE\nFROM plugin://${SOURCE}\nCONNECT ssh --user=u\n"), 0o644)
+	stderr.Reset()
+	if code := run([]string{"validate", "--offline", "-f", file, "--matrix", "SOURCE=qemu,xenorchestra"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("exit %d, stderr %q", code, stderr.String())
+	}
+	if got := stderr.String(); strings.Contains(got, "plugin://qemu") || strings.Contains(got, "plugin://xenorchestra\n") || !strings.Contains(got, "warning: "+filepath.Join(filepath.Dir(file), "dango.yaml")+": no stage uses plugin://vsphere-iso\n") || !strings.Contains(got, "warning: [SOURCE=xenorchestra] stage stage-0 has no OUTPUT") {
+		t.Errorf("stderr %q", got)
+	}
+	if code := run([]string{"validate", "--offline", "-f", file, "--build-arg", "SOURCE=qemu", "--matrix", "NOPE=a,b"}, &stdout, &stderr); code != 1 || !strings.Contains(stderr.String(), "--matrix NOPE is not declared by any ARG") {
+		t.Errorf("exit %d, stderr %q", code, stderr.String())
+	}
+}
