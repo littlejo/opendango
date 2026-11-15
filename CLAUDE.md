@@ -107,12 +107,12 @@ The cache works per stage: the stages are the layers. It is on by default; `open
 Implemented (standard library `flag` package; move to cobra only if the CLI grows):
 
 ```
-opendango init     [-f Dangofile] [--config=dango.yaml] [--force] [<source>...]
-opendango build    [-f Dangofile] [--config=dango.yaml] [--build-arg K[=V]]... [--build-arg-file=F]... [--target X] [-j N] [--no-cache] [--on-error=abort|keep|ask]
-opendango validate [-f Dangofile] [--config=dango.yaml] [--build-arg K[=V]]... [--build-arg-file=F]... [--offline]
+opendango init     [-f Dangofile] [--config=dango.yaml] [--matrix K=V1,V2]... [--force] [<source>...]
+opendango build    [-f Dangofile] [--config=dango.yaml] [--build-arg K[=V]]... [--build-arg-file=F]... [--matrix K=V1,V2]... [--target X] [-j N] [--no-cache] [--on-error=abort|keep|ask]
+opendango validate [-f Dangofile] [--config=dango.yaml] [--build-arg K[=V]]... [--build-arg-file=F]... [--matrix K=V1,V2]... [--offline]
 opendango fmt      [-f Dangofile] [-w | --check]
 opendango cache prune [--older-than=DURATION] [--dry-run]
-opendango plugin pull [-f Dangofile] [--config=dango.yaml] [--upgrade]
+opendango plugin pull [-f Dangofile] [--config=dango.yaml] [--matrix K=V1,V2]... [--upgrade]
 opendango plugin pull <name|github.com/owner/name>[@version]...
 opendango plugin search <term>
 opendango plugin list
@@ -122,6 +122,8 @@ opendango version
 ```
 
 `--build-arg K` (no `=`) takes the value of the environment variable `K`, and leaves the ARG unset when it is not set, like Docker. `--build-arg-file=F` (repeatable, in order) reads `KEY=VALUE` lines (the value as written, no quote removal), `KEY` alone (the environment), `#` comments and blank lines; `--build-arg` takes precedence (`commonFlags.allBuildArgs`).
+
+`--matrix NAME=V1,V2` (`commonFlags.variants`, repeatable: every combination, the first flag varying slowest; no comma in a value) plans the Dangofile once per value of the build variable `NAME` (`loadPlans`: the file and `dango.yaml` read once; an error names the variant `[NAME=V ...]`). `NAME` must be declared by an ARG and cannot also be a `--build-arg`. The variants share the builtins (one `plan.Builtins` call, passed as build variables). Warnings are printed once when every variant has them, prefixed with the variant otherwise; a `dango.yaml` section one variant uses is not reported unused (`Plan.UnusedSections`, `Plan.UnusedArgs`). `build` runs `build.RunMatrix` (`internal/build/matrix.go`): every variant at the same time, each a `Run` with its own `-j`, its log through a `prefixWriter` (`[NAME=V] `); they share the console, the manifests (one run UUID; each entry gets the variant's values as `custom_data`) and `keyLocks`, which let one stage per cache key run at a time, so a stage that is the same in several variants is built once and found in the cache by the others (`Waiting for the same stage in another variant`). A failed variant does not stop the others; the errors are joined. `checkMatrix` refuses, before anything starts, two variants that write the same `OUTPUT` file (not a manifest), `FETCH` destination or named `OUTPUT --as=template` (plugin settings such as `output_directory` are not checked). `validate` checks every variant, `plugin pull` locks the plugins of all of them, `init` writes the settings of all their root plugins.
 
 `--on-error=ask` needs a terminal on stdin (checked with `golang.org/x/term`; `opendango build` exits with code 2 otherwise). When an instruction fails, it prints the `ssh` command (if the VM was reached and the key is still installed) and asks `[r]` retry the instruction (after a new connection), `[c]` clean up (like `abort`) or `[k]` keep (like `keep`). Failures outside the instructions (start, connection, stop, `OUTPUT`, a later stage's builder) offer only `c` and `k`. End of input and Ctrl+C mean `c`. The returned error is the instruction's, whatever the answer.
 
@@ -223,7 +225,7 @@ The Vates SDK (`xenorchestra-go-sdk`) was evaluated and not used: opendango need
 2. ~~Multi-stage, `--target`, `BREAKPOINT`, `--on-error=ask`, parallel builds (`-j`), `fmt`~~ (done).
 3. ~~`plugin://` compatibility (builders), tested with `vatesfr/packer-plugin-xenserver`, `opendango plugin pull|search|list|rm`, `REBOOT` in plugin:// stages, plugin://xenorchestra at parity with xo:// (table of known builders: OUTPUT, LABEL, multi-stage, cache)~~ (done).
 4. ~~`SERVE`, `BOOT` and `FROM --iso`~~ (done); ~~QEMU in the table of known builders, with a CI job on GitHub runners~~ (done); more builders in the table (Proxmox, AWS, vSphere).
-6. ~~Packer parity for Linux: `DATA`, `dango.lock`, `--build-arg K` / `--build-arg-file`, `RUN --retries/--timeout/--local`, `FETCH`, `PROVISION max_retries/timeout`, `OUTPUT --chain`~~ (done). Not planned yet: WinRM and Windows, HCL functions, a build matrix (one stage, several builders), `-force`, `-debug`, `-machine-readable`.
+6. ~~Packer parity for Linux: `DATA`, `dango.lock`, `--build-arg K` / `--build-arg-file`, `RUN --retries/--timeout/--local`, `FETCH`, `PROVISION max_retries/timeout`, `OUTPUT --chain`~~ (done); ~~build matrix (`--matrix`)~~ (done). Not planned yet: WinRM and Windows, HCL functions, `-force`, `-debug`, `-machine-readable`.
 5. ~~Per-stage cache~~ (done); per-instruction caching based on snapshots, if the need is confirmed.
 
 ## Development rules

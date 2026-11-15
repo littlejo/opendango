@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"maps"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -133,11 +134,41 @@ func readBuildArgFile(path string, into buildArgs) error {
 	return nil
 }
 
+// matrixVar is a --matrix NAME=V1,V2 flag.
+type matrixVar struct {
+	name   string
+	values []string
+}
+
+// matrixFlags collects the repeated --matrix flags, in order.
+type matrixFlags []matrixVar
+
+func (m *matrixFlags) String() string { return "" }
+
+func (m *matrixFlags) Set(s string) error {
+	name, list, ok := strings.Cut(s, "=")
+	if !ok || name == "" {
+		return fmt.Errorf("expected NAME=VALUE1,VALUE2..., got %q", s)
+	}
+	for _, v := range *m {
+		if v.name == name {
+			return fmt.Errorf("--matrix %s is set twice", name)
+		}
+	}
+	values := strings.Split(list, ",")
+	if slices.Contains(values, "") {
+		return fmt.Errorf("--matrix %s: empty value in %q", name, list)
+	}
+	*m = append(*m, matrixVar{name, values})
+	return nil
+}
+
 type commonFlags struct {
 	file          string
 	config        string
 	buildArgs     buildArgs
 	buildArgFiles stringList
+	matrix        matrixFlags
 }
 
 func newFlagSet(name string, stderr io.Writer) (*flag.FlagSet, *commonFlags) {
@@ -148,6 +179,7 @@ func newFlagSet(name string, stderr io.Writer) (*flag.FlagSet, *commonFlags) {
 	fs.Var(c.buildArgs, "build-arg", "set a build variable, KEY=VALUE, or KEY for the environment variable KEY (repeatable)")
 	fs.Var(&c.buildArgFiles, "build-arg-file", "read build variables from a file of KEY=VALUE lines (repeatable; --build-arg takes precedence)")
 	fs.StringVar(&c.config, "config", "", "plugin settings file (default: "+plan.SettingsFile+" next to the Dangofile, when it exists)")
+	fs.Var(&c.matrix, "matrix", "build once per value of a build variable, NAME=VALUE1,VALUE2 (repeatable: every combination)")
 	return fs, c
 }
 
@@ -184,9 +216,60 @@ func loadSettings(c *commonFlags) (*plan.Settings, error) {
 	return plan.LoadSettings(path)
 }
 
-// loadPlan reads the Dangofile and its settings; data runs the DATA
-// instructions (nil: not run).
-func loadPlan(c *commonFlags, data plan.DataFunc) (*plan.Plan, error) {
+// variant is the build variables of a matrix variant.
+type variant struct {
+	name   string
+	values map[string]string
+	args   buildArgs
+}
+
+// variants returns the build variables of every combination of the
+// --matrix values (the first flag varies slowest) over the --build-arg
+// ones. Without --matrix, a single variant without a name. The variants
+// share the builtins (one DANGO_BUILD_ID, one DANGO_TIMESTAMP).
+func (c *commonFlags) variants() ([]variant, error) {
+	args, err := c.allBuildArgs()
+	if err != nil {
+		return nil, err
+	}
+	if len(c.matrix) == 0 {
+		return []variant{{args: args}}, nil
+	}
+	for _, m := range c.matrix {
+		if _, ok := args[m.name]; ok {
+			return nil, fmt.Errorf("%s is set by both --matrix and --build-arg", m.name)
+		}
+	}
+	for name, value := range plan.Builtins(filepath.Dir(c.file)) {
+		if _, ok := args[name]; !ok {
+			args[name] = value
+		}
+	}
+	variants := []variant{{values: map[string]string{}, args: args}}
+	for _, m := range c.matrix {
+		var next []variant
+		for _, v := range variants {
+			for _, value := range m.values {
+				n := variant{name: strings.TrimSpace(v.name + " " + m.name + "=" + value), values: maps.Clone(v.values), args: maps.Clone(v.args)}
+				n.values[m.name] = value
+				n.args[m.name] = value
+				next = append(next, n)
+			}
+		}
+		variants = next
+	}
+	return variants, nil
+}
+
+// loadPlans reads the Dangofile and its settings and returns the plan of
+// every variant; data runs the DATA instructions (nil: not run). It prints
+// the warnings: once when every variant has it, with the variant
+// otherwise. A section of dango.yaml one variant uses is not unused.
+func loadPlans(c *commonFlags, data plan.DataFunc, stderr io.Writer) ([]build.Variant, error) {
+	vs, err := c.variants()
+	if err != nil {
+		return nil, err
+	}
 	f, err := os.Open(c.file)
 	if err != nil {
 		return nil, err
@@ -200,11 +283,54 @@ func loadPlan(c *commonFlags, data plan.DataFunc) (*plan.Plan, error) {
 	if err != nil {
 		return nil, err
 	}
-	args, err := c.allBuildArgs()
-	if err != nil {
-		return nil, err
+	var plans []build.Variant
+	for _, v := range vs {
+		p, err := plan.BuildData(c.file, res, v.args, settings, data)
+		if err != nil {
+			if v.name != "" {
+				err = fmt.Errorf("[%s] %w", v.name, err)
+			}
+			return nil, err
+		}
+		plans = append(plans, build.Variant{Name: v.name, Values: v.values, Plan: p})
 	}
-	return plan.BuildData(c.file, res, args, settings, data)
+	skip := map[string]bool{}
+	unused := map[string]int{}
+	for _, v := range plans {
+		for _, name := range v.Plan.UnusedArgs {
+			if _, ok := v.Values[name]; ok {
+				return nil, fmt.Errorf("--matrix %s is not declared by any ARG", name)
+			}
+		}
+		for _, source := range v.Plan.UnusedSections {
+			unused[source]++
+		}
+	}
+	for source, n := range unused {
+		if n < len(plans) {
+			skip[plan.UnusedSectionWarning(settings.File, source)] = true
+		}
+	}
+	count := map[string]int{}
+	for _, v := range plans {
+		for _, w := range v.Plan.Warnings {
+			count[w]++
+		}
+	}
+	printed := map[string]bool{}
+	for _, v := range plans {
+		for _, w := range v.Plan.Warnings {
+			switch {
+			case skip[w] || printed[w]:
+			case count[w] == len(plans):
+				printed[w] = true
+				fmt.Fprintf(stderr, "warning: %s\n", w)
+			default:
+				fmt.Fprintf(stderr, "warning: [%s] %s\n", v.Name, w)
+			}
+		}
+	}
+	return plans, nil
 }
 
 func cmdValidate(args []string, stdout, stderr io.Writer) int {
@@ -228,23 +354,29 @@ func cmdValidate(args []string, stdout, stderr io.Writer) int {
 		// The data sources read, they create nothing.
 		data = build.Data(context.Background(), filepath.Dir(c.file), stderr, finders.Datasource)
 	}
-	p, err := loadPlan(c, data)
+	variants, err := loadPlans(c, data, stderr)
 	if err != nil {
 		fmt.Fprintln(stderr, err)
 		return 1
 	}
-	for _, w := range p.Warnings {
-		fmt.Fprintf(stderr, "warning: %s\n", w)
-	}
 	if !*offline {
 		// The plugins check their settings (Prepare creates nothing).
-		warnings, err := build.CheckPlugins(context.Background(), p, filepath.Dir(c.file), finders)
-		for _, w := range warnings {
-			fmt.Fprintf(stderr, "warning: %s\n", w)
-		}
-		if err != nil {
-			fmt.Fprintln(stderr, err)
-			return 1
+		warned := map[string]bool{}
+		for _, v := range variants {
+			warnings, err := build.CheckPlugins(context.Background(), v.Plan, filepath.Dir(c.file), finders)
+			for _, w := range warnings {
+				if !warned[w] {
+					warned[w] = true
+					fmt.Fprintf(stderr, "warning: %s\n", w)
+				}
+			}
+			if err != nil {
+				if v.Name != "" {
+					err = fmt.Errorf("[%s] %w", v.Name, err)
+				}
+				fmt.Fprintln(stderr, err)
+				return 1
+			}
 		}
 	}
 	fmt.Fprintf(stdout, "%s is valid\n", c.file)
@@ -255,7 +387,7 @@ func cmdBuild(args []string, stdout, stderr io.Writer) int {
 	fs, c := newFlagSet("build", stderr)
 	onError := fs.String("on-error", "abort", "on failure: abort (destroy the VM and the intermediate templates), keep (leave them for debugging) or ask (retry, clean up or keep, from a terminal)")
 	target := fs.String("target", "", "build only this stage and the stages it starts from")
-	jobs := fs.Int("j", 1, "number of stages built at the same time")
+	jobs := fs.Int("j", 1, "number of stages built at the same time (per variant with --matrix)")
 	noCache := fs.Bool("no-cache", false, "build every stage, without using or filling the cache")
 	if err := fs.Parse(args); err != nil {
 		return 2
@@ -286,13 +418,10 @@ func cmdBuild(args []string, stdout, stderr io.Writer) int {
 	finders := build.NewFinders(lock)
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	p, err := loadPlan(c, build.Data(ctx, filepath.Dir(c.file), stdout, finders.Datasource))
+	variants, err := loadPlans(c, build.Data(ctx, filepath.Dir(c.file), stdout, finders.Datasource), stderr)
 	if err != nil {
 		fmt.Fprintln(stderr, err)
 		return 1
-	}
-	for _, w := range p.Warnings {
-		fmt.Fprintf(stderr, "warning: %s\n", w)
 	}
 
 	opts := build.Options{
@@ -314,7 +443,11 @@ func cmdBuild(args []string, stdout, stderr io.Writer) int {
 		opts.Stdin = os.Stdin
 	}
 
-	err = build.Run(ctx, p, opts)
+	if len(c.matrix) > 0 {
+		err = build.RunMatrix(ctx, variants, opts)
+	} else {
+		err = build.Run(ctx, variants[0].Plan, opts)
+	}
 	if err != nil {
 		if errors.Is(err, context.Canceled) {
 			fmt.Fprintln(stderr, "build interrupted")
@@ -540,10 +673,19 @@ func pluginPullLock(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "opendango plugin pull: give plugin names or flags, not both\n")
 		return 2
 	}
-	p, err := loadPlan(c, nil)
+	variants, err := loadPlans(c, nil, stderr)
 	if err != nil {
 		fmt.Fprintln(stderr, err)
 		return 1
+	}
+	// The plugins of every variant.
+	var sources []string
+	for _, v := range variants {
+		for _, src := range v.Plan.Plugins() {
+			if !slices.Contains(sources, src) {
+				sources = append(sources, src)
+			}
+		}
 	}
 	lock, err := packer.ReadLock(lockPath(c))
 	if err != nil {
@@ -561,7 +703,7 @@ func pluginPullLock(args []string, stdout, stderr io.Writer) int {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	installed := packer.Discover(packer.SearchDirs(), filepath.SplitList(os.Getenv("PATH")))
-	if err := reg.Pull(ctx, lock, p.Plugins(), *upgrade, installed, stdout); err != nil {
+	if err := reg.Pull(ctx, lock, sources, *upgrade, installed, stdout); err != nil {
 		fmt.Fprintf(stderr, "opendango plugin pull: %v\n", err)
 		return 1
 	}
@@ -736,15 +878,17 @@ func cmdInit(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	if len(sources) == 0 {
-		// The plugin:// sources of the Dangofile.
-		p, err := loadPlan(c, nil)
+		// The plugin:// sources of the Dangofile (of every variant).
+		variants, err := loadPlans(c, nil, io.Discard)
 		if err != nil {
 			fmt.Fprintln(stderr, err)
 			return 1
 		}
-		for _, st := range p.Stages {
-			if src := st.From.Source; st.Parent == nil && st.IsPacker() && !slices.Contains(sources, src) {
-				sources = append(sources, src)
+		for _, v := range variants {
+			for _, st := range v.Plan.Stages {
+				if src := st.From.Source; st.Parent == nil && st.IsPacker() && !slices.Contains(sources, src) {
+					sources = append(sources, src)
+				}
 			}
 		}
 		if len(sources) == 0 {

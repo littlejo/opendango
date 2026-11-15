@@ -490,6 +490,49 @@ amazon-ebs:
   failure, no new stage starts and the running ones finish. Independent
   stages may use different plugins.
 
+## Build matrix
+
+`--matrix NAME=VALUE1,VALUE2` builds the Dangofile once per value of the
+build variable `NAME`, at the same time, like the sources of a Packer
+`build` block or the `matrix` of `docker buildx bake`. The same
+instructions make, for instance, a qcow2 image and an AMI:
+
+```dockerfile
+ARG SOURCE
+FROM ${SOURCE} AS debian
+RUN apt-get update && apt-get install -y nginx
+OUTPUT --format=manifest manifest.json
+```
+
+```sh
+opendango build --matrix SOURCE=plugin://qemu,plugin://amazon-ebs
+```
+
+- Each plugin takes its settings from its section of
+  [`dango.yaml`](#plugin-settings-file-dangoyaml), its connection included
+  (`dango.connect`).
+- Several `--matrix` flags build every combination
+  (`--matrix SOURCE=… --matrix DEBIAN=12,13`: four builds). A variable is a
+  build variable like `--build-arg` (declare it with `ARG`), and cannot be
+  set by both. Values cannot contain a comma.
+- The log lines start with the variant (`[SOURCE=plugin://qemu]`). `-j N`
+  applies to each variant.
+- A failed variant does not stop the others; the error names it.
+- The variants share one build: the same `DANGO_BUILD_ID`,
+  `DANGO_TIMESTAMP`… and the manifests, where each build gets its matrix
+  variables as `custom_data`.
+- A stage that is the same in several variants (the same cache key: it does
+  not use the matrix variable) is built once: the other variants wait for it
+  and take it from the cache. With `--no-cache`, each variant builds it.
+- The variants must not write the same files: two variants with the same
+  `OUTPUT` path, `FETCH` destination or `OUTPUT --as=template` name are an
+  error before anything starts (use the variable: `OUTPUT --format=xva
+  ${SOURCE#*://}.xva`). The plugin settings that name an output
+  (`output_directory`, `ami_name`, `vm_name`) are not checked.
+- `validate` checks every variant, `plugin pull` locks the plugins of every
+  variant (give it the same `--matrix`), and `init` writes the settings of
+  all their plugins.
+
 ## Copying from another stage
 
 `COPY --from=<stage>` copies files out of an earlier stage, which can have
@@ -674,6 +717,7 @@ opendango build -f Dangofile --build-arg K=V
 opendango build --build-arg TOKEN --build-arg-file=build.env   # from the environment, from a file
 opendango build --target nginx  # one stage and the stages it starts from
 opendango build -j 4            # up to 4 stages at the same time
+opendango build --matrix SOURCE=plugin://qemu,plugin://amazon-ebs   # one build per value
 opendango build --no-cache      # ignore the cache
 opendango build --on-error=keep # leave the machine in place when the build fails
 opendango build --on-error=ask  # on failure: retry the instruction, clean up or keep

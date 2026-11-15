@@ -106,8 +106,17 @@ type Options struct {
 	// filesDir holds the files fetched for COPY --from during the build
 	// (set by Run).
 	filesDir string
-	// manifests writes the manifest files (set by Run).
+	// manifests writes the manifest files (set by Run, or shared by the
+	// variants of RunMatrix).
 	manifests *manifests
+	// console is the terminal (set by Run, or shared by RunMatrix).
+	console *console
+	// building makes the stages of the same cache key wait for each other
+	// (RunMatrix; nil otherwise).
+	building *keyLocks
+	// matrix are the matrix variables of the variant (RunMatrix), the
+	// custom_data of its manifest entries.
+	matrix map[string]string
 	// Target builds only this stage and its ancestors; every stage when
 	// empty.
 	Target string
@@ -193,15 +202,17 @@ func Run(ctx context.Context, p *plan.Plan, opts Options) (err error) {
 	if opts.FindProvisioner == nil {
 		opts.FindProvisioner = FindProvisioner
 	}
-	opts.manifests = newManifests(p.Builtins[plan.BuildIDVar])
+	if opts.manifests == nil {
+		opts.manifests = newManifests(p.Builtins[plan.BuildIDVar])
+	}
 	if opts.NewBuilder == nil {
 		opts.NewBuilder = func(s *plan.Stage, parent string) (Builder, error) { return NewBuilder(s, parent, opts.Out) }
 	}
 	if opts.Ask && opts.Stdin == nil {
 		return errors.New("--on-error=ask needs a terminal")
 	}
-	var con *console
-	if opts.Stdin != nil {
+	con := opts.console
+	if con == nil && opts.Stdin != nil {
 		con = &console{in: bufio.NewReader(opts.Stdin)}
 	}
 	stages, err := p.Select(opts.Target)
@@ -310,6 +321,16 @@ func Run(ctx context.Context, p *plan.Plan, opts Options) (err error) {
 				from[src.Name()] = done[src].fetchRoot
 			}
 			go func(parent *executor) {
+				// The same stage in another variant of the matrix: once it
+				// is built, this one finds it in the cache.
+				release, err := opts.building.lock(ctx, key, func() {
+					fmt.Fprintf(opts.Out, "==> %s: Waiting for the same stage in another variant\n", s.Name())
+				})
+				if err != nil {
+					results <- result{s, nil, err}
+					return
+				}
+				defer release()
 				e, err := runStage(ctx, p, s, parent, needed, key, from, con, opts)
 				results <- result{s, e, err}
 			}(done[s.Parent])

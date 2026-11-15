@@ -30,6 +30,21 @@ type Plan struct {
 	Builtins map[string]string
 	// Data are the DATA instructions, in file order.
 	Data []*instructions.Data
+	// UnusedSections are the sections of dango.yaml no stage uses, and
+	// UnusedArgs the build variables no ARG declares (both warned about).
+	UnusedSections []string
+	UnusedArgs     []string
+}
+
+// UnusedSectionWarning is the warning about a section of the settings file
+// no stage uses.
+func UnusedSectionWarning(file, source string) string {
+	return fmt.Sprintf("%s: no stage uses plugin://%s", file, source)
+}
+
+// UnusedArgWarning is the warning about a build variable no ARG declares.
+func UnusedArgWarning(name string) string {
+	return fmt.Sprintf("--build-arg %s is not declared by any ARG", name)
 }
 
 // Stage is everything between a FROM and the next FROM (or the end of the
@@ -784,8 +799,9 @@ func BuildData(file string, res *parser.Result, buildArgs map[string]string, set
 			}
 		}
 		sort.Strings(sources)
+		p.UnusedSections = sources
 		for _, source := range sources {
-			p.Warnings = append(p.Warnings, fmt.Sprintf("%s: no stage uses plugin://%s", settings.File, source))
+			p.Warnings = append(p.Warnings, UnusedSectionWarning(settings.File, source))
 		}
 	}
 	var unused []string
@@ -795,8 +811,9 @@ func BuildData(file string, res *parser.Result, buildArgs map[string]string, set
 		}
 	}
 	sort.Strings(unused)
+	p.UnusedArgs = unused
 	for _, name := range unused {
-		p.Warnings = append(p.Warnings, fmt.Sprintf("--build-arg %s is not declared by any ARG", name))
+		p.Warnings = append(p.Warnings, UnusedArgWarning(name))
 	}
 	return p, nil
 }

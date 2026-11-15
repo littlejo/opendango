@@ -428,6 +428,13 @@ func newManifests(runUUID string) *manifests {
 
 func manifestBuild(stage *plan.Stage, m made, opts Options) manifestEntry {
 	entry := manifestEntry{Name: stage.Name(), BuilderType: m.BuilderType, BuildTime: time.Now().Unix(), ArtifactID: m.ID, Files: []manifestFiles{}}
+	// The variables of a matrix variant tell its builds apart.
+	if len(opts.matrix) > 0 {
+		entry.CustomData = map[string]any{}
+		for k, v := range opts.matrix {
+			entry.CustomData[k] = v
+		}
+	}
 	for _, f := range m.Files {
 		name := f
 		if rel, err := filepath.Rel(opts.ContextDir, f); err == nil && !strings.HasPrefix(rel, "..") {
